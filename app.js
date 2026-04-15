@@ -5,7 +5,7 @@
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
-  const timeslipDiv = document.getElementById('timeslipDiv');
+  const plotlyConfig = {responsive:true, displaylogo:false};
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
@@ -264,16 +264,42 @@
     // collect lap numbers across selected files
     const sel = getSelectedFiles();
     const lapSet = new Set();
+    const lapDurations = new Map();
     sel.forEach(l => {
-      if (l.meta && l.meta.lapNum) l.meta.lapNum.forEach(n => lapSet.add(n));
+      if (l.meta && l.meta.lapNum) {
+        l.meta.lapNum.forEach(n => lapSet.add(n));
+        const perLapMax = new Map();
+        l.meta.lapNum.forEach((n, i) => {
+          const lt = l.meta.lapTime && l.meta.lapTime[i];
+          if (lt == null || isNaN(lt)) return;
+          perLapMax.set(n, Math.max(perLapMax.get(n) || 0, lt));
+        });
+        perLapMax.forEach((duration, lap) => {
+          // If multiple files are selected, show the best observed lap time for each lap number.
+          if (!lapDurations.has(lap) || duration < lapDurations.get(lap)) {
+            lapDurations.set(lap, duration);
+          }
+        });
+      }
     });
     const laps = Array.from(lapSet).sort((a,b)=>a-b);
     if (laps.length === 0) { container.innerHTML = ''; return; }
+
+    function formatLapTime(seconds) {
+      if (seconds == null || !isFinite(seconds)) return '--:--.---';
+      const totalMs = Math.max(0, Math.round(seconds * 1000));
+      const mins = Math.floor(totalMs / 60000);
+      const secs = Math.floor((totalMs % 60000) / 1000);
+      const ms = totalMs % 1000;
+      return `${mins}:${String(secs).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
+    }
+
     // render as vertical list with colored checkboxes
     const html = ['<strong>Laps:</strong>', '<div class="laps-col">'];
     laps.forEach(n => {
       const color = COLORS[(n-1) % COLORS.length];
-      html.push(`<label class="lap-item"><input type="checkbox" data-lap="${n}" checked style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">Lap ${n}</span></label>`);
+      const lapLabel = `${n} - ${formatLapTime(lapDurations.get(n))}`;
+      html.push(`<label class="lap-item"><input type="checkbox" data-lap="${n}" checked style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
     });
     html.push('</div>');
     container.innerHTML = html.join('');
@@ -297,64 +323,193 @@
     return Array.from(ySelect.selectedOptions).map(o=>o.value);
   }
 
+  // Linear interpolation over a sorted X array.
+  function interpAt(xArr, yArr, x) {
+    if (!xArr || xArr.length === 0) return null;
+    if (x <= xArr[0]) return (yArr[0] != null ? yArr[0] : null);
+    if (x >= xArr[xArr.length-1]) return (yArr[yArr.length-1] != null ? yArr[yArr.length-1] : null);
+
+    let lo = 0, hi = xArr.length - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi)/2);
+      if (xArr[mid] <= x) lo = mid; else hi = mid;
+    }
+
+    const x0 = xArr[lo], x1 = xArr[hi];
+    const y0 = yArr[lo], y1 = yArr[hi];
+    if (y0 == null || y1 == null) return null;
+    if (x1 === x0) return y0;
+    const t = (x - x0) / (x1 - x0);
+    return y0 + t * (y1 - y0);
+  }
+
+  function buildTimeSlipTraces(selFiles, selectedLaps, xMode) {
+    // Time slip is defined only against distance while split by lap.
+    if (xMode !== 'distance') {
+      return [];
+    }
+
+    const lapSeries = [];
+    selFiles.forEach((log) => {
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      lapNums.forEach((lap) => {
+        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
+        const tArr = maskIdx.map(i => log.meta.lapTime[i]);
+        if (xArr.length > 1) lapSeries.push({file: log.name, lap, x: xArr, t: tArr});
+      });
+    });
+
+    if (lapSeries.length < 2) {
+      return [];
+    }
+
+    const xSet = new Set();
+    lapSeries.forEach(s => s.x.forEach(v => xSet.add(v)));
+    const grid = Array.from(xSet).sort((a,b)=>a-b);
+    if (grid.length < 2) {
+      return [];
+    }
+
+    const timeAt = lapSeries.map(s => grid.map(g => interpAt(s.x, s.t, g)));
+    const fastest = grid.map((_, gi) => {
+      const vals = timeAt.map(arr => arr[gi]).filter(v => v != null && !isNaN(v));
+      if (vals.length === 0) return null;
+      return Math.min(...vals);
+    });
+
+    const tsTraces = [];
+    for (let si = 0; si < lapSeries.length; si++) {
+      const s = lapSeries[si];
+      const deltas = timeAt[si].map((v, gi) => (v == null || fastest[gi] == null) ? null : (v - fastest[gi]));
+      if (deltas.every(v => v == null || isNaN(v))) continue;
+      const color = COLORS[(s.lap-1) % COLORS.length];
+      tsTraces.push({x: grid, y: deltas, xaxis:'x2', yaxis:'y2', name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
+    }
+
+    return tsTraces;
+  }
+
+  function buildChannelAxisConfig(ycols, mainDomain) {
+    const channelToRef = new Map();
+    const axisLayout = {};
+
+    if (!ycols || ycols.length === 0) {
+      axisLayout.yaxis = {title:'Value', domain: mainDomain, automargin:true};
+      return {channelToRef, axisLayout, marginLeft: 80, marginRight: 80};
+    }
+
+    // Primary Y axis
+    channelToRef.set(ycols[0], 'y');
+    axisLayout.yaxis = {title:ycols[0], domain: mainDomain, automargin:true};
+
+    // Additional overlaid Y axes (skip y2, reserved for time slip subplot)
+    let leftExtraCount = 0;
+    let rightExtraCount = 0;
+
+    for (let i = 1; i < ycols.length; i++) {
+      const channel = ycols[i];
+      const axisNumber = i + 2; // i=1 -> y3
+      const axisRef = `y${axisNumber}`;
+      const axisKey = `yaxis${axisNumber}`;
+      const side = (i % 2 === 1) ? 'right' : 'left';
+
+      let position;
+      if (side === 'right') {
+        position = Math.max(0.62, 1 - rightExtraCount * 0.06);
+        rightExtraCount += 1;
+      } else {
+        leftExtraCount += 1;
+        position = Math.min(0.38, leftExtraCount * 0.06);
+      }
+
+      channelToRef.set(channel, axisRef);
+      axisLayout[axisKey] = {
+        title: channel,
+        domain: mainDomain,
+        overlaying: 'y',
+        anchor: 'free',
+        side,
+        position,
+        automargin: true
+      };
+    }
+
+    const marginLeft = 80 + leftExtraCount * 40;
+    const marginRight = 80 + rightExtraCount * 40;
+    return {channelToRef, axisLayout, marginLeft, marginRight};
+  }
+
+  function buildLayout(mainXTitle, ycols, includeTimeSlip) {
+    const mainDomain = includeTimeSlip ? [0.16,1] : [0,1];
+    const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
+
+    if (!includeTimeSlip) {
+      const layout = {
+        margin:{t:30},
+        xaxis:{title: mainXTitle},
+        legend:{orientation:'h'},
+        height: 640
+      };
+      layout.margin.l = axisCfg.marginLeft;
+      layout.margin.r = axisCfg.marginRight;
+      Object.assign(layout, axisCfg.axisLayout);
+      return {layout, channelToRef: axisCfg.channelToRef};
+    }
+
+    const layout = {
+      margin:{t:30},
+      xaxis:{title: mainXTitle, domain:[0,1], anchor:'y'},
+      xaxis2:{title:'Lap Distance (m)', domain:[0,1], anchor:'y2', matches:'x'},
+      yaxis2:{title:'Time Slip (s)', domain:[0,0.12]},
+      legend:{orientation:'h'},
+      height: 860
+    };
+    layout.margin.l = axisCfg.marginLeft;
+    layout.margin.r = axisCfg.marginRight;
+    Object.assign(layout, axisCfg.axisLayout);
+    return {layout, channelToRef: axisCfg.channelToRef};
+  }
+
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const ycols = getSelectedY();
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
-    const plotByLap = document.getElementById('plotByLap') && document.getElementById('plotByLap').checked;
+    const plotByLap = true;
     const selectedLaps = getSelectedLaps();
+    const singleLapSelected = selectedLaps.size === 1;
+    const channelColors = new Map(ycols.map((y, i) => [y, COLORS[i % COLORS.length]]));
+    const mainXTitle = xMode === 'distance' ? 'Lap Distance (m)' : 'Lap Time (s)';
+    const tsPreview = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
+    const includeTimeSlip = tsPreview.length > 0;
+    const built = buildLayout(mainXTitle, ycols, includeTimeSlip);
+    const layout = built.layout;
+    const channelToRef = built.channelToRef;
     let traces = [];
 
     // optionally compute shading envelope when plotting by lap
     const shadeLaps = document.getElementById('shadeLaps') && document.getElementById('shadeLaps').checked;
 
-    // helper: linear interpolation
-    function interpAt(xArr, yArr, x) {
-      if (!xArr || xArr.length === 0) return null;
-      // assume xArr sorted
-      if (x <= xArr[0]) return (yArr[0] != null ? yArr[0] : null);
-      if (x >= xArr[xArr.length-1]) return (yArr[yArr.length-1] != null ? yArr[yArr.length-1] : null);
-      // find interval
-      let lo = 0, hi = xArr.length - 1;
-      while (hi - lo > 1) {
-        const mid = Math.floor((lo + hi)/2);
-        if (xArr[mid] <= x) lo = mid; else hi = mid;
-      }
-      const x0 = xArr[lo], x1 = xArr[hi];
-      const y0 = yArr[lo], y1 = yArr[hi];
-      if (y0 == null || y1 == null) return null;
-      if (x1 === x0) return y0;
-      const t = (x - x0) / (x1 - x0);
-      return y0 + t * (y1 - y0);
-    }
-
     selFiles.forEach((log, li) => {
       const fileColor = COLORS[li % COLORS.length];
-      if (plotByLap) {
-        // plot each selected lap separately, x axis is Lap Time
-        const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
-        lapNums.forEach((lap, idx) => {
-          if (selectedLaps.size && !selectedLaps.has(lap)) return;
-          const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-          ycols.forEach(y => {
-            const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
-            const yArr = maskIdx.map(i => log.data[i][y]);
-            const lapColor = COLORS[(lap-1) % COLORS.length];
-            const dash = DASHES[li % DASHES.length];
-            traces.push({x: xArr, y: yArr, name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: lapColor}, line:{color: lapColor, dash}});
-          });
-        });
-      } else {
-        const xArr = xMode === 'time' ? (log.meta._time || log.data.map((_,i)=>i)) : (log.meta._dist || log.data.map((_,i)=>i));
+      // plot each selected lap separately, x axis is Lap Time or Lap Distance
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      lapNums.forEach((lap) => {
+        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         ycols.forEach(y => {
-          const yArr = log.data.map(r => r[y]);
-          traces.push({x: xArr, y: yArr, name: `${log.name} — ${y}`, mode: 'lines', hoverinfo: 'x+y+name', line:{color: fileColor}, marker:{color: fileColor}});
+          const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
+          const yArr = maskIdx.map(i => log.data[i][y]);
+          const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : COLORS[(lap-1) % COLORS.length];
+          const dash = DASHES[li % DASHES.length];
+          traces.push({x: xArr, y: yArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
         });
-      }
+      });
     });
 
     // if shading requested and plotting by lap, compute envelope per Y channel
-    if (plotByLap && shadeLaps && ycols.length>0) {
+    if (shadeLaps && ycols.length>0) {
       // for each y channel compute global union x grid across all selected files/laps
       ycols.forEach(y => {
         const allLapSeries = [];
@@ -383,21 +538,15 @@
         }
         // create filled traces: place min first, then max with fill='tonexty' to fill between
         const shadeColor = 'rgba(100,100,100,0.2)';
-        const minTrace = {x: grid, y: minY, name: `Min ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'none', showlegend:false, hoverinfo:'skip'};
-        const maxTrace = {x: grid, y: maxY, name: `Max ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'tonexty', fillcolor: shadeColor, showlegend:false, hoverinfo:'skip'};
+        const axisRef = channelToRef.get(y) || 'y';
+        const minTrace = {x: grid, y: minY, yaxis: axisRef, name: `Min ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'none', showlegend:false, hoverinfo:'skip'};
+        const maxTrace = {x: grid, y: maxY, yaxis: axisRef, name: `Max ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'tonexty', fillcolor: shadeColor, showlegend:false, hoverinfo:'skip'};
         // put shading below all other traces
         traces = [minTrace, maxTrace].concat(traces);
       });
     }
 
-    const layout = {
-      margin:{t:30},
-      xaxis:{title: plotByLap ? (xMode === 'distance' ? 'Lap Distance (m)' : 'Lap Time (s)') : (xMode === 'time' ? 'Time' : 'Distance (m)')},
-      yaxis:{title: ycols.length===1? ycols[0] : 'Value'},
-      legend:{orientation:'h'}
-    };
-
-    Plotly.react(plotDiv, traces, layout, {responsive:true});
+    Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
   }
 
   // event handlers
@@ -410,10 +559,9 @@
   // replot when X axis mode changes
   const xRadios = document.querySelectorAll('input[name=xaxis]');
   xRadios.forEach(r=> r.addEventListener('change', ()=> updatePlot()));
-  const plotByLapBox = document.getElementById('plotByLap');
-  if (plotByLapBox) plotByLapBox.addEventListener('change', ()=> updatePlot());
   const shadeBox = document.getElementById('shadeLaps');
   if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
+  ySelect.addEventListener('change', ()=> updatePlot());
 
   filesList.addEventListener('click', (ev)=>{
     if (ev.target.matches('button[data-remove]')) {
@@ -443,90 +591,45 @@
     updatePlot();
   });
 
+  function renderXYPlot(showAlertIfMissing = false) {
+    const xcol = document.getElementById('xColSelect').value;
+    const ycol = document.getElementById('xyYColSelect').value;
+    if (!xcol || !ycol) {
+      if (showAlertIfMissing) alert('Select both X and Y columns');
+      return;
+    }
+
+    const selFiles = getSelectedFiles();
+    const traces = [];
+    const plotByLap = true;
+    const selectedLaps = getSelectedLaps();
+    selFiles.forEach((log, idx) => {
+      if (!log.cols.includes(xcol) || !log.cols.includes(ycol)) return;
+      const fileColor = COLORS[idx % COLORS.length];
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      lapNums.forEach((lap) => {
+        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        const xArr = maskIdx.map(i => log.data[i][xcol]);
+        const yArr = maskIdx.map(i => log.data[i][ycol]);
+        const color = COLORS[(lap-1) % COLORS.length];
+        const dash = DASHES[idx % DASHES.length];
+        traces.push({x: xArr, y: yArr, name: `${log.name} — Lap ${lap} — ${ycol} vs ${xcol}`, mode: 'lines+markers', line:{color, dash}, marker:{color}});
+      });
+    });
+    const built = buildLayout(xcol, [ycol], false);
+    Plotly.react(plotDiv, traces, built.layout, plotlyConfig);
+  }
+
+  const xColSelect = document.getElementById('xColSelect');
+  const xyYColSelect = document.getElementById('xyYColSelect');
+  if (xColSelect) xColSelect.addEventListener('change', ()=> renderXYPlot(false));
+  if (xyYColSelect) xyYColSelect.addEventListener('change', ()=> renderXYPlot(false));
+
   const plotXYBtn = document.getElementById('plotXYBtn');
   if (plotXYBtn) {
     plotXYBtn.addEventListener('click', ()=>{
-      const xcol = document.getElementById('xColSelect').value;
-      const ycol = document.getElementById('xyYColSelect').value;
-      if (!xcol || !ycol) return alert('Select both X and Y columns');
-      const selFiles = getSelectedFiles();
-      const traces = [];
-      const plotByLap = document.getElementById('plotByLap') && document.getElementById('plotByLap').checked;
-      const selectedLaps = getSelectedLaps();
-      selFiles.forEach((log, idx) => {
-        if (!log.cols.includes(xcol) || !log.cols.includes(ycol)) return;
-        const fileColor = COLORS[idx % COLORS.length];
-        if (plotByLap) {
-          const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
-          lapNums.forEach((lap) => {
-            if (selectedLaps.size && !selectedLaps.has(lap)) return;
-            const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-            const xArr = maskIdx.map(i => log.data[i][xcol]);
-            const yArr = maskIdx.map(i => log.data[i][ycol]);
-            const color = COLORS[(lap-1) % COLORS.length];
-            const dash = DASHES[idx % DASHES.length];
-            traces.push({x: xArr, y: yArr, name: `${log.name} — Lap ${lap} — ${ycol} vs ${xcol}`, mode: 'lines+markers', line:{color, dash}, marker:{color}});
-          });
-        } else {
-          const xArr = log.data.map(r => r[xcol]);
-          const yArr = log.data.map(r => r[ycol]);
-          traces.push({x: xArr, y: yArr, name: `${log.name} — ${ycol} vs ${xcol}`, mode: 'lines+markers', hoverinfo: 'x+y+name', line:{color: fileColor}, marker:{color: fileColor}});
-        }
-      });
-      const layout = {margin:{t:30}, xaxis:{title: xcol}, yaxis:{title: ycol}, legend:{orientation:'h'}};
-      Plotly.react(plotDiv, traces, layout, {responsive:true});
-
-      // Time Slip plot: only meaningful when X axis is distance and plotting by lap
-      if (timeslipDiv) {
-        if (xMode === 'distance' && plotByLap) {
-          // build lap time series: each series has x=lapRelDist, t=lapTime
-          const lapSeries = [];
-          selFiles.forEach((log, li) => {
-            const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
-            lapNums.forEach(lap => {
-              if (selectedLaps.size && !selectedLaps.has(lap)) return;
-              const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-              const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
-              const tArr = maskIdx.map(i => log.meta.lapTime[i]);
-              if (xArr.length>0) lapSeries.push({file: log.name, lap, x: xArr, t: tArr});
-            });
-          });
-          if (lapSeries.length === 0) {
-            Plotly.purge(timeslipDiv);
-          } else {
-            // union grid of distances
-            const xSet = new Set();
-            lapSeries.forEach(s => s.x.forEach(v=> xSet.add(v)));
-            const grid = Array.from(xSet).sort((a,b)=>a-b);
-
-            // compute times at grid for each lap using interpAt
-            const timeAt = lapSeries.map(s => grid.map(g => interpAt(s.x, s.t, g)));
-            // compute fastest (min) time per grid point
-            const fastest = grid.map((_, gi) => {
-              const vals = timeAt.map(arr => arr[gi]).filter(v => v != null && !isNaN(v));
-              if (vals.length === 0) return null;
-              return Math.min(...vals);
-            });
-
-            // build traces: for each lap, delta = time - fastest
-            const tsTraces = [];
-            for (let si=0; si<lapSeries.length; si++) {
-              const s = lapSeries[si];
-              const deltas = timeAt[si].map((v, gi) => (v == null || fastest[gi] == null) ? null : (v - fastest[gi]));
-              // skip series with all nulls
-              if (deltas.every(v => v == null || isNaN(v))) continue;
-              const color = COLORS[(s.lap-1) % COLORS.length];
-              tsTraces.push({x: grid, y: deltas, name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
-            }
-
-            const tsLayout = {margin:{t:20}, xaxis:{title:'Lap Distance (m)'}, yaxis:{title:'Time Slip (s)'}, legend:{orientation:'h'}};
-            Plotly.react(timeslipDiv, tsTraces, tsLayout, {responsive:true});
-          }
-          } else {
-            // clear timeslip plot if not applicable
-            Plotly.purge(timeslipDiv);
-          }
-    }
+      renderXYPlot(true);
     });
   }
 

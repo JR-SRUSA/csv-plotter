@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>GP Bikes CSV Plotter</title>
+  <title>GP Bikes Logged Data Plotter</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script>
+  <!-- <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script> -->
+  <script src="lib/plotly-custom.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 </head>
 <body>
   <header>
-    <h1>GP Bikes CSV Plotter</h1>
-    <p>Upload one or more CSV logs and plot channels using Plotly.</p>
+    <h1>GP Bikes Logged Data Plotter</h1>
+    <p>Upload one or more CSV logs and plot channels.</p>
   </header>
 
   <main>
@@ -23,18 +24,15 @@
       <div id="filesList" class="files-list"></div>
       <div id="lapsList" class="files-list" style="margin-top:8px"></div>
 
-      <div style="margin-top:8px">
-        <label><input type="checkbox" id="plotByLap" checked /> Plot traces split by lap</label>
-      </div>
       <div style="margin-top:6px">
-        <label><input type="checkbox" id="shadeLaps" /> Shaded area between all laps</label>
+        <label><input type="checkbox" id="shadeLaps" checked /> Shaded area between all laps</label>
       </div>
 
       <div class="axis-controls">
         <div>
           <strong>X Axis:</strong>
-          <label><input type="radio" name="xaxis" value="time" checked /> Time</label>
-          <label><input type="radio" name="xaxis" value="distance" /> Distance</label>
+          <label><input type="radio" name="xaxis" value="time" /> Time</label>
+          <label><input type="radio" name="xaxis" value="distance" checked /> Distance</label>
         </div>
 
         <div>
@@ -62,7 +60,6 @@
 
     <section class="plot">
       <div id="plotDiv"></div>
-      <div id="timeslipDiv" style="margin-top:8px; height:240px;"></div>
     </section>
   </main>
 

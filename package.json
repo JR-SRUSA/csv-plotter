@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "install-plotly-basic": "npm install plotly.js-basic-dist --no-audit --no-fund && node scripts/copy-plotly-basic.js",
-    "build-plotly-custom": "npm install plotly.js browserify terser --no-audit --no-fund && node scripts/build-plotly-custom.js"
+    "build": "npm run build-plotly-custom",
+    "build:prod": "npm install --no-audit --no-fund && node scripts/build-production.js",
+    "build:esp32": "npm install --no-audit --no-fund && node scripts/build-production.js --gzip-only",
+    "build-plotly-custom": "npm install --no-audit --no-fund && node scripts/build-plotly-custom.js",
+    "serve:esp32-test": "python scripts/serve-dist-gzip.py --directory dist --port 8000"
+  },
+  "dependencies": {
+    "papaparse": "^5.5.3",
+    "plotly.js-basic-dist": "^3.5.0",
+    "terser": "^5.46.1"
   }
 }
