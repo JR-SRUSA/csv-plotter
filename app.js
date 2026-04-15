@@ -302,7 +302,30 @@
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const plotByLap = document.getElementById('plotByLap') && document.getElementById('plotByLap').checked;
     const selectedLaps = getSelectedLaps();
-    const traces = [];
+    let traces = [];
+
+    // optionally compute shading envelope when plotting by lap
+    const shadeLaps = document.getElementById('shadeLaps') && document.getElementById('shadeLaps').checked;
+
+    // helper: linear interpolation
+    function interpAt(xArr, yArr, x) {
+      if (!xArr || xArr.length === 0) return null;
+      // assume xArr sorted
+      if (x <= xArr[0]) return (yArr[0] != null ? yArr[0] : null);
+      if (x >= xArr[xArr.length-1]) return (yArr[yArr.length-1] != null ? yArr[yArr.length-1] : null);
+      // find interval
+      let lo = 0, hi = xArr.length - 1;
+      while (hi - lo > 1) {
+        const mid = Math.floor((lo + hi)/2);
+        if (xArr[mid] <= x) lo = mid; else hi = mid;
+      }
+      const x0 = xArr[lo], x1 = xArr[hi];
+      const y0 = yArr[lo], y1 = yArr[hi];
+      if (y0 == null || y1 == null) return null;
+      if (x1 === x0) return y0;
+      const t = (x - x0) / (x1 - x0);
+      return y0 + t * (y1 - y0);
+    }
 
     selFiles.forEach((log, li) => {
       const fileColor = COLORS[li % COLORS.length];
@@ -329,9 +352,46 @@
       }
     });
 
+    // if shading requested and plotting by lap, compute envelope per Y channel
+    if (plotByLap && shadeLaps && ycols.length>0) {
+      // for each y channel compute global union x grid across all selected files/laps
+      ycols.forEach(y => {
+        const allLapSeries = [];
+        selFiles.forEach((log, li) => {
+          const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+          lapNums.forEach(lap => {
+            if (selectedLaps.size && !selectedLaps.has(lap)) return;
+            const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+            const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
+            const yArr = maskIdx.map(i => log.data[i][y]);
+            if (xArr.length>0) allLapSeries.push({x:xArr, y:yArr});
+          });
+        });
+        if (allLapSeries.length === 0) return;
+        // build union x grid
+        const xSet = new Set();
+        allLapSeries.forEach(s => s.x.forEach(v=> xSet.add(v)));
+        const grid = Array.from(xSet).sort((a,b)=>a-b);
+        // compute min/max per grid point using interpolation
+        const minY = []; const maxY = [];
+        for (const gx of grid) {
+          const vals = allLapSeries.map(s => interpAt(s.x, s.y, gx)).filter(v => v != null && !isNaN(v));
+          if (vals.length === 0) { minY.push(null); maxY.push(null); continue; }
+          const mn = Math.min(...vals); const mx = Math.max(...vals);
+          minY.push(mn); maxY.push(mx);
+        }
+        // create filled traces: place min first, then max with fill='tonexty' to fill between
+        const shadeColor = 'rgba(100,100,100,0.2)';
+        const minTrace = {x: grid, y: minY, name: `Min ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'none', showlegend:false, hoverinfo:'skip'};
+        const maxTrace = {x: grid, y: maxY, name: `Max ${y}`, mode: 'lines', line:{color: shadeColor, width:0}, fill:'tonexty', fillcolor: shadeColor, showlegend:false, hoverinfo:'skip'};
+        // put shading below all other traces
+        traces = [minTrace, maxTrace].concat(traces);
+      });
+    }
+
     const layout = {
       margin:{t:30},
-      xaxis:{title: plotByLap ? 'Lap Time (s)' : (xMode === 'time' ? 'Time' : 'Distance (m)')},
+      xaxis:{title: plotByLap ? (xMode === 'distance' ? 'Lap Distance (m)' : 'Lap Time (s)') : (xMode === 'time' ? 'Time' : 'Distance (m)')},
       yaxis:{title: ycols.length===1? ycols[0] : 'Value'},
       legend:{orientation:'h'}
     };
@@ -349,6 +409,10 @@
   // replot when X axis mode changes
   const xRadios = document.querySelectorAll('input[name=xaxis]');
   xRadios.forEach(r=> r.addEventListener('change', ()=> updatePlot()));
+  const plotByLapBox = document.getElementById('plotByLap');
+  if (plotByLapBox) plotByLapBox.addEventListener('change', ()=> updatePlot());
+  const shadeBox = document.getElementById('shadeLaps');
+  if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
 
   filesList.addEventListener('click', (ev)=>{
     if (ev.target.matches('button[data-remove]')) {

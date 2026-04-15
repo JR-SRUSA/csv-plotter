@@ -1,0 +1,9 @@
+{
+  "name": "gpbikes-plotter",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "install-plotly-basic": "npm install plotly.js-basic-dist --no-audit --no-fund && node scripts/copy-plotly-basic.js",
+    "build-plotly-custom": "npm install plotly.js browserify terser --no-audit --no-fund && node scripts/build-plotly-custom.js"
+  }
+}
