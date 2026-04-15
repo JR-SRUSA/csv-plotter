@@ -1,0 +1,24 @@
+/lib/
+*.log
+.DS_Store
+Thumbs.db
+*.env
+*.local
+
+# Build artifacts
+build/
+dist/
+
+# Node modules (if any are installed inside plotter/ during testing)
+node_modules/
+
+# Editor directories
+.vscode/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Packed plotly files
+plotly-*.min.js
+plotly.*.min.js
