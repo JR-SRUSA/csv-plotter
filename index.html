@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GP Bikes CSV Plotter</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>GP Bikes CSV Plotter</h1>
+    <p>Upload one or more CSV logs and plot channels using Plotly.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <label class="file-label">Select CSV files
+        <input id="fileInput" type="file" accept="text/csv" multiple />
+      </label>
+
+      <div id="filesList" class="files-list"></div>
+      <div id="lapsList" class="files-list" style="margin-top:8px"></div>
+
+      <div style="margin-top:8px">
+        <label><input type="checkbox" id="plotByLap" checked /> Plot traces split by lap</label>
+      </div>
+
+      <div class="axis-controls">
+        <div>
+          <strong>X Axis:</strong>
+          <label><input type="radio" name="xaxis" value="time" checked /> Time</label>
+          <label><input type="radio" name="xaxis" value="distance" /> Distance</label>
+        </div>
+
+        <div>
+          <strong>Y Channels:</strong>
+          <select id="ySelect" multiple size="6"></select>
+        </div>
+
+        <div class="xy-controls">
+          <strong>XY Plot:</strong>
+          <div class="xy-row">
+            <label>X: <select id="xColSelect"></select></label>
+            <label>Y: <select id="xyYColSelect"></select></label>
+          </div>
+          <div style="margin-top:6px">
+            <button id="plotXYBtn">Plot X vs Y</button>
+          </div>
+        </div>
+
+        <div>
+          <button id="plotBtn">Plot Selected</button>
+          <button id="clearBtn">Clear All</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="plot">
+      <div id="plotDiv"></div>
+    </section>
+  </main>
+
+  <footer>
+    <small>Supports CSVs with headers. Detects `Time`/`Timestamp` and `Distance` columns. Computes distance if `lat`/`lon` present.</small>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
