@@ -5,6 +5,7 @@
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
+  const timeslipDiv = document.getElementById('timeslipDiv');
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
@@ -474,6 +475,58 @@
       });
       const layout = {margin:{t:30}, xaxis:{title: xcol}, yaxis:{title: ycol}, legend:{orientation:'h'}};
       Plotly.react(plotDiv, traces, layout, {responsive:true});
+
+      // Time Slip plot: only meaningful when X axis is distance and plotting by lap
+      if (timeslipDiv) {
+        if (xMode === 'distance' && plotByLap) {
+          // build lap time series: each series has x=lapRelDist, t=lapTime
+          const lapSeries = [];
+          selFiles.forEach((log, li) => {
+            const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+            lapNums.forEach(lap => {
+              if (selectedLaps.size && !selectedLaps.has(lap)) return;
+              const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+              const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
+              const tArr = maskIdx.map(i => log.meta.lapTime[i]);
+              if (xArr.length>0) lapSeries.push({file: log.name, lap, x: xArr, t: tArr});
+            });
+          });
+          if (lapSeries.length === 0) {
+            Plotly.purge(timeslipDiv);
+          } else {
+            // union grid of distances
+            const xSet = new Set();
+            lapSeries.forEach(s => s.x.forEach(v=> xSet.add(v)));
+            const grid = Array.from(xSet).sort((a,b)=>a-b);
+
+            // compute times at grid for each lap using interpAt
+            const timeAt = lapSeries.map(s => grid.map(g => interpAt(s.x, s.t, g)));
+            // compute fastest (min) time per grid point
+            const fastest = grid.map((_, gi) => {
+              const vals = timeAt.map(arr => arr[gi]).filter(v => v != null && !isNaN(v));
+              if (vals.length === 0) return null;
+              return Math.min(...vals);
+            });
+
+            // build traces: for each lap, delta = time - fastest
+            const tsTraces = [];
+            for (let si=0; si<lapSeries.length; si++) {
+              const s = lapSeries[si];
+              const deltas = timeAt[si].map((v, gi) => (v == null || fastest[gi] == null) ? null : (v - fastest[gi]));
+              // skip series with all nulls
+              if (deltas.every(v => v == null || isNaN(v))) continue;
+              const color = COLORS[(s.lap-1) % COLORS.length];
+              tsTraces.push({x: grid, y: deltas, name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
+            }
+
+            const tsLayout = {margin:{t:20}, xaxis:{title:'Lap Distance (m)'}, yaxis:{title:'Time Slip (s)'}, legend:{orientation:'h'}};
+            Plotly.react(timeslipDiv, tsTraces, tsLayout, {responsive:true});
+          }
+          } else {
+            // clear timeslip plot if not applicable
+            Plotly.purge(timeslipDiv);
+          }
+    }
     });
   }
 
