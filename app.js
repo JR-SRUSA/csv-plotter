@@ -5,11 +5,47 @@
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
+  const controlsToggle = document.getElementById('controlsToggle');
+  const controlsClose = document.getElementById('controlsClose');
+  const controlsBackdrop = document.getElementById('controlsBackdrop');
   const plotlyConfig = {responsive:true, displaylogo:false};
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
+
+  function setControlsOpen(isOpen) {
+    document.body.classList.toggle('controls-open', isOpen);
+    if (controlsBackdrop) controlsBackdrop.hidden = !isOpen;
+    if (controlsToggle) controlsToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+
+  if (window.innerWidth <= 980 && logs.length === 0) {
+    setControlsOpen(true);
+  }
+
+  if (controlsToggle) {
+    controlsToggle.addEventListener('click', () => {
+      const next = !document.body.classList.contains('controls-open');
+      setControlsOpen(next);
+    });
+  }
+
+  if (controlsClose) controlsClose.addEventListener('click', () => setControlsOpen(false));
+  if (controlsBackdrop) controlsBackdrop.addEventListener('click', () => setControlsOpen(false));
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
+      setControlsOpen(false);
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 980 && document.body.classList.contains('controls-open')) {
+      setControlsOpen(false);
+    }
+    if (logs.length > 0) updatePlot();
+  });
 
   function idForName(name) {
     return name.replace(/[^a-z0-9]+/ig, '_') + '_' + Math.random().toString(36).slice(2,8);
@@ -149,6 +185,18 @@
     return null;
   }
 
+  const LAP_SPLIT_DISTANCE_M = 100;
+
+  function interpCrossingTime(d0, d1, t0, t1, threshold) {
+    if (![d0, d1, t0, t1, threshold].every(v => Number.isFinite(v))) return null;
+    if (d0 === d1) return t1;
+    const ratio = (threshold - d0) / (d1 - d0);
+    if (!Number.isFinite(ratio)) return null;
+    // Clamp so noisy data cannot extrapolate outside the sample interval.
+    const clamped = Math.min(1, Math.max(0, ratio));
+    return t0 + (t1 - t0) * clamped;
+  }
+
   function computeLaps(meta) {
     // require _time and _dist arrays
     const t = meta._time || [];
@@ -159,20 +207,31 @@
     let currentLap = 1;
     let lapStartTime = (t[0] != null) ? t[0] : 0;
     let prevD = (d[0] != null) ? d[0] : 0;
-    let lapStartDist = (d[0] != null) ? d[0] : 0;
+    let prevT = (t[0] != null) ? t[0] : 0;
+    let lapStartDist = 0;
     for (let i=0;i<t.length;i++) {
       const di = d[i] != null ? d[i] : prevD;
       const ti = t[i] != null ? t[i] : (i>0 ? t[i-1] : 0);
-      // detect lap reset: distance decreases significantly or resets to near zero
-      if (i>0 && ((di < prevD - 1) || (di < 1 && prevD > 10))) {
+      // Count a new lap only when distance drops back into the start zone (<100m).
+      const crossedSplitZone = i > 0
+        && prevD >= LAP_SPLIT_DISTANCE_M
+        && di < LAP_SPLIT_DISTANCE_M
+        && di < prevD - 1;
+      if (crossedSplitZone) {
+        const splitTime = interpCrossingTime(prevD, di, prevT, ti, LAP_SPLIT_DISTANCE_M) ?? ti;
+        if (lapTime.length > 0) {
+          lapTime[lapTime.length - 1] = splitTime - lapStartTime;
+        }
         currentLap += 1;
-        lapStartTime = ti;
-        lapStartDist = di;
+        lapStartTime = splitTime;
+        // Distance is expected to restart from zero for each lap; keep lap-relative distance aligned to raw lap distance.
+        lapStartDist = 0;
       }
       lapNum.push(currentLap);
       lapTime.push((ti - lapStartTime));
       lapRelDist.push(di - lapStartDist);
       prevD = di;
+      prevT = ti;
     }
     meta.lapNum = lapNum;
     meta.lapTime = lapTime;
@@ -394,10 +453,11 @@
   function buildChannelAxisConfig(ycols, mainDomain) {
     const channelToRef = new Map();
     const axisLayout = {};
+    const mobile = window.innerWidth <= 980;
 
     if (!ycols || ycols.length === 0) {
       axisLayout.yaxis = {title:'Value', domain: mainDomain, automargin:true};
-      return {channelToRef, axisLayout, marginLeft: 80, marginRight: 80};
+      return {channelToRef, axisLayout, marginLeft: mobile ? 54 : 80, marginRight: mobile ? 54 : 80};
     }
 
     // Primary Y axis
@@ -436,9 +496,20 @@
       };
     }
 
-    const marginLeft = 80 + leftExtraCount * 40;
-    const marginRight = 80 + rightExtraCount * 40;
+    const baseMargin = mobile ? 54 : 80;
+    const marginStep = mobile ? 22 : 40;
+    const marginLeft = Math.min(baseMargin + leftExtraCount * marginStep, mobile ? 120 : 260);
+    const marginRight = Math.min(baseMargin + rightExtraCount * marginStep, mobile ? 120 : 260);
     return {channelToRef, axisLayout, marginLeft, marginRight};
+  }
+
+  function getFigureHeight(includeTimeSlip) {
+    const mobile = window.innerWidth <= 980;
+    if (!mobile) return includeTimeSlip ? 860 : 640;
+
+    const reserve = includeTimeSlip ? 145 : 125;
+    const available = Math.max(220, window.innerHeight - reserve);
+    return Math.min(Math.max(available, 260), Math.max(320, window.innerHeight - 70));
   }
 
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
@@ -450,7 +521,7 @@
         margin:{t:30},
         xaxis:{title: mainXTitle},
         legend:{orientation:'h'},
-        height: 640
+        height: getFigureHeight(false)
       };
       layout.margin.l = axisCfg.marginLeft;
       layout.margin.r = axisCfg.marginRight;
@@ -464,7 +535,7 @@
       xaxis2:{title:'Lap Distance (m)', domain:[0,1], anchor:'y2', matches:'x'},
       yaxis2:{title:'Time Slip (s)', domain:[0,0.12]},
       legend:{orientation:'h'},
-      height: 860
+      height: getFigureHeight(true)
     };
     layout.margin.l = axisCfg.marginLeft;
     layout.margin.r = axisCfg.marginRight;
@@ -635,6 +706,7 @@
 
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0; renderFilesList(); populateYSelect(); Plotly.purge(plotDiv);
+    if (window.innerWidth <= 980) setControlsOpen(true);
   });
 
   // allow toggling file visibility by checking/unchecking checkboxes

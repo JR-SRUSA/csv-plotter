@@ -11,12 +11,25 @@
 </head>
 <body>
   <header>
-    <h1>GP Bikes Logged Data Plotter</h1>
+    <div class="header-top">
+      <h1>GP Bikes Logged Data Plotter</h1>
+      <button id="controlsToggle" class="hamburger-btn" aria-label="Open controls" aria-expanded="false" aria-controls="controlsPanel">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
     <p>Upload one or more CSV logs and plot channels.</p>
   </header>
 
+  <div id="controlsBackdrop" class="controls-backdrop" hidden></div>
+
   <main>
-    <section class="controls">
+    <section id="controlsPanel" class="controls" aria-label="Plot controls">
+      <div class="controls-header">
+        <strong>Controls</strong>
+        <button id="controlsClose" class="controls-close" aria-label="Close controls">Close</button>
+      </div>
       <label class="file-label">Select CSV files
         <input id="fileInput" type="file" accept="text/csv" multiple />
       </label>
