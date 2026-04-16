@@ -7,7 +7,7 @@ Thumbs.db
 
 # Build artifacts
 build/
-dist/
+# dist/ # Include the dist directory so we can deploy github pages
 
 # Node modules (if any are installed inside plotter/ during testing)
 node_modules/
