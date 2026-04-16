@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "npm run build-plotly-custom",
-    "build:prod": "npm install --no-audit --no-fund && node scripts/build-production.js",
+    "build:prod": "npm install --no-audit --no-fund && node scripts/build-production.js && cp -r ./dist/. ./docs",
     "build:esp32": "npm install --no-audit --no-fund && node scripts/build-production.js --gzip-only",
     "build-plotly-custom": "npm install --no-audit --no-fund && node scripts/build-plotly-custom.js",
     "serve:esp32-test": "python scripts/serve-dist-gzip.py --directory dist --port 8000"
