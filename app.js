@@ -14,6 +14,12 @@
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
 
+  function colorForLap(lap) {
+    const n = Number.isFinite(lap) ? Math.floor(lap) : 0;
+    const idx = ((n % COLORS.length) + COLORS.length) % COLORS.length;
+    return COLORS[idx];
+  }
+
   function setControlsOpen(isOpen) {
     document.body.classList.toggle('controls-open', isOpen);
     if (controlsBackdrop) controlsBackdrop.hidden = !isOpen;
@@ -57,56 +63,39 @@
       dynamicTyping: true,
       skipEmptyLines: true,
       complete: (results) => {
-        const rows = results.data; // array of arrays
-
-        // find the header row: require multiple column-name matches
-        function isHeaderRow(r) {
-          if (!r || r.length < 3) return false;
-          const headerTokens = ['time','timestamp','date','distance','dist','speed','lat','lon','engine','rpm','yaw','posx','posy','throttle','brake','gear'];
-          let count = 0;
-          for (const cell of r) {
-            if (cell == null) continue;
-            const s = String(cell).toLowerCase();
-            for (const t of headerTokens) {
-              if (s.includes(t)) { count++; break; }
-            }
-          }
-          return count >= 2;
+        const rows = results.data;
+        if (!window.LogFileProcessors || typeof window.LogFileProcessors.processCsvRows !== 'function') {
+          console.error('Missing LogFileProcessors.processCsvRows; cannot parse file:', file.name);
+          return;
         }
 
-        let headerRowIndex = rows.findIndex(r => isHeaderRow(r));
-        if (headerRowIndex < 0) headerRowIndex = 0;
-
-        const rawCols = rows[headerRowIndex].map(c => String(c).trim());
-
-        // detect if next row is units (short non-numeric tokens) and capture it
-        let dataStart = headerRowIndex + 1;
-        let unitsRow = null;
-        if (rows[dataStart] && rows[dataStart].every(cell => (cell === null || cell === undefined) || (typeof cell === 'string' && cell.length>0 && cell.length < 20 && isNaN(Number(cell))))) {
-          unitsRow = rows[dataStart].map(c => c == null ? '' : String(c).trim());
-          dataStart = headerRowIndex + 2;
+        const processed = window.LogFileProcessors.processCsvRows(rows, file.name);
+        if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
+          console.error('Failed to process CSV file:', file.name);
+          return;
         }
 
-        // build objects mapping col->value for each data row
-        const data = rows.slice(dataStart).map(r => {
-          const obj = {};
-          rawCols.forEach((c, i) => { obj[c] = r[i]; });
-          return obj;
-        }).filter(r => Object.keys(r).length > 0);
-
-        const cols = rawCols;
-        const units = {};
-        rawCols.forEach((c,i)=> { units[c] = unitsRow && unitsRow[i] ? unitsRow[i] : ''; });
+        const data = processed.data;
+        const cols = [...processed.cols];
+        const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
         const id = idForName(file.name);
-        const meta = analyzeColumns(data, cols, units);
-        meta.units = units;
+        const meta = processed.meta || {};
+        meta.units = meta.units && typeof meta.units === 'object' ? meta.units : units;
 
-        // compute lap numbers and lap times and append as columns
-        computeLaps(meta);
+        const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
+          ? meta.lapNum
+          : data.map(() => 1);
+        const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
+          ? meta.lapTime
+          : data.map((_, i) => i);
+
+        meta.lapNum = lapNum;
+        meta.lapTime = lapTime;
+
         // expose lap columns in data rows and cols list
         if (!cols.includes('Lap Time')) cols.push('Lap Time');
         if (!cols.includes('Lap Number')) cols.push('Lap Number');
-        data.forEach((r,i)=>{ r['Lap Time'] = meta.lapTime[i]; r['Lap Number'] = meta.lapNum[i]; });
+        data.forEach((r,i)=>{ r['Lap Time'] = lapTime[i]; r['Lap Number'] = lapNum[i]; });
 
         // record units for new columns
         meta.units['Lap Time'] = 's';
@@ -120,133 +109,6 @@
         updatePlot();
       }
     });
-  }
-
-  function analyzeColumns(data, cols, units = {}) {
-    const lc = cols.map(c => c.toLowerCase());
-    const timeIdx = lc.findIndex(c => /time|timestamp|date/.test(c));
-    const distIdx = lc.findIndex(c => /dist|distance|odometer/.test(c));
-    const latIdx = lc.findIndex(c => /^(lat|latitude)$/.test(c));
-    const lonIdx = lc.findIndex(c => /^(lon|lng|longitude)$/.test(c));
-
-    const meta = {timeCol: null, distCol: null, latCol: null, lonCol: null, computedDistance: null};
-    if (timeIdx >= 0) meta.timeCol = cols[timeIdx];
-    if (distIdx >= 0) meta.distCol = cols[distIdx];
-    if (latIdx >= 0 && lonIdx >= 0) { meta.latCol = cols[latIdx]; meta.lonCol = cols[lonIdx]; }
-
-    // parse time values and distance if needed
-    if (meta.timeCol) {
-      const timeUnit = units[meta.timeCol] || '';
-      meta._time = data.map(r => parseTimeValue(r[meta.timeCol], timeUnit));
-    } else {
-      meta._time = data.map((_,i)=>i);
-    }
-
-    if (meta.distCol) {
-      meta._dist = data.map(r => {
-        const v = r[meta.distCol];
-        return (typeof v === 'number') ? v : (isNaN(Number(v)) ? null : Number(v));
-      });
-    } else if (meta.latCol && meta.lonCol) {
-      // compute haversine cumulative distance in meters
-      const latArr = data.map(r => r[meta.latCol]);
-      const lonArr = data.map(r => r[meta.lonCol]);
-      const dist = [0];
-      for (let i=1;i<latArr.length;i++) {
-        const d = haversine(latArr[i-1], lonArr[i-1], latArr[i], lonArr[i]);
-        dist.push(dist[dist.length-1] + d);
-      }
-      meta._dist = dist;
-    } else {
-      meta._dist = data.map((_,i)=>i);
-    }
-
-    return meta;
-  }
-
-  function parseTimeValue(v, unit) {
-    if (v == null || v === '') return null;
-    // prefer numeric seconds
-    if (typeof v === 'number') {
-      // treat numeric as seconds unless unit explicitly indicates ms
-      if (unit && /ms/i.test(unit)) return v / 1000;
-      return v;
-    }
-    const s = String(v).trim();
-    if (!isNaN(Number(s))) return Number(s);
-    const t = Date.parse(s);
-    if (!isNaN(t)) return t / 1000;
-    // try HH:MM:SS -> seconds since midnight
-    const m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?$/);
-    if (m) {
-      const h = parseInt(m[1],10), mm2 = parseInt(m[2],10), ss = parseInt(m[3]||0,10), ms = parseInt(m[4]||0,10);
-      return h*3600 + mm2*60 + ss + (ms? ms/1000 : 0);
-    }
-    return null;
-  }
-
-  const LAP_SPLIT_DISTANCE_M = 100;
-
-  function interpCrossingTime(d0, d1, t0, t1, threshold) {
-    if (![d0, d1, t0, t1, threshold].every(v => Number.isFinite(v))) return null;
-    if (d0 === d1) return t1;
-    const ratio = (threshold - d0) / (d1 - d0);
-    if (!Number.isFinite(ratio)) return null;
-    // Clamp so noisy data cannot extrapolate outside the sample interval.
-    const clamped = Math.min(1, Math.max(0, ratio));
-    return t0 + (t1 - t0) * clamped;
-  }
-
-  function computeLaps(meta) {
-    // require _time and _dist arrays
-    const t = meta._time || [];
-    const d = meta._dist || [];
-    const lapNum = [];
-    const lapTime = [];
-    const lapRelDist = [];
-    let currentLap = 1;
-    let lapStartTime = (t[0] != null) ? t[0] : 0;
-    let prevD = (d[0] != null) ? d[0] : 0;
-    let prevT = (t[0] != null) ? t[0] : 0;
-    let lapStartDist = 0;
-    for (let i=0;i<t.length;i++) {
-      const di = d[i] != null ? d[i] : prevD;
-      const ti = t[i] != null ? t[i] : (i>0 ? t[i-1] : 0);
-      // Count a new lap only when distance drops back into the start zone (<100m).
-      const crossedSplitZone = i > 0
-        && prevD >= LAP_SPLIT_DISTANCE_M
-        && di < LAP_SPLIT_DISTANCE_M
-        && di < prevD - 1;
-      if (crossedSplitZone) {
-        const splitTime = interpCrossingTime(prevD, di, prevT, ti, LAP_SPLIT_DISTANCE_M) ?? ti;
-        if (lapTime.length > 0) {
-          lapTime[lapTime.length - 1] = splitTime - lapStartTime;
-        }
-        currentLap += 1;
-        lapStartTime = splitTime;
-        // Distance is expected to restart from zero for each lap; keep lap-relative distance aligned to raw lap distance.
-        lapStartDist = 0;
-      }
-      lapNum.push(currentLap);
-      lapTime.push((ti - lapStartTime));
-      lapRelDist.push(di - lapStartDist);
-      prevD = di;
-      prevT = ti;
-    }
-    meta.lapNum = lapNum;
-    meta.lapTime = lapTime;
-    meta.lapRelDist = lapRelDist;
-  }
-
-  function haversine(lat1, lon1, lat2, lon2) {
-    if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return 0;
-    const R = 6371000; // m
-    const toRad = x => x * Math.PI / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lon2 - lon1);
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
   }
 
   function renderFilesList() {
@@ -353,22 +215,49 @@
       return `${mins}:${String(secs).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
     }
 
-    // render as vertical list with colored checkboxes
-    const html = ['<strong>Laps:</strong>', '<div class="laps-col">'];
-    laps.forEach(n => {
-      const color = COLORS[(n-1) % COLORS.length];
-      const lapLabel = `${n} - ${formatLapTime(lapDurations.get(n))}`;
-      html.push(`<label class="lap-item"><input type="checkbox" data-lap="${n}" checked style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
+    // render per-file headings with laps grouped under each file
+    const sel2 = getSelectedFiles();
+    const html = ['<strong>Laps:</strong>'];
+    sel2.forEach(log => {
+      const fileLaps = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      if (fileLaps.length === 0) return;
+      // compute per-file lap durations
+      const filelapDurations = new Map();
+      (log.meta.lapNum || []).forEach((n, i) => {
+        const lt = log.meta.lapTime && log.meta.lapTime[i];
+        if (lt == null || isNaN(lt)) return;
+        filelapDurations.set(n, Math.max(filelapDurations.get(n) || 0, lt));
+      });
+      html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
+      fileLaps.forEach(n => {
+        const color = colorForLap(n);
+        const dur = filelapDurations.get(n);
+        const lapLabel = `${n} - ${formatLapTime(dur)}`;
+        html.push(`<label class="lap-item"><input type="checkbox" data-id="${log.id}" data-lap="${n}" checked style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
+      });
+      html.push('</div></div>');
     });
-    html.push('</div>');
     container.innerHTML = html.join('');
   }
 
   function getSelectedLaps() {
+    // Returns Map<fileId, Set<lapNum>> so per-file lap visibility is independent.
     const checks = document.querySelectorAll('#lapsList input[type=checkbox]');
-    const result = new Set();
-    checks.forEach(ch => { if (ch.checked) result.add(Number(ch.getAttribute('data-lap'))); });
+    const result = new Map();
+    checks.forEach(ch => {
+      if (!ch.checked) return;
+      const fileId = ch.getAttribute('data-id');
+      const lap = Number(ch.getAttribute('data-lap'));
+      if (!result.has(fileId)) result.set(fileId, new Set());
+      result.get(fileId).add(lap);
+    });
     return result;
+  }
+
+  function isLapSelected(selectedLaps, fileId, lap) {
+    if (selectedLaps.size === 0) return true; // nothing filtered
+    const fileLaps = selectedLaps.get(fileId);
+    return fileLaps ? fileLaps.has(lap) : false;
   }
 
   function getSelectedFiles() {
@@ -405,49 +294,75 @@
   function buildTimeSlipTraces(selFiles, selectedLaps, xMode) {
     // Time slip is defined only against distance while split by lap.
     if (xMode !== 'distance') {
-      return [];
+      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
     }
 
     const lapSeries = [];
     selFiles.forEach((log) => {
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
-        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
         const tArr = maskIdx.map(i => log.meta.lapTime[i]);
-        if (xArr.length > 1) lapSeries.push({file: log.name, lap, x: xArr, t: tArr});
+        if (xArr.length > 1) {
+          const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
+          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, isCrashLap});
+        }
       });
     });
 
     if (lapSeries.length < 2) {
-      return [];
+      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
     }
 
     const xSet = new Set();
     lapSeries.forEach(s => s.x.forEach(v => xSet.add(v)));
     const grid = Array.from(xSet).sort((a,b)=>a-b);
     if (grid.length < 2) {
-      return [];
+      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
     }
 
     const timeAt = lapSeries.map(s => grid.map(g => interpAt(s.x, s.t, g)));
+    const refIndices = lapSeries.map((s, i) => (!s.isCrashLap ? i : -1)).filter(i => i >= 0);
+    if (refIndices.length === 0) {
+      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
+    }
     const fastest = grid.map((_, gi) => {
-      const vals = timeAt.map(arr => arr[gi]).filter(v => v != null && !isNaN(v));
+      const vals = refIndices
+        .map(i => timeAt[i][gi])
+        .filter(v => v != null && !isNaN(v));
       if (vals.length === 0) return null;
       return Math.min(...vals);
     });
 
     const tsTraces = [];
+    let nonCrashMaxDelta = null;
+    let allMaxDelta = null;
     for (let si = 0; si < lapSeries.length; si++) {
       const s = lapSeries[si];
       const deltas = timeAt[si].map((v, gi) => (v == null || fastest[gi] == null) ? null : (v - fastest[gi]));
       if (deltas.every(v => v == null || isNaN(v))) continue;
-      const color = COLORS[(s.lap-1) % COLORS.length];
+      const validDeltas = deltas.filter(v => v != null && !isNaN(v));
+      if (validDeltas.length > 0) {
+        const traceMax = Math.max(...validDeltas);
+        if (allMaxDelta == null || traceMax > allMaxDelta) allMaxDelta = traceMax;
+        if (!s.isCrashLap && (nonCrashMaxDelta == null || traceMax > nonCrashMaxDelta)) {
+          nonCrashMaxDelta = traceMax;
+        }
+      }
+      const color = colorForLap(s.lap);
       tsTraces.push({x: grid, y: deltas, xaxis:'x2', yaxis:'y2', name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
     }
 
-    return tsTraces;
+    return {traces: tsTraces, nonCrashMaxDelta, allMaxDelta};
+  }
+
+  function getUnitForChannel(channel) {
+    for (const l of logs) {
+      if (l.meta && l.meta.units && l.meta.units[channel] != null) return l.meta.units[channel];
+    }
+    return null;
   }
 
   function buildChannelAxisConfig(ycols, mainDomain) {
@@ -460,9 +375,21 @@
       return {channelToRef, axisLayout, marginLeft: mobile ? 54 : 80, marginRight: mobile ? 54 : 80};
     }
 
-    // Primary Y axis
+    // Group channels by unit; channels with same unit share an axis.
+    // unitToAxis: unit string -> existing axisRef (or null-keyed for channels with no unit - each gets its own)
+    const unitToAxis = new Map();
+    // axisCounter tracks how many distinct axes we've allocated (beyond primary y)
+    // y2 is reserved for time slip, so we start extra axes at y3
+    let extraAxisCount = 0; // number of extra axes created so far
+
+    // Primary Y axis gets the first channel
+    const firstUnit = getUnitForChannel(ycols[0]);
     channelToRef.set(ycols[0], 'y');
-    axisLayout.yaxis = {title:ycols[0], domain: mainDomain, automargin:true};
+    const firstTitle = (firstUnit != null && firstUnit !== '') ? `[${firstUnit}]` : ycols[0];
+    axisLayout.yaxis = {title: firstTitle, domain: mainDomain, automargin:true};
+    if (firstUnit != null && firstUnit !== '') {
+      unitToAxis.set(firstUnit, 'y');
+    }
 
     // Additional overlaid Y axes (skip y2, reserved for time slip subplot)
     let leftExtraCount = 0;
@@ -470,10 +397,21 @@
 
     for (let i = 1; i < ycols.length; i++) {
       const channel = ycols[i];
-      const axisNumber = i + 2; // i=1 -> y3
+      const unit = getUnitForChannel(channel);
+      const hasUnit = unit != null && unit !== '';
+
+      // Check if an existing axis covers this unit
+      if (hasUnit && unitToAxis.has(unit)) {
+        channelToRef.set(channel, unitToAxis.get(unit));
+        continue; // reuse existing axis, no new axis needed
+      }
+
+      // Need a new axis
+      extraAxisCount += 1;
+      const axisNumber = extraAxisCount + 2; // extraAxisCount=1 -> y3
       const axisRef = `y${axisNumber}`;
       const axisKey = `yaxis${axisNumber}`;
-      const side = (i % 2 === 1) ? 'right' : 'left';
+      const side = (extraAxisCount % 2 === 1) ? 'right' : 'left';
 
       let position;
       if (side === 'right') {
@@ -484,9 +422,11 @@
         position = Math.min(0.38, leftExtraCount * 0.06);
       }
 
+      const axisTitle = hasUnit ? `[${unit}]` : channel;
       channelToRef.set(channel, axisRef);
+      if (hasUnit) unitToAxis.set(unit, axisRef);
       axisLayout[axisKey] = {
-        title: channel,
+        title: axisTitle,
         domain: mainDomain,
         overlaying: 'y',
         anchor: 'free',
@@ -520,7 +460,7 @@
       const layout = {
         margin:{t:30},
         xaxis:{title: mainXTitle},
-        legend:{orientation:'h'},
+        showlegend:false,
         height: getFigureHeight(false)
       };
       layout.margin.l = axisCfg.marginLeft;
@@ -534,7 +474,7 @@
       xaxis:{title: mainXTitle, domain:[0,1], anchor:'y'},
       xaxis2:{title:'Lap Distance (m)', domain:[0,1], anchor:'y2', matches:'x'},
       yaxis2:{title:'Time Slip (s)', domain:[0,0.12]},
-      legend:{orientation:'h'},
+      showlegend:false,
       height: getFigureHeight(true)
     };
     layout.margin.l = axisCfg.marginLeft;
@@ -549,15 +489,26 @@
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const plotByLap = true;
     const selectedLaps = getSelectedLaps();
-    const singleLapSelected = selectedLaps.size === 1;
+    // singleLapSelected: true when exactly one lap is visible across all files
+    const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
+    const singleLapSelected = totalSelectedLaps === 1;
     const channelColors = new Map(ycols.map((y, i) => [y, COLORS[i % COLORS.length]]));
     const mainXTitle = xMode === 'distance' ? 'Lap Distance (m)' : 'Lap Time (s)';
-    const tsPreview = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
+    const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
+    const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
     const built = buildLayout(mainXTitle, ycols, includeTimeSlip);
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
+
+    if (includeTimeSlip && layout.yaxis2) {
+      const baselineMax = Number.isFinite(tsBuilt.nonCrashMaxDelta) ? tsBuilt.nonCrashMaxDelta : tsBuilt.allMaxDelta;
+      if (Number.isFinite(baselineMax)) {
+        const cappedMax = Math.max(0.1, baselineMax * 1.1);
+        layout.yaxis2.range = [0, cappedMax];
+      }
+    }
 
     // optionally compute shading envelope when plotting by lap
     const shadeLaps = document.getElementById('shadeLaps') && document.getElementById('shadeLaps').checked;
@@ -567,12 +518,12 @@
       // plot each selected lap separately, x axis is Lap Time or Lap Distance
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
-        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         ycols.forEach(y => {
           const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
           const yArr = maskIdx.map(i => log.data[i][y]);
-          const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : COLORS[(lap-1) % COLORS.length];
+          const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
           const dash = DASHES[li % DASHES.length];
           traces.push({x: xArr, y: yArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
         });
@@ -587,7 +538,7 @@
         selFiles.forEach((log, li) => {
           const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
           lapNums.forEach(lap => {
-            if (selectedLaps.size && !selectedLaps.has(lap)) return;
+            if (!isLapSelected(selectedLaps, log.id, lap)) return;
             const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
             const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
             const yArr = maskIdx.map(i => log.data[i][y]);
@@ -683,7 +634,7 @@
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         const xArr = maskIdx.map(i => log.data[i][xcol]);
         const yArr = maskIdx.map(i => log.data[i][ycol]);
-        const color = COLORS[(lap-1) % COLORS.length];
+        const color = colorForLap(lap);
         const dash = DASHES[idx % DASHES.length];
         traces.push({x: xArr, y: yArr, name: `${log.name} — Lap ${lap} — ${ycol} vs ${xcol}`, mode: 'lines+markers', line:{color, dash}, marker:{color}});
       });

@@ -201,3 +201,57 @@ Open Questions / Future Enhancements
 2. Optional smoothing/filtering for noisy channels and Time Slip.
 3. Export plotted data/time-slip deltas to CSV.
 4. Add axis-title coloring by channel for easier axis-channel matching.
+
+Recent Request-Driven Updates (2026-04-16)
+
+1. Controls panel UX updates
+- Added version label in controls panel: `Version 20260416a`.
+- Version label is pinned near the bottom of the mobile slide-out controls panel.
+- Moved page heading and description text into the controls panel (`controls-intro`).
+- Mobile header now primarily serves as hamburger-trigger container.
+
+2. Legend behavior
+- Disabled Plotly legend in standard lap/time-distance layout and combined Time Slip layout.
+
+3. Crash-lap logic and Time Slip constraints
+- Crash detection includes both:
+	- In-lap non-monotonic distance drops (beyond epsilon).
+	- Lap total distance significantly short compared to previous laps (threshold ratio currently 0.8).
+- Time Slip axis scaling excludes crash laps when determining y-axis max baseline.
+- Time Slip y-axis max is set to approximately 110% of max non-crash delta (with safe floor).
+- Crash laps cannot be used as Time Slip fastest-reference baseline.
+- If no non-crash lap exists for reference, Time Slip traces are omitted.
+
+4. Source/format-specific processing architecture
+- Split CSV parsing/lap-processing logic out of `app.js` into `file-processors.js`.
+- `app.js` delegates file processing through `window.LogFileProcessors.processCsvRows(...)`.
+- Added metadata extraction and routing by `Format` metadata value:
+	- `PiBoSo CSV File` -> GP Bikes processor path.
+	- `AiM CSV File` -> AiM processor path.
+	- Fallback -> generic processor path.
+
+5. Header/channel detection behavior
+- Removed dependency on predefined telemetry token list for header detection.
+- Header detection is now structure-based and channel-agnostic.
+- All available channels from detected header are retained.
+
+6. Beacon-marker-based lap segmentation
+- Added lap segmentation by metadata `Beacon Markers` (applies across formats when valid):
+	- Below first marker => lap 0.
+	- Between marker 1 and marker 2 => lap 1.
+	- etc.
+- Lap time is computed from beacon boundaries:
+	- `lapTime = rowTime - lapStartMarkerTime`.
+- Distance-based lap detection remains as fallback when beacon markers are absent/invalid.
+
+7. Lap indexing/color robustness
+- Added lap-color helper to support lap 0 and any non-positive/edge lap index safely.
+- Updated lap list labels and plot trace color assignments to use robust lap-color mapping.
+
+8. AiM units-row parsing fix
+- Improved units-row detection so AiM unit lines (including sparse/blank unit cells) are not treated as data rows.
+- Restored numeric-channel discovery for time/distance Y-channel selection (not limited to a few columns).
+
+9. Production build updates
+- Production pipeline minifies final combined bundle (not only app source) before output.
+- Build pipeline includes `file-processors.js` in production bundle composition.

@@ -9,14 +9,12 @@
 <body>
   <header>
     <div class="header-top">
-      <h1>GP Bikes Logged Data Plotter</h1>
       <button id="controlsToggle" class="hamburger-btn" aria-label="Open controls" aria-expanded="false" aria-controls="controlsPanel">
         <span></span>
         <span></span>
         <span></span>
       </button>
     </div>
-    <p>Upload one or more CSV logs and plot channels.</p>
   </header>
 
   <div id="controlsBackdrop" class="controls-backdrop" hidden></div>
@@ -26,6 +24,10 @@
       <div class="controls-header">
         <strong>Controls</strong>
         <button id="controlsClose" class="controls-close" aria-label="Close controls">Close</button>
+      </div>
+      <div class="controls-intro">
+        <h1>GP Bikes Logged Data Plotter</h1>
+        <p>Upload one or more CSV logs and plot channels.</p>
       </div>
       <label class="file-label">Select CSV files
         <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel" multiple />
@@ -67,6 +69,8 @@
           <button id="clearBtn">Clear All</button>
         </div>
       </div>
+
+      <div class="controls-version" aria-label="Application version">Version 20260416a</div>
     </section>
 
     <section class="plot">
@@ -77,7 +81,6 @@
   <footer>
     <small>Supports CSVs with headers. Detects `Time`/`Timestamp` and `Distance` columns. Computes distance if `lat`/`lon` present.</small>
   </footer>
-
   <script src="gpbikes-plotter.bundle.min.js"></script>
 </body>
 </html>

@@ -33,7 +33,10 @@ try {
   const buildDir = path.join(rootDir, 'build');
   const distDir = path.join(rootDir, 'dist');
   const appSource = path.join(rootDir, 'app.js');
+  const processorSource = path.join(rootDir, 'file-processors.js');
   const appMinified = path.join(buildDir, 'app.min.js');
+  const bundleSource = path.join(buildDir, 'gpbikes-plotter.bundle.js');
+  const bundleMinified = path.join(buildDir, 'gpbikes-plotter.bundle.min.js');
   const bundleFile = path.join(distDir, 'gpbikes-plotter.bundle.min.js');
   const gzipFile = `${bundleFile}.gz`;
   const distHtml = path.join(distDir, 'index.html');
@@ -49,17 +52,20 @@ try {
   const bundleParts = [
     fs.readFileSync(plotlySource, 'utf8'),
     fs.readFileSync(papaSource, 'utf8'),
+    fs.readFileSync(processorSource, 'utf8'),
     fs.readFileSync(appMinified, 'utf8')
   ];
 
-  const bundleContent = Buffer.from(`${bundleParts.join('\n;\n')}\n`, 'utf8');
-  writeMaybeCompressed(bundleFile, bundleContent, gzipOnly);
+  fs.writeFileSync(bundleSource, `${bundleParts.join('\n;\n')}\n`);
+  minifyFile(bundleSource, bundleMinified);
+  writeMaybeCompressed(bundleFile, fs.readFileSync(bundleMinified), gzipOnly);
 
   const sourceHtml = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
   const productionHtml = sourceHtml
     .replace(/\s*<!-- <script src="https:\/\/cdn\.plot\.ly\/plotly-2\.20\.0\.min\.js"><\/script> -->\n?/g, '\n')
     .replace(/\s*<script src="lib\/plotly-custom\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/papaparse@5\.4\.1\/papaparse\.min\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="file-processors\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
