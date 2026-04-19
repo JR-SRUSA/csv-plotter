@@ -79,6 +79,32 @@
     return /^aim\s+csv\s+file$/i.test(format || '');
   }
 
+  function isStandardFormat(rows, headerRowIndex, metadata = {}) {
+    const format = getMetadataValue(metadata, 'format');
+    if (isGPBikesFormat(format) || isAiMFormat(format)) return false;
+
+    // Standard CSV is expected to be: one header row at the top, then data.
+    if (headerRowIndex !== 0) return false;
+    const headerCells = normalizedCells(rows[0]);
+    if (!isHeaderRow(headerCells)) return false;
+
+    const headerWidth = (rows[0] || []).length;
+    if (headerWidth < 2) return false;
+
+    const sampleRows = rows.slice(1, Math.min(rows.length, 26));
+    if (sampleRows.length === 0) return false;
+
+    const minDataLikeCells = Math.max(1, Math.floor(headerWidth * 0.2));
+    const dataLikeRowCount = sampleRows.reduce((count, row) => {
+      const rowCells = (row || []).slice(0, headerWidth).map(c => (c == null ? '' : String(c).trim()));
+      const dataLikeCount = rowCells.filter(isDataLikeCell).length;
+      return count + (dataLikeCount >= minDataLikeCells ? 1 : 0);
+    }, 0);
+
+    const minDataLikeRows = Math.max(2, Math.floor(sampleRows.length * 0.6));
+    return dataLikeRowCount >= minDataLikeRows;
+  }
+
   function processCsvRows(rows) {
     const headerRowIndex = findHeaderRowIndex(rows);
     const metadata = extractMetadata(rows, headerRowIndex);
@@ -91,6 +117,10 @@
 
     if (isAiMFormat(format)) {
       return processAiMRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
+    if (isStandardFormat(rows, headerRowIndex, metadata)) {
+      return processStandardRows(rows, headerRowIndex, { source, format, metadata });
     }
 
     return processGenericRows(rows, headerRowIndex, { source, format, metadata });
@@ -108,19 +138,26 @@
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
   }
 
+  function processStandardRows(rows, headerRowIndex, details = {}) {
+    const source = details.source || 'Standard CSV';
+    const format = details.format || 'Standard CSV';
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
+  }
+
   function processGenericRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'Unknown';
     const format = details.format || 'Unknown';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
   }
 
-  function processRowsWithCurrentMethod(rows, headerRowIndex, source, format, metadata = {}) {
+  function processRowsWithCurrentMethod(rows, headerRowIndex, source, format, metadata = {}, options = {}) {
+    const allowUnitsRow = options.allowUnitsRow !== false;
     const rawCols = (rows[headerRowIndex] || []).map(c => String(c).trim());
     const minSignalCount = Math.max(2, Math.floor(rawCols.length * 0.3));
 
     let dataStart = headerRowIndex + 1;
     let unitsRow = null;
-    if (rows[dataStart]) {
+    if (allowUnitsRow && rows[dataStart]) {
       const unitCandidate = rows[dataStart].slice(0, rawCols.length).map(c => (c == null ? '' : String(c).trim()));
       const nextRowCells = (rows[dataStart + 1] || []).slice(0, rawCols.length).map(c => (c == null ? '' : String(c).trim()));
       const unitTextLikeCount = unitCandidate.filter(v => v && !isDataLikeCell(v)).length;
@@ -402,6 +439,7 @@
   window.LogFileProcessors = {
     processCsvRows,
     isGPBikesFormat,
-    isAiMFormat
+    isAiMFormat,
+    isStandardFormat
   };
 })();

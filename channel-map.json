@@ -1,0 +1,17 @@
+[
+  {
+    "displayName": "Speed",
+    "piboso": "Speed",
+    "aim": "GPS Speed"
+  },
+  {
+    "displayName": "LatAcc",
+    "piboso": "LatAcc",
+    "aim": "GPS LatAcc"
+  },
+  {
+    "displayName": "LongAcc",
+    "piboso": "LonAcc",
+    "aim": "GPS LonAcc"
+  }
+]

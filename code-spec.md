@@ -32,9 +32,12 @@ Functional Requirements
 	- Time (Lap Time)
 	- Distance (Lap Relative Distance)
 - Y-channel multi-select plots selected channels over selected files/laps.
+- Y-channel list can expose format-agnostic display names from channel mapping instead of raw source column names.
+- When a mapped display channel is selected, each file resolves that selection to its format-specific source column.
 - If exactly one lap is selected, each selected Y channel gets its own color.
 - If multiple laps are selected, lap coloring is used.
 - Each selected Y channel in the main plot gets its own independent Y-axis (shared across files/laps for that channel).
+- Default Y-channel selection chooses a single default channel (`Speed`) when available.
 
 5. XY mode
 - XY controls allow plotting arbitrary column X vs arbitrary column Y.
@@ -48,12 +51,14 @@ Functional Requirements
 7. Time Slip
 - Time Slip is rendered inside the same Plotly figure as a second subplot row.
 - Time Slip appears only when X-axis is Distance.
-- Time Slip computes per-lap delta to fastest lap at each distance sample:
+- Time Slip computes per-lap delta to one fixed fastest selected lap over a common distance grid:
 	- interpolate lap time to common distance grid
-	- fastest = min lap time at each grid sample
-	- delta = lapTime - fastest
+	- choose the fastest selected lap by overall lap duration as the reference baseline
+	- prefer non-crash laps for the reference baseline when available
+	- delta = lapTime - referenceLapTime
 - Main subplot and Time Slip subplot use native matched X-axis behavior (Plotly axis matching).
 - Time Slip subplot height is intentionally short (around 10-15% of figure).
+- Time Slip Y-axis supports both positive and negative values.
 
 8. Immediate interaction updates
 - Main plot updates on:
@@ -68,6 +73,7 @@ Functional Requirements
 9. Lap list UI labels
 - Lap selector labels include lap number and lap time:
 	- e.g., 1 - 1:23.456
+- When a file has 3 or more laps, the first and last laps default to unchecked to omit typical out-lap / in-lap data.
 
 10. Plot toolbar behavior
 - Plotly logo is hidden from toolbar/modebar.
@@ -102,11 +108,20 @@ Data and Formats
 - meta.lapRelDist
 - meta.units
 
+4. Channel mapping configuration
+- Channel mapping can be provided via `channel-map.json`.
+- Each mapping entry links one display channel name to per-format source column names:
+	- `displayName`
+	- `piboso`
+	- `aim`
+- If `channel-map.json` is unavailable or invalid, the app falls back to a built-in default mapping.
+
 Core Files
 
 - index.html: UI structure and script includes
 - style.css: layout/styles
 - app.js: parsing, UI state, plotting
+- channel-map.json: editable display-to-source channel mapping configuration
 - scripts/build-plotly-custom.js: local Plotly bundle build for app use
 - scripts/build-production.js: production and gzip-only build output
 - scripts/serve-dist-gzip.py: gzip-aware local test server
@@ -143,9 +158,19 @@ Key Algorithms and Implementation Details
 7. Time Slip computation
 - Build lap series with x=Lap Relative Distance and t=Lap Time.
 - Interpolate all laps onto union distance grid.
-- Compute fastest baseline per grid point and per-lap delta traces.
+- Select a single fastest reference lap using overall lap duration.
+- Prefer the fastest non-crash selected lap; fall back to the fastest selected lap if needed.
+- Interpolate the reference lap across the same distance grid.
+- Compute per-lap delta traces against that fixed reference lap.
 
-8. Multi-axis channel mapping
+8. Channel display-name mapping
+- Load optional `channel-map.json` at app startup.
+- Normalize entries to `{ displayName, piboso, aim }`.
+- Build the Y-channel list from mapped display names plus any uncovered raw numeric columns.
+- Hide raw format-specific columns from the Y-channel list when they are covered by a mapping entry.
+- Resolve selected display names back to the correct source column for each loaded log during plotting and unit lookup.
+
+9. Multi-axis channel mapping
 - One main Y-axis per selected channel in the main subplot.
 - Additional channel axes overlaid left/right with dynamic margins.
 - Time Slip keeps dedicated subplot axis and is not mixed with channel axes.
@@ -161,12 +186,14 @@ Build and Deployment
 	- dist/gpbikes-plotter.bundle.min.js.gz
 	- dist/index.html
 	- dist/style.css
+	- dist/channel-map.json
 
 3. ESP32 gzip-only build
 - `npm run build:esp32` creates gzip-only assets:
 	- dist/gpbikes-plotter.bundle.min.js.gz
 	- dist/index.html.gz
 	- dist/style.css.gz
+	- dist/channel-map.json.gz
 
 4. Gzip serving requirement
 - For gzip-only hosting, server must map normal file paths to .gz assets and send:
@@ -217,10 +244,7 @@ Recent Request-Driven Updates (2026-04-16)
 - Crash detection includes both:
 	- In-lap non-monotonic distance drops (beyond epsilon).
 	- Lap total distance significantly short compared to previous laps (threshold ratio currently 0.8).
-- Time Slip axis scaling excludes crash laps when determining y-axis max baseline.
-- Time Slip y-axis max is set to approximately 110% of max non-crash delta (with safe floor).
-- Crash laps cannot be used as Time Slip fastest-reference baseline.
-- If no non-crash lap exists for reference, Time Slip traces are omitted.
+- Crash laps are excluded from fastest-lap reference selection when a non-crash lap is available.
 
 4. Source/format-specific processing architecture
 - Split CSV parsing/lap-processing logic out of `app.js` into `file-processors.js`.
@@ -255,3 +279,29 @@ Recent Request-Driven Updates (2026-04-16)
 9. Production build updates
 - Production pipeline minifies final combined bundle (not only app source) before output.
 - Build pipeline includes `file-processors.js` in production bundle composition.
+
+Recent Request-Driven Updates (2026-04-19)
+
+1. Display-name-based Y-channel mapping
+- Added channel display mapping so Y-channel options can show one format-agnostic display name instead of separate PiBoSo / AiM source columns.
+- When a mapped display channel is selected, plotting resolves the correct per-format source channel for each loaded file.
+- Raw source columns covered by mapping entries are hidden from the Y-channel list.
+
+2. Default Y-channel selection behavior
+- Default Y-channel selection now chooses only one default channel: `Speed`.
+- If `Speed` is unavailable in the current files, the first available Y-channel is selected as a fallback.
+- Existing Y-channel selections are preserved when possible while the Y-channel list is rebuilt.
+
+3. External channel mapping config
+- Moved channel mapping configuration out of `app.js` into `channel-map.json`.
+- App loads `channel-map.json` at startup and falls back to built-in defaults if the JSON file is missing or invalid.
+- Production build now copies `channel-map.json` into `dist`, including gzip output for gzip-only builds.
+
+4. Lap selection defaults
+- When a file has 3 or more laps, the first and last laps default to unchecked to reduce in-lap / out-lap clutter.
+
+5. Time Slip baseline and axis behavior
+- Time Slip no longer uses the pointwise minimum across laps as its baseline.
+- Time Slip now uses one fixed fastest selected lap, based on overall lap time, as the zero-reference trace across the full lap.
+- Fastest non-crash lap is preferred as the baseline when available.
+- Time Slip axis range now supports negative deltas so partial-lap gains against the eventual fastest lap are visible.

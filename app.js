@@ -9,8 +9,19 @@
   const controlsClose = document.getElementById('controlsClose');
   const controlsBackdrop = document.getElementById('controlsBackdrop');
   const plotlyConfig = {responsive:true, displaylogo:false};
+  const DEFAULT_Y_CHANNEL = 'Speed';
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
+
+  // Fallback channel mapping if channel-map.json is unavailable.
+  // Each entry: { displayName, piboso, aim }
+  const DEFAULT_CHANNEL_MAP = [
+    { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed' },
+    { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc' },
+    { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
+  ];
+  let channelMap = DEFAULT_CHANNEL_MAP.slice();
+
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
 
@@ -125,12 +136,49 @@
 
   function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
+  function getChannelMap() {
+    return Array.isArray(channelMap) ? channelMap : [];
+  }
+
+  function normalizeChannelMapConfig(config) {
+    if (!Array.isArray(config)) return null;
+    const normalized = config
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const displayName = entry.displayName == null ? '' : String(entry.displayName).trim();
+        const piboso = entry.piboso == null ? '' : String(entry.piboso).trim();
+        const aim = entry.aim == null ? '' : String(entry.aim).trim();
+        if (!displayName) return null;
+        return { displayName, piboso, aim };
+      })
+      .filter(Boolean);
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  async function loadChannelMapConfig() {
+    try {
+      const response = await fetch('channel-map.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const config = await response.json();
+      const normalized = normalizeChannelMapConfig(config);
+      if (!normalized) throw new Error('Invalid channel-map.json format');
+      channelMap = normalized;
+      if (logs.length > 0) {
+        populateYSelect();
+        updatePlot();
+      }
+    } catch (err) {
+      console.warn('Using built-in channel map fallback:', err.message);
+      channelMap = DEFAULT_CHANNEL_MAP.slice();
+    }
+  }
+
   function populateYSelect() {
-    // collect numeric columns across logs and show unique
+    const previousSelections = new Set(Array.from(ySelect.selectedOptions).map(o => o.value));
+    // Collect all numeric columns across logs.
     const numericCols = new Set();
     logs.forEach(l => {
       l.cols.forEach(col => {
-        // check if column appears numeric in at least one row
         const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
         if (sample) {
           const val = sample[col];
@@ -139,18 +187,50 @@
         }
       });
     });
-    const arr = Array.from(numericCols).sort();
-    // use units when available; prefer units from the first log that has them
-    ySelect.innerHTML = arr.map(c => {
+
+    // Determine which raw column names are covered by CHANNEL_MAP entries.
+    // A raw column is "covered" if a CHANNEL_MAP entry maps to it in at least one loaded log.
+    const coveredRawCols = new Set();
+    const activeMappings = []; // mappings that have at least one matching column
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    // Build options: mapped display names first (sorted), then uncovered raw columns.
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
       let unit = '';
       for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
       const label = unit ? `${c} [${unit}]` : c;
-      return `<option value="${c}">${label}</option>`;
-    }).join('');
-    // default-select Speed if present
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    ySelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
     const opts = Array.from(ySelect.options);
-    const speedOpt = opts.find(o => o.value.toLowerCase() === 'speed');
-    if (speedOpt) { speedOpt.selected = true; }
+    const validPreviousSelections = new Set(Array.from(previousSelections).filter(value => opts.some(o => o.value === value)));
+    if (validPreviousSelections.size > 0) {
+      opts.forEach(o => { o.selected = validPreviousSelections.has(o.value); });
+    } else {
+      const defaultOpt = opts.find(o => o.value === DEFAULT_Y_CHANNEL)
+        || opts.find(o => o.value.toLowerCase() === DEFAULT_Y_CHANNEL.toLowerCase());
+      if (defaultOpt) {
+        defaultOpt.selected = true;
+      } else if (opts.length > 0) {
+        opts[0].selected = true;
+      }
+    }
   }
 
   function populateXYSelects() {
@@ -229,11 +309,15 @@
         filelapDurations.set(n, Math.max(filelapDurations.get(n) || 0, lt));
       });
       html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
-      fileLaps.forEach(n => {
+      const totalFileLaps = fileLaps.length;
+      fileLaps.forEach((n, idx) => {
         const color = colorForLap(n);
         const dur = filelapDurations.get(n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
-        html.push(`<label class="lap-item"><input type="checkbox" data-id="${log.id}" data-lap="${n}" checked style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
+        // Uncheck first and last lap (in/out laps) when there are 3 or more laps
+        const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
+        const checkedAttr = isInOutLap ? '' : ' checked';
+        html.push(`<label class="lap-item"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
       });
       html.push('</div></div>');
     });
@@ -271,6 +355,19 @@
     return Array.from(ySelect.selectedOptions).map(o=>o.value);
   }
 
+  // Resolve a Y channel value (which may be a CHANNEL_MAP displayName) to
+  // the actual column name present in the given log, based on its file format.
+  function resolveChannelForLog(yValue, log) {
+    const mapping = getChannelMap().find(m => m.displayName === yValue);
+    if (!mapping) return yValue; // raw column name, use as-is
+    const LP = window.LogFileProcessors;
+    const fmt = (log.meta && log.meta.format) ? log.meta.format : '';
+    if (LP && LP.isGPBikesFormat(fmt)) return mapping.piboso;
+    if (LP && LP.isAiMFormat(fmt)) return mapping.aim;
+    // Standard/unknown: fall back to displayName then piboso
+    return mapping.displayName || mapping.piboso;
+  }
+
   // Linear interpolation over a sorted X array.
   function interpAt(xArr, yArr, x) {
     if (!xArr || xArr.length === 0) return null;
@@ -294,7 +391,7 @@
   function buildTimeSlipTraces(selFiles, selectedLaps, xMode) {
     // Time slip is defined only against distance while split by lap.
     if (xMode !== 'distance') {
-      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
+      return {traces: [], nonCrashMaxDelta: null, nonCrashMinDelta: null, allMaxDelta: null, allMinDelta: null};
     }
 
     const lapSeries = [];
@@ -313,54 +410,83 @@
     });
 
     if (lapSeries.length < 2) {
-      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
+      return {traces: [], nonCrashMaxDelta: null, nonCrashMinDelta: null, allMaxDelta: null, allMinDelta: null};
     }
 
     const xSet = new Set();
     lapSeries.forEach(s => s.x.forEach(v => xSet.add(v)));
     const grid = Array.from(xSet).sort((a,b)=>a-b);
     if (grid.length < 2) {
-      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
+      return {traces: [], nonCrashMaxDelta: null, nonCrashMinDelta: null, allMaxDelta: null, allMinDelta: null};
+    }
+
+    const getLapDuration = (series) => {
+      for (let i = series.t.length - 1; i >= 0; i--) {
+        const value = series.t[i];
+        if (value != null && !isNaN(value)) return value;
+      }
+      return null;
+    };
+
+    const candidateIndices = lapSeries.map((s, i) => (!s.isCrashLap ? i : -1)).filter(i => i >= 0);
+    const refIndices = candidateIndices.length > 0
+      ? candidateIndices
+      : lapSeries.map((_, i) => i);
+    if (refIndices.length === 0) {
+      return {traces: [], nonCrashMaxDelta: null, nonCrashMinDelta: null, allMaxDelta: null, allMinDelta: null};
+    }
+
+    let referenceIndex = null;
+    let referenceDuration = null;
+    refIndices.forEach((index) => {
+      const duration = getLapDuration(lapSeries[index]);
+      if (duration == null) return;
+      if (referenceDuration == null || duration < referenceDuration) {
+        referenceDuration = duration;
+        referenceIndex = index;
+      }
+    });
+    if (referenceIndex == null) {
+      return {traces: [], nonCrashMaxDelta: null, nonCrashMinDelta: null, allMaxDelta: null, allMinDelta: null};
     }
 
     const timeAt = lapSeries.map(s => grid.map(g => interpAt(s.x, s.t, g)));
-    const refIndices = lapSeries.map((s, i) => (!s.isCrashLap ? i : -1)).filter(i => i >= 0);
-    if (refIndices.length === 0) {
-      return {traces: [], nonCrashMaxDelta: null, allMaxDelta: null};
-    }
-    const fastest = grid.map((_, gi) => {
-      const vals = refIndices
-        .map(i => timeAt[i][gi])
-        .filter(v => v != null && !isNaN(v));
-      if (vals.length === 0) return null;
-      return Math.min(...vals);
-    });
+    const referenceTimes = grid.map(g => interpAt(lapSeries[referenceIndex].x, lapSeries[referenceIndex].t, g));
 
     const tsTraces = [];
     let nonCrashMaxDelta = null;
+    let nonCrashMinDelta = null;
     let allMaxDelta = null;
+    let allMinDelta = null;
     for (let si = 0; si < lapSeries.length; si++) {
       const s = lapSeries[si];
-      const deltas = timeAt[si].map((v, gi) => (v == null || fastest[gi] == null) ? null : (v - fastest[gi]));
+      const deltas = timeAt[si].map((v, gi) => (v == null || referenceTimes[gi] == null) ? null : (v - referenceTimes[gi]));
       if (deltas.every(v => v == null || isNaN(v))) continue;
       const validDeltas = deltas.filter(v => v != null && !isNaN(v));
       if (validDeltas.length > 0) {
         const traceMax = Math.max(...validDeltas);
+        const traceMin = Math.min(...validDeltas);
         if (allMaxDelta == null || traceMax > allMaxDelta) allMaxDelta = traceMax;
+        if (allMinDelta == null || traceMin < allMinDelta) allMinDelta = traceMin;
         if (!s.isCrashLap && (nonCrashMaxDelta == null || traceMax > nonCrashMaxDelta)) {
           nonCrashMaxDelta = traceMax;
+        }
+        if (!s.isCrashLap && (nonCrashMinDelta == null || traceMin < nonCrashMinDelta)) {
+          nonCrashMinDelta = traceMin;
         }
       }
       const color = colorForLap(s.lap);
       tsTraces.push({x: grid, y: deltas, xaxis:'x2', yaxis:'y2', name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
     }
 
-    return {traces: tsTraces, nonCrashMaxDelta, allMaxDelta};
+    return {traces: tsTraces, nonCrashMaxDelta, nonCrashMinDelta, allMaxDelta, allMinDelta};
   }
 
   function getUnitForChannel(channel) {
+    // channel may be a CHANNEL_MAP displayName; resolve per log
     for (const l of logs) {
-      if (l.meta && l.meta.units && l.meta.units[channel] != null) return l.meta.units[channel];
+      const col = resolveChannelForLog(channel, l);
+      if (l.meta && l.meta.units && l.meta.units[col] != null) return l.meta.units[col];
     }
     return null;
   }
@@ -504,9 +630,11 @@
 
     if (includeTimeSlip && layout.yaxis2) {
       const baselineMax = Number.isFinite(tsBuilt.nonCrashMaxDelta) ? tsBuilt.nonCrashMaxDelta : tsBuilt.allMaxDelta;
-      if (Number.isFinite(baselineMax)) {
-        const cappedMax = Math.max(0.1, baselineMax * 1.1);
-        layout.yaxis2.range = [0, cappedMax];
+      const baselineMin = Number.isFinite(tsBuilt.nonCrashMinDelta) ? tsBuilt.nonCrashMinDelta : tsBuilt.allMinDelta;
+      if (Number.isFinite(baselineMax) && Number.isFinite(baselineMin)) {
+        const paddedMax = Math.max(0.05, baselineMax * 1.1);
+        const paddedMin = Math.min(-0.05, baselineMin * 1.1);
+        layout.yaxis2.range = [paddedMin, paddedMax];
       }
     }
 
@@ -521,8 +649,10 @@
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         ycols.forEach(y => {
+          const resolvedCol = resolveChannelForLog(y, log);
+          if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
           const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
-          const yArr = maskIdx.map(i => log.data[i][y]);
+          const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
           const dash = DASHES[li % DASHES.length];
           traces.push({x: xArr, y: yArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
@@ -540,8 +670,10 @@
           lapNums.forEach(lap => {
             if (!isLapSelected(selectedLaps, log.id, lap)) return;
             const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+            const resolvedCol = resolveChannelForLog(y, log);
+            if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
             const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
-            const yArr = maskIdx.map(i => log.data[i][y]);
+            const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
             if (xArr.length>0) allLapSeries.push({x:xArr, y:yArr});
           });
         });
@@ -630,7 +762,7 @@
       const fileColor = COLORS[idx % COLORS.length];
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
-        if (selectedLaps.size && !selectedLaps.has(lap)) return;
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         const xArr = maskIdx.map(i => log.data[i][xcol]);
         const yArr = maskIdx.map(i => log.data[i][ycol]);
@@ -664,5 +796,7 @@
   filesList.addEventListener('change', (ev)=>{
     if (ev.target.matches('input[type=checkbox]')) updatePlot();
   });
+
+  loadChannelMapConfig();
 
 })();

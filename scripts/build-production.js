@@ -41,6 +41,8 @@ try {
   const gzipFile = `${bundleFile}.gz`;
   const distHtml = path.join(distDir, 'index.html');
   const distCss = path.join(distDir, 'style.css');
+  const distChannelMap = path.join(distDir, 'channel-map.json');
+  const sourceChannelMap = path.join(rootDir, 'channel-map.json');
   const plotlySource = require.resolve('plotly.js-basic-dist');
   const papaSource = require.resolve('papaparse/papaparse.min.js');
 
@@ -70,17 +72,20 @@ try {
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
   writeMaybeCompressed(distCss, fs.readFileSync(path.join(rootDir, 'style.css')), gzipOnly);
+  writeMaybeCompressed(distChannelMap, fs.readFileSync(sourceChannelMap), gzipOnly);
 
   if (gzipOnly) {
     console.log(`Built ${bundleFile}.gz`);
     console.log(`Built ${distHtml}.gz`);
     console.log(`Built ${distCss}.gz`);
+    console.log(`Built ${distChannelMap}.gz`);
     console.log('Created gzip-only dist for ESP32-style hosting');
   } else {
     console.log(`Built ${bundleFile}`);
     console.log(`Built ${gzipFile}`);
     console.log(`Built ${distHtml}`);
     console.log(`Built ${distCss}`);
+    console.log(`Built ${distChannelMap}`);
   }
 } catch (err) {
   console.error('Production build failed:', err.message);
