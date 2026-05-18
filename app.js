@@ -9,9 +9,18 @@
   const controlsToggle = document.getElementById('controlsToggle');
   const controlsClose = document.getElementById('controlsClose');
   const controlsBackdrop = document.getElementById('controlsBackdrop');
+  const mapXOffsetInput = document.getElementById('mapXOffset');
+  const mapYOffsetInput = document.getElementById('mapYOffset');
+  const mapCenterLatInput = document.getElementById('mapCenterLat');
+  const mapCenterLonInput = document.getElementById('mapCenterLon');
+  const mapFitInfo = document.getElementById('mapFitInfo');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
+  const DERIVED_MAP_X_COL = 'Map X';
+  const DERIVED_MAP_Y_COL = 'Map Y';
+  const DERIVED_LAT_COL = 'Derived Latitude';
+  const DERIVED_LON_COL = 'Derived Longitude';
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -28,6 +37,11 @@
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
+  let isApplyingAutoOffset = false;
+  let isApplyingAutoCenter = false;
+  let mapOffsetManuallyAdjusted = false;
+  let mapCenterManuallyAdjusted = false;
+  let lastAutoOffsetSignature = '';
 
   function rowKey(fileId, lap, rowIndex) {
     return `${fileId}|${lap}|${rowIndex}`;
@@ -161,6 +175,8 @@
 
         meta.lapNum = lapNum;
         meta.lapTime = lapTime;
+
+        deriveAndExposeMapXY(data, cols, meta);
 
         // expose lap columns in data rows and cols list
         if (!cols.includes('Lap Time')) cols.push('Lap Time');
@@ -642,6 +658,270 @@
     return mobile ? Math.min(Math.max(window.innerHeight * 0.28, 170), 340) : 300;
   }
 
+  function getMapOffsets() {
+    const xOffset = Number(mapXOffsetInput && mapXOffsetInput.value);
+    const yOffset = Number(mapYOffsetInput && mapYOffsetInput.value);
+    return {
+      x: Number.isFinite(xOffset) ? xOffset : 0,
+      y: Number.isFinite(yOffset) ? yOffset : 0
+    };
+  }
+
+  function getManualMapOrigin() {
+    const lat = Number(mapCenterLatInput && mapCenterLatInput.value);
+    const lon = Number(mapCenterLonInput && mapCenterLonInput.value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return { originLat: lat, originLon: lon };
+  }
+
+  function setMapOffsetInputs(x, y) {
+    if (!mapXOffsetInput || !mapYOffsetInput) return;
+    isApplyingAutoOffset = true;
+    mapXOffsetInput.value = Number.isFinite(x) ? x.toFixed(3) : '0';
+    mapYOffsetInput.value = Number.isFinite(y) ? y.toFixed(3) : '0';
+    isApplyingAutoOffset = false;
+  }
+
+  function setMapCenterInputsIfAuto(origin) {
+    if (!mapCenterLatInput || !mapCenterLonInput) return;
+    if (!origin || !Number.isFinite(origin.originLat) || !Number.isFinite(origin.originLon)) return;
+    if (mapCenterManuallyAdjusted) return;
+    isApplyingAutoCenter = true;
+    mapCenterLatInput.value = origin.originLat.toFixed(6);
+    mapCenterLonInput.value = origin.originLon.toFixed(6);
+    isApplyingAutoCenter = false;
+  }
+
+  function buildCenterInfoSuffix(origin) {
+    if (!origin || !Number.isFinite(origin.originLat) || !Number.isFinite(origin.originLon)) return '';
+    return ` | Center Lat/Lng ${origin.originLat.toFixed(6)}, ${origin.originLon.toFixed(6)}`;
+  }
+
+  function updateMapFitInfo(text) {
+    if (!mapFitInfo) return;
+    mapFitInfo.textContent = text || '';
+  }
+
+  function getNativeXYCols(log) {
+    const cols = Array.isArray(log.cols) ? log.cols : [];
+    const xCol = findColumnIgnoreCase(cols, ['PosX']);
+    const yCol = findColumnIgnoreCase(cols, ['PosY']);
+    if (!xCol || !yCol) return null;
+    return { xCol, yCol };
+  }
+
+  function getRowIndicesForLap(log, lap, selectedLaps) {
+    if (!isLapSelected(selectedLaps, log.id, lap)) return [];
+    return (log.meta.lapNum || []).map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+  }
+
+  function collectPointSeries(log, indices, getterX, getterY) {
+    const points = [];
+    indices.forEach((idx) => {
+      const x = Number(getterX(idx));
+      const y = Number(getterY(idx));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      points.push({ x, y });
+    });
+    return points;
+  }
+
+  function buildLapAlignedPairs(posPts, mapPts) {
+    const n = Math.min(posPts.length, mapPts.length);
+    if (n < 2) return [];
+    if (n === 2) {
+      return [
+        { posX: posPts[0].x, posY: posPts[0].y, mapX: mapPts[0].x, mapY: mapPts[0].y },
+        { posX: posPts[1].x, posY: posPts[1].y, mapX: mapPts[1].x, mapY: mapPts[1].y }
+      ];
+    }
+
+    const pairs = [];
+    for (let k = 0; k < n; k++) {
+      const posIdx = Math.floor((k * (posPts.length - 1)) / (n - 1));
+      const mapIdx = Math.floor((k * (mapPts.length - 1)) / (n - 1));
+      const p = posPts[posIdx];
+      const m = mapPts[mapIdx];
+      pairs.push({ posX: p.x, posY: p.y, mapX: m.x, mapY: m.y });
+    }
+    return pairs;
+  }
+
+  function getDerivedMapLogs(selFiles) {
+    return selFiles.filter(l => Array.isArray(l.cols) && l.cols.includes(DERIVED_MAP_X_COL) && l.cols.includes(DERIVED_MAP_Y_COL));
+  }
+
+  function getNativeXYLogs(selFiles) {
+    return selFiles.filter(l => !!getNativeXYCols(l));
+  }
+
+  function computeAutoMapOffsetFit(selFiles, selectedLaps) {
+    if (!window.MapCoordinateUtils || typeof window.MapCoordinateUtils.fitTranslationLeastSquares !== 'function') return null;
+
+    const mapLogs = getDerivedMapLogs(selFiles);
+    const posLogs = getNativeXYLogs(selFiles);
+    if (mapLogs.length === 0 || posLogs.length === 0) return null;
+
+    let best = null;
+
+    posLogs.forEach((posLog) => {
+      const posCols = getNativeXYCols(posLog);
+      if (!posCols) return;
+
+      mapLogs.forEach((mapLog) => {
+        const posLapSet = new Set(posLog.meta.lapNum || []);
+        const mapLapSet = new Set(mapLog.meta.lapNum || []);
+        const sharedLaps = Array.from(posLapSet).filter(l => mapLapSet.has(l)).sort((a, b) => a - b);
+        if (sharedLaps.length === 0) return;
+
+        const allPairs = [];
+        sharedLaps.forEach((lap) => {
+          const posIdx = getRowIndicesForLap(posLog, lap, selectedLaps);
+          const mapIdx = getRowIndicesForLap(mapLog, lap, selectedLaps);
+          if (posIdx.length < 2 || mapIdx.length < 2) return;
+
+          const posPts = collectPointSeries(posLog, posIdx, i => posLog.data[i][posCols.xCol], i => posLog.data[i][posCols.yCol]);
+          const mapBaseX = mapLog.meta && mapLog.meta.mapDerivedXY && Array.isArray(mapLog.meta.mapDerivedXY.x)
+            ? mapLog.meta.mapDerivedXY.x
+            : null;
+          const mapBaseY = mapLog.meta && mapLog.meta.mapDerivedXY && Array.isArray(mapLog.meta.mapDerivedXY.y)
+            ? mapLog.meta.mapDerivedXY.y
+            : null;
+          const mapPts = collectPointSeries(
+            mapLog,
+            mapIdx,
+            i => mapBaseX ? mapBaseX[i] : mapLog.data[i][DERIVED_MAP_X_COL],
+            i => mapBaseY ? mapBaseY[i] : mapLog.data[i][DERIVED_MAP_Y_COL]
+          );
+          allPairs.push(...buildLapAlignedPairs(posPts, mapPts));
+        });
+
+        const fit = window.MapCoordinateUtils.fitTranslationLeastSquares(allPairs);
+        if (!fit || !Number.isFinite(fit.offsetX) || !Number.isFinite(fit.offsetY) || fit.pairCount < 2) return;
+
+        const candidate = {
+          ...fit,
+          posLog,
+          mapLog,
+          originLat: mapLog.meta && mapLog.meta.mapDerivedXY ? mapLog.meta.mapDerivedXY.originLat : null,
+          originLon: mapLog.meta && mapLog.meta.mapDerivedXY ? mapLog.meta.mapDerivedXY.originLon : null,
+          lapCount: sharedLaps.length
+        };
+
+        if (!best) {
+          best = candidate;
+          return;
+        }
+        if (candidate.pairCount > best.pairCount) {
+          best = candidate;
+          return;
+        }
+        if (candidate.pairCount === best.pairCount && Number.isFinite(candidate.meanAbsError) && Number.isFinite(best.meanAbsError) && candidate.meanAbsError < best.meanAbsError) {
+          best = candidate;
+        }
+      });
+    });
+
+    return best;
+  }
+
+  function updateGpBikesDerivedLatLon(offsets, origin) {
+    if (!window.MapCoordinateUtils || typeof window.MapCoordinateUtils.localXYToLatLonMeters !== 'function') return false;
+    if (!origin || !Number.isFinite(origin.originLat) || !Number.isFinite(origin.originLon)) return false;
+
+    let addedCols = false;
+    logs.forEach((log) => {
+      const nativeCols = getNativeXYCols(log);
+      if (!nativeCols) return;
+
+      if (!log.cols.includes(DERIVED_LAT_COL)) {
+        log.cols.push(DERIVED_LAT_COL);
+        addedCols = true;
+      }
+      if (!log.cols.includes(DERIVED_LON_COL)) {
+        log.cols.push(DERIVED_LON_COL);
+        addedCols = true;
+      }
+      if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+      log.meta.units[DERIVED_LAT_COL] = 'deg';
+      log.meta.units[DERIVED_LON_COL] = 'deg';
+
+      log.data.forEach((row) => {
+        const posX = Number(row[nativeCols.xCol]);
+        const posY = Number(row[nativeCols.yCol]);
+        if (!Number.isFinite(posX) || !Number.isFinite(posY)) {
+          row[DERIVED_LAT_COL] = null;
+          row[DERIVED_LON_COL] = null;
+          return;
+        }
+
+        const localX = posX - offsets.x;
+        const localY = posY - offsets.y;
+        const ll = window.MapCoordinateUtils.localXYToLatLonMeters(localX, localY, origin.originLat, origin.originLon);
+        row[DERIVED_LAT_COL] = ll ? ll.lat : null;
+        row[DERIVED_LON_COL] = ll ? ll.lon : null;
+      });
+    });
+
+    return addedCols;
+  }
+
+  function getFirstDerivedMapOrigin(selFiles) {
+    const candidates = Array.isArray(selFiles) && selFiles.length > 0 ? selFiles : logs;
+    for (const log of candidates) {
+      const origin = log && log.meta && log.meta.mapDerivedXY;
+      if (!origin) continue;
+      if (Number.isFinite(origin.originLat) && Number.isFinite(origin.originLon)) {
+        return { originLat: origin.originLat, originLon: origin.originLon };
+      }
+    }
+    return null;
+  }
+
+  function maybeAutoFitOffsets(selFiles, selectedLaps) {
+    const fit = computeAutoMapOffsetFit(selFiles, selectedLaps);
+    if (!fit) {
+      const aimOrigin = getFirstDerivedMapOrigin(selFiles);
+      const manualOrigin = getManualMapOrigin();
+      const fallbackOrigin = aimOrigin || manualOrigin;
+      if (fallbackOrigin) {
+        const addedCols = updateGpBikesDerivedLatLon(getMapOffsets(), fallbackOrigin);
+        if (addedCols) {
+          populateYSelect();
+          populateXYSelects();
+        }
+        if (aimOrigin) setMapCenterInputsIfAuto(aimOrigin);
+        const originSource = aimOrigin ? 'AiM origin' : 'manual center origin';
+        const centerSuffix = buildCenterInfoSuffix(fallbackOrigin);
+        updateMapFitInfo(`Auto fit waiting for both Lat/Lon-derived and PosX/PosY datasets. Using ${originSource} for GP Bikes Derived Latitude/Longitude.${centerSuffix}`);
+      } else {
+        updateMapFitInfo('Auto fit waiting for both Lat/Lon-derived and PosX/PosY datasets. Enter Center Lat/Lng to derive GP Bikes Latitude/Longitude without AiM data.');
+      }
+      return;
+    }
+
+    const signature = `${fit.posLog.id}|${fit.mapLog.id}|${fit.pairCount}|${fit.lapCount}`;
+    const shouldApply = !mapOffsetManuallyAdjusted || lastAutoOffsetSignature !== signature;
+    if (shouldApply) {
+      setMapOffsetInputs(fit.offsetX, fit.offsetY);
+      mapOffsetManuallyAdjusted = false;
+      lastAutoOffsetSignature = signature;
+    }
+
+    const offsets = getMapOffsets();
+    const fitOrigin = { originLat: fit.originLat, originLon: fit.originLon };
+    const addedCols = updateGpBikesDerivedLatLon(offsets, fitOrigin);
+    if (addedCols) {
+      populateYSelect();
+      populateXYSelects();
+    }
+    setMapCenterInputsIfAuto(fitOrigin);
+
+    const fitErr = Number.isFinite(fit.meanAbsError) ? fit.meanAbsError.toFixed(3) : 'n/a';
+    const centerSuffix = buildCenterInfoSuffix(fitOrigin);
+    updateMapFitInfo(`Auto offset X=${fit.offsetX.toFixed(3)} m, Y=${fit.offsetY.toFixed(3)} m | Avg error ${fitErr} m (${fit.pairCount} pts)${centerSuffix}`);
+  }
+
   function findColumnIgnoreCase(cols, candidates) {
     if (!Array.isArray(cols) || !Array.isArray(candidates)) return null;
     const lowered = new Map(cols.map(col => [String(col).trim().toLowerCase(), col]));
@@ -652,7 +932,63 @@
     return null;
   }
 
-  function getMapColumnsForLog(log) {
+  function findLatLonColumns(cols, meta) {
+    const lat = (meta && meta.latCol) || findColumnIgnoreCase(cols, ['GPS Latitude', 'Latitude', 'Lat']);
+    const lon = (meta && meta.lonCol) || findColumnIgnoreCase(cols, ['GPS Longitude', 'Longitude', 'Lon', 'Lng']);
+    if (!lat || !lon) return null;
+    return { latCol: lat, lonCol: lon };
+  }
+
+  function deriveAndExposeMapXY(data, cols, meta) {
+    if (!window.MapCoordinateUtils || !Array.isArray(data) || !Array.isArray(cols) || !meta) return false;
+
+    const latLonCols = findLatLonColumns(cols, meta);
+    if (!latLonCols) return false;
+
+    const latSeries = data.map(r => r[latLonCols.latCol]);
+    const lonSeries = data.map(r => r[latLonCols.lonCol]);
+    const derivedXY = window.MapCoordinateUtils.buildDerivedXY(latSeries, lonSeries);
+    if (!derivedXY) return false;
+
+    meta.latCol = latLonCols.latCol;
+    meta.lonCol = latLonCols.lonCol;
+    meta.mapDerivedXY = derivedXY;
+
+    if (!cols.includes(DERIVED_MAP_X_COL)) cols.push(DERIVED_MAP_X_COL);
+    if (!cols.includes(DERIVED_MAP_Y_COL)) cols.push(DERIVED_MAP_Y_COL);
+    data.forEach((row, i) => {
+      row[DERIVED_MAP_X_COL] = derivedXY.x[i];
+      row[DERIVED_MAP_Y_COL] = derivedXY.y[i];
+    });
+    if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+    meta.units[DERIVED_MAP_X_COL] = 'm';
+    meta.units[DERIVED_MAP_Y_COL] = 'm';
+    return true;
+  }
+
+  function applyOffsetsToDerivedMapXY(offsets) {
+    logs.forEach((log) => {
+      if (!log || !log.meta || !log.meta.mapDerivedXY) return;
+      const baseX = Array.isArray(log.meta.mapDerivedXY.x) ? log.meta.mapDerivedXY.x : null;
+      const baseY = Array.isArray(log.meta.mapDerivedXY.y) ? log.meta.mapDerivedXY.y : null;
+      if (!baseX || !baseY) return;
+
+      if (!log.cols.includes(DERIVED_MAP_X_COL)) log.cols.push(DERIVED_MAP_X_COL);
+      if (!log.cols.includes(DERIVED_MAP_Y_COL)) log.cols.push(DERIVED_MAP_Y_COL);
+      if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+      log.meta.units[DERIVED_MAP_X_COL] = 'm';
+      log.meta.units[DERIVED_MAP_Y_COL] = 'm';
+
+      for (let i = 0; i < log.data.length; i++) {
+        const x0 = Number(baseX[i]);
+        const y0 = Number(baseY[i]);
+        log.data[i][DERIVED_MAP_X_COL] = Number.isFinite(x0) ? x0 + offsets.x : null;
+        log.data[i][DERIVED_MAP_Y_COL] = Number.isFinite(y0) ? y0 + offsets.y : null;
+      }
+    });
+  }
+
+  function getMapSourceForLog(log) {
     const cols = Array.isArray(log.cols) ? log.cols : [];
     const LP = window.LogFileProcessors;
     const fmt = (log.meta && log.meta.format) ? log.meta.format : '';
@@ -660,24 +996,68 @@
     if (LP && LP.isGPBikesFormat(fmt)) {
       const posX = findColumnIgnoreCase(cols, ['PosX']);
       const posY = findColumnIgnoreCase(cols, ['PosY']);
-      if (posX && posY) return { xCol: posX, yCol: posY, xTitle: posX, yTitle: posY };
+      if (posX && posY) {
+        return {
+          type: 'native-xy',
+          xAt: (index) => Number(log.data[index][posX]),
+          yAt: (index) => Number(log.data[index][posY]),
+          axisXTitle: 'Map X (m)',
+          axisYTitle: 'Map Y (m)',
+          hoverXTitle: posX,
+          hoverYTitle: posY
+        };
+      }
     }
 
-    if (LP && LP.isAiMFormat(fmt)) {
-      const lon = findColumnIgnoreCase(cols, ['GPS Longitude', 'Longitude', 'Lon', 'Lng']);
-      const lat = findColumnIgnoreCase(cols, ['GPS Latitude', 'Latitude', 'Lat']);
-      if (lon && lat) return { xCol: lon, yCol: lat, xTitle: lon, yTitle: lat };
+    if (cols.includes(DERIVED_MAP_X_COL) && cols.includes(DERIVED_MAP_Y_COL)) {
+      return {
+        type: 'derived-latlon',
+        xAt: (index) => Number(log.data[index][DERIVED_MAP_X_COL]),
+        yAt: (index) => Number(log.data[index][DERIVED_MAP_Y_COL]),
+        axisXTitle: 'Map X (m)',
+        axisYTitle: 'Map Y (m)',
+        hoverXTitle: DERIVED_MAP_X_COL,
+        hoverYTitle: DERIVED_MAP_Y_COL
+      };
     }
 
-    const fallbackLon = (log.meta && log.meta.lonCol) ? log.meta.lonCol : findColumnIgnoreCase(cols, ['Longitude', 'Lon', 'Lng']);
-    const fallbackLat = (log.meta && log.meta.latCol) ? log.meta.latCol : findColumnIgnoreCase(cols, ['Latitude', 'Lat']);
-    if (fallbackLon && fallbackLat) {
-      return { xCol: fallbackLon, yCol: fallbackLat, xTitle: fallbackLon, yTitle: fallbackLat };
+    if (log.meta && log.meta.mapDerivedXY && Array.isArray(log.meta.mapDerivedXY.x) && Array.isArray(log.meta.mapDerivedXY.y)) {
+      return {
+        type: 'derived-latlon',
+        xAt: (index) => log.meta.mapDerivedXY.x[index],
+        yAt: (index) => log.meta.mapDerivedXY.y[index],
+        axisXTitle: 'Map X (m)',
+        axisYTitle: 'Map Y (m)',
+        hoverXTitle: 'Map X (m)',
+        hoverYTitle: 'Map Y (m)'
+      };
+    }
+
+    if (deriveAndExposeMapXY(log.data, cols, log.meta)) {
+      return {
+        type: 'derived-latlon',
+        xAt: (index) => Number(log.data[index][DERIVED_MAP_X_COL]),
+        yAt: (index) => Number(log.data[index][DERIVED_MAP_Y_COL]),
+        axisXTitle: 'Map X (m)',
+        axisYTitle: 'Map Y (m)',
+        hoverXTitle: DERIVED_MAP_X_COL,
+        hoverYTitle: DERIVED_MAP_Y_COL
+      };
     }
 
     const posX = findColumnIgnoreCase(cols, ['PosX']);
     const posY = findColumnIgnoreCase(cols, ['PosY']);
-    if (posX && posY) return { xCol: posX, yCol: posY, xTitle: posX, yTitle: posY };
+    if (posX && posY) {
+      return {
+        type: 'native-xy',
+        xAt: (index) => Number(log.data[index][posX]),
+        yAt: (index) => Number(log.data[index][posY]),
+        axisXTitle: 'Map X (m)',
+        axisYTitle: 'Map Y (m)',
+        hoverXTitle: posX,
+        hoverYTitle: posY
+      };
+    }
 
     return null;
   }
@@ -686,16 +1066,12 @@
     if (!mapDiv) return;
     const traces = [];
     const nextHoverLookup = new Map();
-    let axisTitles = null;
+    let axisTitles = { x: 'Map X (m)', y: 'Map Y (m)' };
 
     selFiles.forEach((log, fileIdx) => {
-      const mapCols = getMapColumnsForLog(log);
-      if (!mapCols) return;
-      if (!axisTitles) {
-        axisTitles = { x: mapCols.xTitle, y: mapCols.yTitle };
-      } else if (axisTitles.x !== mapCols.xTitle || axisTitles.y !== mapCols.yTitle) {
-        axisTitles = { x: 'Map X', y: 'Map Y' };
-      }
+      const mapSource = getMapSourceForLog(log);
+      if (!mapSource) return;
+      axisTitles = { x: mapSource.axisXTitle, y: mapSource.axisYTitle };
 
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
@@ -705,9 +1081,11 @@
         const yArr = [];
         const keyArr = [];
         maskIdx.forEach((i) => {
-          const x = Number(log.data[i][mapCols.xCol]);
-          const y = Number(log.data[i][mapCols.yCol]);
-          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          const xRaw = mapSource.xAt(i);
+          const yRaw = mapSource.yAt(i);
+          if (!Number.isFinite(xRaw) || !Number.isFinite(yRaw)) return;
+          const x = xRaw;
+          const y = yRaw;
           const key = rowKey(log.id, lap, i);
           xArr.push(x);
           yArr.push(y);
@@ -725,7 +1103,7 @@
           customdata: keyArr,
           name: `${log.name} — Lap ${lap}`,
           line: { color, dash },
-          hovertemplate: `${log.name}<br>Lap ${lap}<br>${mapCols.xTitle}: %{x}<br>${mapCols.yTitle}: %{y}<extra></extra>`
+          hovertemplate: `${log.name}<br>Lap ${lap}<br>${mapSource.hoverXTitle}: %{x}<br>${mapSource.hoverYTitle}: %{y}<extra></extra>`
         });
       });
     });
@@ -755,9 +1133,9 @@
 
     const mapLayout = {
       margin: { t: 30, l: 60, r: 20, b: 55 },
-      xaxis: { title: (axisTitles && axisTitles.x) || 'Map X', automargin: true },
+      xaxis: { title: (axisTitles && axisTitles.x) || 'Map X (m)', automargin: true },
       yaxis: {
-        title: (axisTitles && axisTitles.y) || 'Map Y',
+        title: (axisTitles && axisTitles.y) || 'Map Y (m)',
         automargin: true,
         scaleanchor: 'x',
         scaleratio: 1
@@ -819,6 +1197,9 @@
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
+
+    maybeAutoFitOffsets(selFiles, selectedLaps);
+    applyOffsetsToDerivedMapXY(getMapOffsets());
 
     if (includeTimeSlip && layout.yaxis2) {
       const baselineMax = Number.isFinite(tsBuilt.nonCrashMaxDelta) ? tsBuilt.nonCrashMaxDelta : tsBuilt.allMaxDelta;
@@ -910,6 +1291,22 @@
   xRadios.forEach(r=> r.addEventListener('change', ()=> updatePlot()));
   const shadeBox = document.getElementById('shadeLaps');
   if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
+  if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
+    if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
+    updatePlot();
+  });
+  if (mapYOffsetInput) mapYOffsetInput.addEventListener('input', ()=> {
+    if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
+    updatePlot();
+  });
+  if (mapCenterLatInput) mapCenterLatInput.addEventListener('input', ()=> {
+    if (!isApplyingAutoCenter) mapCenterManuallyAdjusted = true;
+    updatePlot();
+  });
+  if (mapCenterLonInput) mapCenterLonInput.addEventListener('input', ()=> {
+    if (!isApplyingAutoCenter) mapCenterManuallyAdjusted = true;
+    updatePlot();
+  });
   ySelect.addEventListener('change', ()=> updatePlot());
 
   filesList.addEventListener('click', (ev)=>{
@@ -918,6 +1315,8 @@
       const idx = logs.findIndex(l=>l.id===id);
       if (idx>=0) {
         logs.splice(idx,1);
+        mapOffsetManuallyAdjusted = false;
+        lastAutoOffsetSignature = '';
         renderFilesList();
         populateYSelect();
         populateXYSelects();
@@ -964,6 +1363,8 @@
     const traces = [];
     const plotByLap = true;
     const selectedLaps = getSelectedLaps();
+    maybeAutoFitOffsets(selFiles, selectedLaps);
+    applyOffsetsToDerivedMapXY(getMapOffsets());
     selFiles.forEach((log, idx) => {
       if (!log.cols.includes(xcol) || !log.cols.includes(ycol)) return;
       const fileColor = COLORS[idx % COLORS.length];
@@ -998,6 +1399,12 @@
 
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
+    mapOffsetManuallyAdjusted = false;
+    mapCenterManuallyAdjusted = false;
+    lastAutoOffsetSignature = '';
+    if (mapCenterLatInput) mapCenterLatInput.value = '';
+    if (mapCenterLonInput) mapCenterLonInput.value = '';
+    updateMapFitInfo('');
     renderFilesList();
     populateYSelect();
     populateXYSelects();
