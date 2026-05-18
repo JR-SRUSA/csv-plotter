@@ -34,6 +34,7 @@ try {
   const distDir = path.join(rootDir, 'dist');
   const appSource = path.join(rootDir, 'app.js');
   const processorSource = path.join(rootDir, 'file-processors.js');
+  const mapCoordSource = path.join(rootDir, 'map-coordinate-utils.js');
   const appMinified = path.join(buildDir, 'app.min.js');
   const bundleSource = path.join(buildDir, 'gpbikes-plotter.bundle.js');
   const bundleMinified = path.join(buildDir, 'gpbikes-plotter.bundle.min.js');
@@ -55,6 +56,7 @@ try {
     fs.readFileSync(plotlySource, 'utf8'),
     fs.readFileSync(papaSource, 'utf8'),
     fs.readFileSync(processorSource, 'utf8'),
+    fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(appMinified, 'utf8')
   ];
 
@@ -68,6 +70,7 @@ try {
     .replace(/\s*<script src="lib\/plotly-custom\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/papaparse@5\.4\.1\/papaparse\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="file-processors\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="map-coordinate-utils\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);

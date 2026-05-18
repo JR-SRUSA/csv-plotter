@@ -67,13 +67,26 @@
           </div>
         </div>
 
+        <div class="map-align-controls">
+          <strong>Map Alignment (Lat/Lon to X/Y)</strong>
+          <div class="xy-row">
+            <label>X Offset (m): <input id="mapXOffset" type="number" step="0.1" value="0" /></label>
+            <label>Y Offset (m): <input id="mapYOffset" type="number" step="0.1" value="0" /></label>
+          </div>
+          <div class="xy-row">
+            <label>Center Lat (deg): <input id="mapCenterLat" type="number" step="0.000001" placeholder="e.g. 40.123456" /></label>
+            <label>Center Lng (deg): <input id="mapCenterLon" type="number" step="0.000001" placeholder="e.g. -79.123456" /></label>
+          </div>
+          <div id="mapFitInfo" class="map-fit-info" aria-live="polite"></div>
+        </div>
+
         <div>
           <button id="plotBtn">Plot Selected</button>
           <button id="clearBtn">Clear All</button>
         </div>
       </div>
 
-      <div class="controls-version" aria-label="Application version">Version 2026-05-18e</div>
+      <div class="controls-version" aria-label="Application version">Version 2026-05-18s</div>
     </section>
 
     <section class="plot">
@@ -87,6 +100,7 @@
   </footer>
 
   <script src="file-processors.js"></script>
+  <script src="map-coordinate-utils.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
