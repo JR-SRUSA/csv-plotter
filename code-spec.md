@@ -347,3 +347,61 @@ Recent Request-Driven Updates (2026-05-18)
 4. Hover binding robustness
 - Fixed runtime error from early hover-handler attachment by binding only after main plot initialization.
 - Added guards for environments where plot event methods are not available yet.
+
+Recent Request-Driven Updates (2026-05-18, Alignment and Origin)
+
+1. Lat/Lon -> local XY derivation model
+- Added derived local map columns from latitude/longitude:
+	- `Map X`
+	- `Map Y`
+- Derived XY values are anchored to a computed center origin from AiM latitude/longitude data.
+- Original unshifted derived XY arrays are retained in per-log metadata (`meta.mapDerivedXY`) for stable re-derivation and fitting.
+
+2. Offset semantics (single-application rule)
+- Imported GP Bikes `PosX`/`PosY` data remains unchanged.
+- Offset is applied only to derived `Map X`/`Map Y` values.
+- Offset is applied once at dataset derivation/update time, not again during plotting.
+- Plot traces consume current dataset values directly to avoid double-offset behavior.
+
+3. Auto-fit offset computation
+- Added least-squares translation fitting between GP Bikes `PosX`/`PosY` and AiM-derived map XY.
+- Fit solves translation-only parameters:
+	- `offsetX`
+	- `offsetY`
+- Fit reports average alignment error (mean absolute point error) and point count.
+- Fit uses unshifted base derived XY values (`meta.mapDerivedXY`) so fit quality is not biased by previously applied display offsets.
+
+4. GP Bikes derived latitude/longitude
+- Added derived geodetic channels for GP Bikes logs:
+	- `Derived Latitude`
+	- `Derived Longitude`
+- Derived Lat/Lng are computed from GP Bikes `PosX`/`PosY` using inverse local XY transform and the active origin.
+- Conversion uses:
+	- `localX = PosX - offsetX`
+	- `localY = PosY - offsetY`
+- Derived columns are exposed to plotting selectors when available.
+
+5. Origin selection and fallback behavior
+- Origin priority for GP Bikes derived Lat/Lng:
+	1. Auto-fit origin (when fit is available)
+	2. AiM-derived center origin (when AiM lat/lon exists)
+	3. User-entered manual center (`Center Lat`, `Center Lng`)
+- When no fit exists but an AiM or manual origin exists, GP Bikes Derived Lat/Lng are still generated.
+- If no origin exists, status text prompts for manual center entry.
+
+6. Center Lat/Lng controls and auto-fill behavior
+- Added map alignment inputs:
+	- `Center Lat (deg)`
+	- `Center Lng (deg)`
+- When a center is calculated automatically (fit/AiM origin), inputs auto-populate only if the user has not manually edited center fields.
+- Once user edits center fields manually, auto-overwrite of those fields is disabled until session reset (`Clear All`).
+
+7. Map fit status messaging enhancements
+- `mapFitInfo` now includes center origin coordinates in addition to existing fit/offset/error text.
+- Status retains existing fit/error details and appends center Lat/Lng for transparency.
+
+8. Recompute triggers
+- Changing X/Y offset triggers full replot and recomputation of:
+	- derived `Map X`/`Map Y`
+	- GP Bikes `Derived Latitude`/`Derived Longitude`
+- Center origin typically remains fixed during offset edits unless origin source changes.
