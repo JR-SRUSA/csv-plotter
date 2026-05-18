@@ -5,11 +5,13 @@
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
+  const mapDiv = document.getElementById('mapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
   const controlsClose = document.getElementById('controlsClose');
   const controlsBackdrop = document.getElementById('controlsBackdrop');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
+  const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -24,6 +26,63 @@
 
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
+  let mapHoverLookup = new Map(); // key -> {x, y}
+  let mapHoverMarkerVisible = false;
+
+  function rowKey(fileId, lap, rowIndex) {
+    return `${fileId}|${lap}|${rowIndex}`;
+  }
+
+  function showMapHoverMarker(key) {
+    if (!mapDiv || !key || !mapHoverLookup.has(key)) {
+      clearMapHoverMarker();
+      return;
+    }
+    const point = mapHoverLookup.get(key);
+    const lastIndex = (mapDiv.data && mapDiv.data.length > 0) ? mapDiv.data.length - 1 : -1;
+    if (lastIndex < 0 || mapDiv.data[lastIndex].name !== HOVER_MARKER_TRACE_NAME) return;
+
+    Plotly.restyle(mapDiv, {
+      x: [[point.x]],
+      y: [[point.y]],
+      visible: true
+    }, [lastIndex]);
+    mapHoverMarkerVisible = true;
+  }
+
+  function clearMapHoverMarker() {
+    if (!mapDiv || !mapHoverMarkerVisible) return;
+    const lastIndex = (mapDiv.data && mapDiv.data.length > 0) ? mapDiv.data.length - 1 : -1;
+    if (lastIndex < 0 || mapDiv.data[lastIndex].name !== HOVER_MARKER_TRACE_NAME) return;
+    Plotly.restyle(mapDiv, { x: [[]], y: [[]], visible: false }, [lastIndex]);
+    mapHoverMarkerVisible = false;
+  }
+
+  function bindMainPlotHoverSync() {
+    if (!plotDiv || plotDiv.__mapHoverSyncBound) return;
+    if (typeof plotDiv.on !== 'function') return;
+    plotDiv.__mapHoverSyncBound = true;
+
+    plotDiv.on('plotly_hover', (eventData) => {
+      const point = eventData && eventData.points && eventData.points[0];
+      if (!point || point.data == null) return;
+      const custom = point.data.customdata;
+      if (!Array.isArray(custom)) {
+        clearMapHoverMarker();
+        return;
+      }
+      const key = custom[point.pointNumber];
+      if (!key) {
+        clearMapHoverMarker();
+        return;
+      }
+      showMapHoverMarker(key);
+    });
+
+    plotDiv.on('plotly_unhover', () => {
+      clearMapHoverMarker();
+    });
+  }
 
   function colorForLap(lap) {
     const n = Number.isFinite(lap) ? Math.floor(lap) : 0;
@@ -578,6 +637,139 @@
     return Math.min(Math.max(available, 260), Math.max(320, window.innerHeight - 70));
   }
 
+  function getMapFigureHeight() {
+    const mobile = window.innerWidth <= 980;
+    return mobile ? Math.min(Math.max(window.innerHeight * 0.28, 170), 340) : 300;
+  }
+
+  function findColumnIgnoreCase(cols, candidates) {
+    if (!Array.isArray(cols) || !Array.isArray(candidates)) return null;
+    const lowered = new Map(cols.map(col => [String(col).trim().toLowerCase(), col]));
+    for (const candidate of candidates) {
+      const hit = lowered.get(String(candidate).trim().toLowerCase());
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function getMapColumnsForLog(log) {
+    const cols = Array.isArray(log.cols) ? log.cols : [];
+    const LP = window.LogFileProcessors;
+    const fmt = (log.meta && log.meta.format) ? log.meta.format : '';
+
+    if (LP && LP.isGPBikesFormat(fmt)) {
+      const posX = findColumnIgnoreCase(cols, ['PosX']);
+      const posY = findColumnIgnoreCase(cols, ['PosY']);
+      if (posX && posY) return { xCol: posX, yCol: posY, xTitle: posX, yTitle: posY };
+    }
+
+    if (LP && LP.isAiMFormat(fmt)) {
+      const lon = findColumnIgnoreCase(cols, ['GPS Longitude', 'Longitude', 'Lon', 'Lng']);
+      const lat = findColumnIgnoreCase(cols, ['GPS Latitude', 'Latitude', 'Lat']);
+      if (lon && lat) return { xCol: lon, yCol: lat, xTitle: lon, yTitle: lat };
+    }
+
+    const fallbackLon = (log.meta && log.meta.lonCol) ? log.meta.lonCol : findColumnIgnoreCase(cols, ['Longitude', 'Lon', 'Lng']);
+    const fallbackLat = (log.meta && log.meta.latCol) ? log.meta.latCol : findColumnIgnoreCase(cols, ['Latitude', 'Lat']);
+    if (fallbackLon && fallbackLat) {
+      return { xCol: fallbackLon, yCol: fallbackLat, xTitle: fallbackLon, yTitle: fallbackLat };
+    }
+
+    const posX = findColumnIgnoreCase(cols, ['PosX']);
+    const posY = findColumnIgnoreCase(cols, ['PosY']);
+    if (posX && posY) return { xCol: posX, yCol: posY, xTitle: posX, yTitle: posY };
+
+    return null;
+  }
+
+  function updateMapPlot(selFiles, selectedLaps) {
+    if (!mapDiv) return;
+    const traces = [];
+    const nextHoverLookup = new Map();
+    let axisTitles = null;
+
+    selFiles.forEach((log, fileIdx) => {
+      const mapCols = getMapColumnsForLog(log);
+      if (!mapCols) return;
+      if (!axisTitles) {
+        axisTitles = { x: mapCols.xTitle, y: mapCols.yTitle };
+      } else if (axisTitles.x !== mapCols.xTitle || axisTitles.y !== mapCols.yTitle) {
+        axisTitles = { x: 'Map X', y: 'Map Y' };
+      }
+
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      lapNums.forEach((lap) => {
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        const xArr = [];
+        const yArr = [];
+        const keyArr = [];
+        maskIdx.forEach((i) => {
+          const x = Number(log.data[i][mapCols.xCol]);
+          const y = Number(log.data[i][mapCols.yCol]);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+          const key = rowKey(log.id, lap, i);
+          xArr.push(x);
+          yArr.push(y);
+          keyArr.push(key);
+          nextHoverLookup.set(key, { x, y });
+        });
+        if (xArr.length < 2) return;
+
+        const color = colorForLap(lap);
+        const dash = DASHES[fileIdx % DASHES.length];
+        traces.push({
+          x: xArr,
+          y: yArr,
+          mode: 'lines',
+          customdata: keyArr,
+          name: `${log.name} — Lap ${lap}`,
+          line: { color, dash },
+          hovertemplate: `${log.name}<br>Lap ${lap}<br>${mapCols.xTitle}: %{x}<br>${mapCols.yTitle}: %{y}<extra></extra>`
+        });
+      });
+    });
+
+    if (traces.length === 0) {
+      mapHoverLookup = new Map();
+      mapHoverMarkerVisible = false;
+      Plotly.purge(mapDiv);
+      return;
+    }
+
+    traces.push({
+      x: [],
+      y: [],
+      mode: 'markers',
+      name: HOVER_MARKER_TRACE_NAME,
+      showlegend: false,
+      hoverinfo: 'skip',
+      marker: {
+        color: '#111',
+        size: 12,
+        symbol: 'circle-open',
+        line: { color: '#111', width: 2 }
+      },
+      visible: false
+    });
+
+    const mapLayout = {
+      margin: { t: 30, l: 60, r: 20, b: 55 },
+      xaxis: { title: (axisTitles && axisTitles.x) || 'Map X', automargin: true },
+      yaxis: {
+        title: (axisTitles && axisTitles.y) || 'Map Y',
+        automargin: true,
+        scaleanchor: 'x',
+        scaleratio: 1
+      },
+      showlegend: false,
+      height: getMapFigureHeight()
+    };
+    Plotly.react(mapDiv, traces, mapLayout, plotlyConfig);
+    mapHoverLookup = nextHoverLookup;
+    mapHoverMarkerVisible = false;
+  }
+
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
     const mainDomain = includeTimeSlip ? [0.16,1] : [0,1];
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
@@ -653,9 +845,10 @@
           if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
           const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
+          const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
           const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
           const dash = DASHES[li % DASHES.length];
-          traces.push({x: xArr, y: yArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
+          traces.push({x: xArr, y: yArr, customdata: keyArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
         });
       });
     });
@@ -701,6 +894,8 @@
     }
 
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
+    bindMainPlotHoverSync();
+    updateMapPlot(selFiles, selectedLaps);
   }
 
   // event handlers
@@ -721,7 +916,19 @@
     if (ev.target.matches('button[data-remove]')) {
       const id = ev.target.getAttribute('data-remove');
       const idx = logs.findIndex(l=>l.id===id);
-      if (idx>=0) { logs.splice(idx,1); renderFilesList(); populateYSelect(); Plotly.purge(plotDiv); }
+      if (idx>=0) {
+        logs.splice(idx,1);
+        renderFilesList();
+        populateYSelect();
+        populateXYSelects();
+        renderLapsList();
+        Plotly.purge(plotDiv);
+        if (mapDiv) {
+          mapHoverLookup = new Map();
+          mapHoverMarkerVisible = false;
+          Plotly.purge(mapDiv);
+        }
+      }
     }
   });
 
@@ -773,6 +980,8 @@
     });
     const built = buildLayout(xcol, [ycol], false);
     Plotly.react(plotDiv, traces, built.layout, plotlyConfig);
+    bindMainPlotHoverSync();
+    updateMapPlot(selFiles, selectedLaps);
   }
 
   const xColSelect = document.getElementById('xColSelect');
@@ -788,7 +997,17 @@
   }
 
   clearBtn.addEventListener('click', ()=>{
-    logs.length = 0; renderFilesList(); populateYSelect(); Plotly.purge(plotDiv);
+    logs.length = 0;
+    renderFilesList();
+    populateYSelect();
+    populateXYSelects();
+    renderLapsList();
+    Plotly.purge(plotDiv);
+    if (mapDiv) {
+      mapHoverLookup = new Map();
+      mapHoverMarkerVisible = false;
+      Plotly.purge(mapDiv);
+    }
     if (window.innerWidth <= 980) setControlsOpen(true);
   });
 

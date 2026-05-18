@@ -17,9 +17,13 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .controls-version{margin-top:16px;padding-top:12px;border-top:1px solid #e7edf5;font-size:12px;color:#5a6b82}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 4px rgba(10,20,40,0.04)}
 #plotDiv{height:640px;width:100%;max-width:100%}
+#mapDiv{height:300px;width:100%;max-width:100%;margin-top:12px}
 #plotDiv .plot-container,
 #plotDiv .svg-container,
-#plotDiv .main-svg{max-width:100% !important}
+#plotDiv .main-svg,
+#mapDiv .plot-container,
+#mapDiv .svg-container,
+#mapDiv .main-svg{max-width:100% !important}
 button{padding:6px 10px;border-radius:4px;border:1px solid #cbd6e2;background:#f1f6fb}
 button:hover{background:#e6f0fb}
 footer{padding:8px 16px;font-size:12px;color:#445;max-width:100%;overflow-x:clip}
@@ -42,9 +46,12 @@ footer{padding:8px 16px;font-size:12px;color:#445;max-width:100%;overflow-x:clip
 	main{display:block;padding:12px}
 	.plot{padding:8px;overflow:hidden}
 	#plotDiv{
-		height:calc(100dvh - 180px);
-		min-height:260px;
-		max-height:calc(100dvh - 120px);
+		height:48dvh;
+		min-height:220px;
+	}
+	#mapDiv{
+		height:28dvh;
+		min-height:170px;
 	}
 	body.controls-open{overflow:hidden}
 
@@ -101,8 +108,11 @@ footer{padding:8px 16px;font-size:12px;color:#445;max-width:100%;overflow-x:clip
 
 @media (max-width: 980px) and (orientation: landscape){
 	#plotDiv{
-		height:calc(100dvh - 120px);
-		min-height:200px;
-		max-height:calc(100dvh - 90px);
+		height:45dvh;
+		min-height:180px;
+	}
+	#mapDiv{
+		height:24dvh;
+		min-height:140px;
 	}
 }

@@ -78,6 +78,16 @@ Functional Requirements
 10. Plot toolbar behavior
 - Plotly logo is hidden from toolbar/modebar.
 
+11. Map plot and hover linking
+- Render a secondary map plot below the main time/distance plot.
+- Keep the main plot (including Time Slip when enabled) and map visible together.
+- Map data source is format-aware:
+	- AiM: GPS Latitude vs GPS Longitude (or equivalent latitude/longitude column names)
+	- GP Bikes: PosX vs PosY
+- Map plot is lap-split and respects selected files/laps.
+- Hovering the main plot highlights the corresponding sample on the map with a visible marker.
+- Hover-linking must fail gracefully when map data is missing for a hovered sample.
+
 Non-functional Requirements
 
 1. Responsive layout
@@ -175,6 +185,17 @@ Key Algorithms and Implementation Details
 - Additional channel axes overlaid left/right with dynamic margins.
 - Time Slip keeps dedicated subplot axis and is not mixed with channel axes.
 
+10. Secondary map plot generation
+- Build map traces per selected file/lap using format-aware coordinate column resolution.
+- Keep map aspect ratio consistent (`scaleanchor`/`scaleratio`) for track-shape fidelity.
+- Maintain a per-sample row-key lookup so main-plot hover events can locate map coordinates.
+
+11. Main-to-map hover synchronization
+- Attach Plotly hover/unhover handlers only after the main plot is initialized.
+- Use per-point `customdata` row keys on main traces to identify the corresponding map point.
+- Render map highlight as a dedicated marker trace that is shown/hidden on hover state changes.
+- Guard event binding paths to avoid runtime errors when plot event APIs are not yet available.
+
 Build and Deployment
 
 1. Development/local build
@@ -216,6 +237,9 @@ Testing and Validation
 - Multi-channel independent Y-axes
 - Time Slip visibility only in Distance mode
 - Matched X zoom/pan between main subplot and Time Slip subplot
+- Secondary map plot visibility and data-source selection (AiM lat/lon, GP Bikes PosX/PosY)
+- Main-plot hover highlights corresponding point on map
+- No runtime error when hover sync initializes before first plot render
 
 3. Build tests
 - Verify `build:prod` output files
@@ -305,3 +329,21 @@ Recent Request-Driven Updates (2026-04-19)
 - Time Slip now uses one fixed fastest selected lap, based on overall lap time, as the zero-reference trace across the full lap.
 - Fastest non-crash lap is preferred as the baseline when available.
 - Time Slip axis range now supports negative deltas so partial-lap gains against the eventual fastest lap are visible.
+
+Recent Request-Driven Updates (2026-05-18)
+
+1. Secondary map panel
+- Added a second plot panel below the main figure for track-map visualization.
+- Map rendering supports AiM latitude/longitude channels and GP Bikes PosX/PosY channels.
+
+2. Combined visibility behavior
+- Updated layout behavior so map display does not hide or replace the Time Slip subplot.
+- Main plot and map remain visible together.
+
+3. Main-plot to map hover synchronization
+- Added main-plot hover linkage that highlights the corresponding sample location on the map.
+- Implemented point identity mapping using per-sample keys and Plotly `customdata`.
+
+4. Hover binding robustness
+- Fixed runtime error from early hover-handler attachment by binding only after main plot initialization.
+- Added guards for environments where plot event methods are not available yet.
