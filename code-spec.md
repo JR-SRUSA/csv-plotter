@@ -39,10 +39,13 @@ Functional Requirements
 - Each selected Y channel in the main plot gets its own independent Y-axis (shared across files/laps for that channel).
 - Default Y-channel selection chooses a single default channel (`Speed`) when available.
 
-5. XY mode
-- XY controls allow plotting arbitrary column X vs arbitrary column Y.
-- XY plot remains lap-split as well.
-- XY plot updates immediately when dropdown selection changes.
+5. Unified X-axis mode
+- X-axis controls support:
+	- Time (Lap Time)
+	- Distance (Lap Relative Distance)
+	- Channel (dropdown of available numeric input channels)
+- The main plot remains lap-split when using Channel X-axis mode.
+- Separate XY plot area is removed.
 
 6. Shading
 - Optional checkbox toggles lap envelope shading (min/max band) per selected Y channel.
@@ -65,9 +68,9 @@ Functional Requirements
 	- file checkbox changes
 	- lap checkbox changes
 	- X-axis radio changes
+	- Channel X-axis dropdown changes (when Channel mode is selected)
 	- shading checkbox changes
 	- Y-select changes
-- XY plot updates immediately when XY dropdowns change.
 - Plot buttons remain available as optional manual triggers.
 
 9. Lap list UI labels

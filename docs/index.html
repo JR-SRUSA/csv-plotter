@@ -46,22 +46,13 @@
           <strong>X Axis:</strong>
           <label><input type="radio" name="xaxis" value="time" /> Time</label>
           <label><input type="radio" name="xaxis" value="distance" checked /> Distance</label>
+          <label><input type="radio" name="xaxis" value="custom" /> Channel</label>
+          <select id="xCustomSelect"></select>
         </div>
 
         <div>
           <strong>Y Channels:</strong>
           <select id="ySelect" multiple size="6"></select>
-        </div>
-
-        <div class="xy-controls">
-          <strong>XY Plot:</strong>
-          <div class="xy-row">
-            <label>X: <select id="xColSelect"></select></label>
-            <label>Y: <select id="xyYColSelect"></select></label>
-          </div>
-          <div style="margin-top:6px">
-            <button id="plotXYBtn">Plot X vs Y</button>
-          </div>
         </div>
 
         <div class="map-align-controls">
@@ -83,7 +74,7 @@
         </div>
       </div>
 
-      <div class="controls-version" aria-label="Application version">Version 2026-05-19a</div>
+      <div class="controls-version" aria-label="Application version">Version 2026-05-19c</div>
     </section>
 
     <section class="plot">

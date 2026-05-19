@@ -48,7 +48,7 @@ Usage
 
 1. Open `index.html` in a modern browser (or serve the workspace root using a static server).
 2. Click the file picker and select one or more CSV files.
-3. Choose X axis: `Time` (uses Time/Timestamp column if present) or `Distance` (uses Distance column or computes from lat/lon).
+3. Choose X axis: `Time`, `Distance`, or `Channel` (select any available numeric channel from the X-axis dropdown).
 4. Select one or more Y channels from the multi-select and click `Plot Selected`.
 5. Toggle file visibility or remove files from the list.
 

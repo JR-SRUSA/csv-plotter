@@ -2,6 +2,7 @@
   const fileInput = document.getElementById('fileInput');
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
+  const xCustomSelect = document.getElementById('xCustomSelect');
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
@@ -218,7 +219,7 @@
         logs.push({id, name: file.name, data, cols, meta});
         renderFilesList();
         populateYSelect();
-        populateXYSelects();
+        populateXCustomSelect();
         renderLapsList();
         updatePlot();
       }
@@ -336,30 +337,45 @@
     }
   }
 
-  function populateXYSelects() {
-    const allCols = new Set();
-    logs.forEach(l=> l.cols.forEach(c=> allCols.add(c)));
-    const arr = Array.from(allCols).sort();
+  function populateXCustomSelect() {
+    if (!xCustomSelect) return;
+
+    const previous = xCustomSelect.value;
+    const numericCols = new Set();
+    logs.forEach((l) => {
+      l.cols.forEach((col) => {
+        if (col === 'Lap Time' || col === 'Lap Number') return;
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (!sample) return;
+        const val = sample[col];
+        if (typeof val === 'number' || !isNaN(Number(val))) numericCols.add(col);
+      });
+    });
+
+    const arr = Array.from(numericCols).sort();
     const makeOpt = (c) => {
       let unit = '';
-      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      for (const l of logs) {
+        if (l.meta && l.meta.units && l.meta.units[c]) {
+          unit = l.meta.units[c];
+          break;
+        }
+      }
       const label = unit ? `${c} [${unit}]` : c;
-      return `<option value="${c}">${label}</option>`;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
     };
-    const xColSelect = document.getElementById('xColSelect');
-    const xyYColSelect = document.getElementById('xyYColSelect');
-    if (xColSelect) {
-      xColSelect.innerHTML = arr.map(makeOpt).join('');
-      // default X to PosX if present
-      const opt = Array.from(xColSelect.options).find(o=>o.value.toLowerCase()==='posx');
-      if (opt) xColSelect.value = opt.value;
+
+    xCustomSelect.innerHTML = arr.map(makeOpt).join('');
+
+    if (arr.some(c => c === previous)) {
+      xCustomSelect.value = previous;
+      return;
     }
-    if (xyYColSelect) {
-      xyYColSelect.innerHTML = arr.map(makeOpt).join('');
-      // default Y to PosY if present
-      const opty = Array.from(xyYColSelect.options).find(o=>o.value.toLowerCase()==='posy');
-      if (opty) xyYColSelect.value = opty.value;
-    }
+
+    const defaultCol = arr.find(c => c.toLowerCase() === 'posx')
+      || arr.find(c => c.toLowerCase() === 'map x')
+      || arr[0];
+    if (defaultCol) xCustomSelect.value = defaultCol;
   }
 
   function renderLapsList() {
@@ -916,7 +932,7 @@
         const addedCols = updateGpBikesDerivedLatLon(getMapOffsets(), fallbackOrigin);
         if (addedCols) {
           populateYSelect();
-          populateXYSelects();
+          populateXCustomSelect();
         }
         if (aimOrigin) setMapCenterInputsIfAuto(aimOrigin);
         const originSource = aimOrigin ? 'AiM origin' : 'manual center origin';
@@ -941,7 +957,7 @@
     const addedCols = updateGpBikesDerivedLatLon(offsets, fitOrigin);
     if (addedCols) {
       populateYSelect();
-      populateXYSelects();
+      populateXCustomSelect();
     }
     setMapCenterInputsIfAuto(fitOrigin);
 
@@ -1218,17 +1234,47 @@
     return {layout, channelToRef: axisCfg.channelToRef};
   }
 
+  function getXSeriesForMode(log, maskIdx, xMode, customXCol) {
+    if (xMode === 'distance') {
+      if (!log.meta.lapRelDist) return null;
+      return maskIdx.map(i => log.meta.lapRelDist[i]);
+    }
+    if (xMode === 'time') {
+      return maskIdx.map(i => log.meta.lapTime[i]);
+    }
+    if (!customXCol || !log.cols.includes(customXCol)) return null;
+    return maskIdx.map(i => log.data[i][customXCol]);
+  }
+
+  function buildSortedNumericSeries(xArr, yArr) {
+    const pairs = [];
+    for (let i = 0; i < xArr.length; i++) {
+      const x = Number(xArr[i]);
+      const y = Number(yArr[i]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      pairs.push({ x, y });
+    }
+    pairs.sort((a, b) => a.x - b.x);
+    return {
+      x: pairs.map(p => p.x),
+      y: pairs.map(p => p.y)
+    };
+  }
+
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const ycols = getSelectedY();
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
+    const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const plotByLap = true;
     const selectedLaps = getSelectedLaps();
     // singleLapSelected: true when exactly one lap is visible across all files
     const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
     const singleLapSelected = totalSelectedLaps === 1;
     const channelColors = new Map(ycols.map((y, i) => [y, COLORS[i % COLORS.length]]));
-    const mainXTitle = xMode === 'distance' ? 'Lap Distance (m)' : 'Lap Time (s)';
+    const mainXTitle = xMode === 'distance'
+      ? 'Lap Distance (m)'
+      : (xMode === 'time' ? 'Lap Time (s)' : (customXCol || 'X Axis'));
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
@@ -1264,10 +1310,11 @@
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
+        if (!xArr) return;
         ycols.forEach(y => {
           const resolvedCol = resolveChannelForLog(y, log);
           if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
-          const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
           const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
@@ -1289,9 +1336,10 @@
             const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
             const resolvedCol = resolveChannelForLog(y, log);
             if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
-            const xArr = (xMode === 'distance' && log.meta.lapRelDist) ? maskIdx.map(i => log.meta.lapRelDist[i]) : maskIdx.map(i => log.meta.lapTime[i]);
+            const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
+            if (!xArr) return;
             const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
-            if (xArr.length>0) allLapSeries.push({x:xArr, y:yArr});
+            if (xArr.length > 0) allLapSeries.push(buildSortedNumericSeries(xArr, yArr));
           });
         });
         if (allLapSeries.length === 0) return;
@@ -1331,7 +1379,10 @@
 
   // replot when X axis mode changes
   const xRadios = document.querySelectorAll('input[name=xaxis]');
-  xRadios.forEach(r=> r.addEventListener('change', ()=> updatePlot()));
+  xRadios.forEach(r=> r.addEventListener('change', ()=> {
+    if (xCustomSelect) xCustomSelect.disabled = (r.value !== 'custom' || !r.checked);
+    updatePlot();
+  }));
   const shadeBox = document.getElementById('shadeLaps');
   if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
@@ -1350,6 +1401,7 @@
     if (!isApplyingAutoCenter) mapCenterManuallyAdjusted = true;
     updatePlot();
   });
+  if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());
   ySelect.addEventListener('change', ()=> updatePlot());
 
   filesList.addEventListener('click', (ev)=>{
@@ -1362,7 +1414,7 @@
         lastAutoOffsetSignature = '';
         renderFilesList();
         populateYSelect();
-        populateXYSelects();
+        populateXCustomSelect();
         renderLapsList();
         Plotly.purge(plotDiv);
         if (mapDiv) {
@@ -1395,55 +1447,6 @@
     updatePlot();
   });
 
-  function renderXYPlot(showAlertIfMissing = false) {
-    const xcol = document.getElementById('xColSelect').value;
-    const ycol = document.getElementById('xyYColSelect').value;
-    if (!xcol || !ycol) {
-      if (showAlertIfMissing) alert('Select both X and Y columns');
-      return;
-    }
-
-    const selFiles = getSelectedFiles();
-    const traces = [];
-    const plotByLap = true;
-    const selectedLaps = getSelectedLaps();
-    maybeAutoFitOffsets(selFiles, selectedLaps);
-    applyOffsetsToDerivedMapXY(getMapOffsets());
-    selFiles.forEach((log, idx) => {
-      if (!log.cols.includes(xcol) || !log.cols.includes(ycol)) return;
-      const fileColor = COLORS[idx % COLORS.length];
-      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
-      lapNums.forEach((lap) => {
-        if (!isLapSelected(selectedLaps, log.id, lap)) return;
-        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-        const xArr = maskIdx.map(i => log.data[i][xcol]);
-        const yArr = maskIdx.map(i => log.data[i][ycol]);
-        const color = colorForLap(lap);
-        const dash = DASHES[idx % DASHES.length];
-        traces.push({x: xArr, y: yArr, name: `${log.name} — Lap ${lap} — ${ycol} vs ${xcol}`, mode: 'lines+markers', line:{color, dash}, marker:{color}});
-      });
-    });
-    const built = buildLayout(xcol, [ycol], false);
-    if (plotDiv && Number.isFinite(built.layout.height)) {
-      plotDiv.style.height = `${built.layout.height}px`;
-    }
-    Plotly.react(plotDiv, traces, built.layout, plotlyConfig);
-    bindMainPlotHoverSync();
-    updateMapPlot(selFiles, selectedLaps);
-  }
-
-  const xColSelect = document.getElementById('xColSelect');
-  const xyYColSelect = document.getElementById('xyYColSelect');
-  if (xColSelect) xColSelect.addEventListener('change', ()=> renderXYPlot(false));
-  if (xyYColSelect) xyYColSelect.addEventListener('change', ()=> renderXYPlot(false));
-
-  const plotXYBtn = document.getElementById('plotXYBtn');
-  if (plotXYBtn) {
-    plotXYBtn.addEventListener('click', ()=>{
-      renderXYPlot(true);
-    });
-  }
-
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
     mapOffsetManuallyAdjusted = false;
@@ -1454,7 +1457,7 @@
     updateMapFitInfo('');
     renderFilesList();
     populateYSelect();
-    populateXYSelects();
+    populateXCustomSelect();
     renderLapsList();
     Plotly.purge(plotDiv);
     if (mapDiv) {
@@ -1472,5 +1475,10 @@
   });
 
   loadChannelMapConfig();
+
+  if (xCustomSelect) {
+    const checkedMode = document.querySelector('input[name=xaxis]:checked');
+    xCustomSelect.disabled = !checkedMode || checkedMode.value !== 'custom';
+  }
 
 })();
