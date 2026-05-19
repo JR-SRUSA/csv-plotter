@@ -81,10 +81,13 @@ Functional Requirements
 11. Map plot and hover linking
 - Render a secondary map plot below the main time/distance plot.
 - Keep the main plot (including Time Slip when enabled) and map visible together.
+- Ensure Time Slip remains visible and is not visually covered by the secondary map panel when enabled.
 - Map data source is format-aware:
 	- AiM: GPS Latitude vs GPS Longitude (or equivalent latitude/longitude column names)
 	- GP Bikes: PosX vs PosY
 - Map plot is lap-split and respects selected files/laps.
+- Map zoom/pan state persists while changing map alignment offsets (`X Offset`, `Y Offset`) and other non-reset replot actions.
+- Map zoom/pan state resets on explicit map purge/reset actions (for example, removing all map data or `Clear All`).
 - Hovering the main plot highlights the corresponding sample on the map with a visible marker.
 - Hover-linking must fail gracefully when map data is missing for a hovered sample.
 
@@ -188,7 +191,12 @@ Key Algorithms and Implementation Details
 10. Secondary map plot generation
 - Build map traces per selected file/lap using format-aware coordinate column resolution.
 - Keep map aspect ratio consistent (`scaleanchor`/`scaleratio`) for track-shape fidelity.
+- Preserve user map view (zoom/pan) across redraws by reusing relayout axis ranges and Plotly UI revision semantics.
 - Maintain a per-sample row-key lookup so main-plot hover events can locate map coordinates.
+
+11. Plot container sizing for combined main + Time Slip + map layout
+- When Time Slip is enabled and figure height increases, synchronize the main plot container height with the active Plotly layout height.
+- Prevent overlap where lower main-figure regions (including Time Slip) could be obscured by the map panel below.
 
 11. Main-to-map hover synchronization
 - Attach Plotly hover/unhover handlers only after the main plot is initialized.
@@ -340,11 +348,18 @@ Recent Request-Driven Updates (2026-05-18)
 - Updated layout behavior so map display does not hide or replace the Time Slip subplot.
 - Main plot and map remain visible together.
 
-3. Main-plot to map hover synchronization
+3. Time Slip/map overlap prevention
+- Main plot container height is synchronized with active Plotly figure height so Time Slip remains visible when enabled.
+
+4. Map zoom persistence during offset edits
+- Map zoom/pan view is preserved during offset-triggered map redraws (for example, changing `X Offset`/`Y Offset`).
+- Map view resets only on explicit map purge/reset flows.
+
+5. Main-plot to map hover synchronization
 - Added main-plot hover linkage that highlights the corresponding sample location on the map.
 - Implemented point identity mapping using per-sample keys and Plotly `customdata`.
 
-4. Hover binding robustness
+6. Hover binding robustness
 - Fixed runtime error from early hover-handler attachment by binding only after main plot initialization.
 - Added guards for environments where plot event methods are not available yet.
 

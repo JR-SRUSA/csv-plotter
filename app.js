@@ -42,6 +42,7 @@
   let mapOffsetManuallyAdjusted = false;
   let mapCenterManuallyAdjusted = false;
   let lastAutoOffsetSignature = '';
+  let mapViewState = null;
 
   function rowKey(fileId, lap, rowIndex) {
     return `${fileId}|${lap}|${rowIndex}`;
@@ -70,6 +71,33 @@
     if (lastIndex < 0 || mapDiv.data[lastIndex].name !== HOVER_MARKER_TRACE_NAME) return;
     Plotly.restyle(mapDiv, { x: [[]], y: [[]], visible: false }, [lastIndex]);
     mapHoverMarkerVisible = false;
+  }
+
+  function bindMapViewStateSync() {
+    if (!mapDiv || mapDiv.__viewStateSyncBound) return;
+    if (typeof mapDiv.on !== 'function') return;
+    mapDiv.__viewStateSyncBound = true;
+
+    mapDiv.on('plotly_relayout', (eventData) => {
+      if (!eventData || typeof eventData !== 'object') return;
+
+      if (Object.prototype.hasOwnProperty.call(eventData, 'xaxis.autorange') && eventData['xaxis.autorange']) {
+        mapViewState = null;
+        return;
+      }
+
+      const x0 = Number(eventData['xaxis.range[0]']);
+      const x1 = Number(eventData['xaxis.range[1]']);
+      const y0 = Number(eventData['yaxis.range[0]']);
+      const y1 = Number(eventData['yaxis.range[1]']);
+
+      if (Number.isFinite(x0) && Number.isFinite(x1) && Number.isFinite(y0) && Number.isFinite(y1)) {
+        mapViewState = {
+          xRange: [x0, x1],
+          yRange: [y0, y1]
+        };
+      }
+    });
   }
 
   function bindMainPlotHoverSync() {
@@ -1111,6 +1139,7 @@
     if (traces.length === 0) {
       mapHoverLookup = new Map();
       mapHoverMarkerVisible = false;
+      mapViewState = null;
       Plotly.purge(mapDiv);
       return;
     }
@@ -1141,9 +1170,19 @@
         scaleratio: 1
       },
       showlegend: false,
-      height: getMapFigureHeight()
+      height: getMapFigureHeight(),
+      uirevision: 'map-view-state'
     };
+
+    if (mapViewState && Array.isArray(mapViewState.xRange) && Array.isArray(mapViewState.yRange)) {
+      mapLayout.xaxis.range = mapViewState.xRange.slice();
+      mapLayout.yaxis.range = mapViewState.yRange.slice();
+      mapLayout.xaxis.autorange = false;
+      mapLayout.yaxis.autorange = false;
+    }
+
     Plotly.react(mapDiv, traces, mapLayout, plotlyConfig);
+    bindMapViewStateSync();
     mapHoverLookup = nextHoverLookup;
     mapHoverMarkerVisible = false;
   }
@@ -1197,6 +1236,10 @@
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
+
+    if (plotDiv && Number.isFinite(layout.height)) {
+      plotDiv.style.height = `${layout.height}px`;
+    }
 
     maybeAutoFitOffsets(selFiles, selectedLaps);
     applyOffsetsToDerivedMapXY(getMapOffsets());
@@ -1325,6 +1368,7 @@
         if (mapDiv) {
           mapHoverLookup = new Map();
           mapHoverMarkerVisible = false;
+          mapViewState = null;
           Plotly.purge(mapDiv);
         }
       }
@@ -1380,6 +1424,9 @@
       });
     });
     const built = buildLayout(xcol, [ycol], false);
+    if (plotDiv && Number.isFinite(built.layout.height)) {
+      plotDiv.style.height = `${built.layout.height}px`;
+    }
     Plotly.react(plotDiv, traces, built.layout, plotlyConfig);
     bindMainPlotHoverSync();
     updateMapPlot(selFiles, selectedLaps);
@@ -1413,6 +1460,7 @@
     if (mapDiv) {
       mapHoverLookup = new Map();
       mapHoverMarkerVisible = false;
+      mapViewState = null;
       Plotly.purge(mapDiv);
     }
     if (window.innerWidth <= 980) setControlsOpen(true);
