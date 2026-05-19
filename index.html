@@ -58,6 +58,17 @@
           <select id="ySelect" multiple size="6"></select>
         </div>
 
+        <div class="map-color-controls">
+          <label><input type="checkbox" id="mapColorEnabled" /> Map Color</label>
+          <select id="mapColorSelect" disabled></select>
+          <label>Colormap
+            <select id="mapColorMode" disabled>
+              <option value="continuous" selected>Continuous (Viridis)</option>
+              <option value="divergent">Divergent (RdBu)</option>
+            </select>
+          </label>
+        </div>
+
         <div class="map-align-controls">
           <strong>Map Alignment (Lat/Lon to X/Y)</strong>
           <div class="xy-row">
@@ -77,7 +88,7 @@
         </div>
       </div>
 
-      <div class="controls-version" aria-label="Application version">Version 2026-05-19c</div>
+      <div class="controls-version" aria-label="Application version">Version 2026-05-19h</div>
     </section>
 
     <section class="plot">

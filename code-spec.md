@@ -4,6 +4,10 @@ Purpose: Single-page static web plotter for GP Bikes CSV logs. The app uploads o
 
 Functional Requirements
 
+12. Colormap Selection
+- Add colormap selection with divergent and continuous options.
+- Divergent colormap centers zero as neutral and adjusts to observed min/max values.
+
 1. File upload and parsing
 - Accept multiple CSV files in one session.
 - Handle metadata/preamble rows before the actual header row.
@@ -40,6 +44,10 @@ Functional Requirements
 - Default Y-channel selection chooses a single default channel (`Speed`) when available.
 
 5. Unified X-axis mode
+- X-axis and map variable channel selections merge mapped display names and uncovered raw columns.
+- Mapped display names are sorted and prioritized.
+- Uncovered raw columns are appended in sorted order.
+- Previous selections are preserved when possible.
 - X-axis controls support:
 	- Time (Lap Time)
 	- Distance (Lap Relative Distance)
@@ -125,6 +133,10 @@ Data and Formats
 - meta.units
 
 4. Channel mapping configuration
+- Channel merging logic applies to Y-axis, X-axis, and map variable selections.
+- Mapped display names are resolved to raw columns per log.
+- Uncovered raw columns are included when not covered by mappings.
+- Selections prioritize mapped display names over raw columns.
 - Channel mapping can be provided via `channel-map.json`.
 - Each mapping entry links one display channel name to per-format source column names:
 	- `displayName`

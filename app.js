@@ -3,6 +3,9 @@
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
   const xCustomSelect = document.getElementById('xCustomSelect');
+  const mapColorEnabledInput = document.getElementById('mapColorEnabled');
+  const mapColorSelect = document.getElementById('mapColorSelect');
+  const mapColorModeSelect = document.getElementById('mapColorMode');
   const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
@@ -220,6 +223,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
+        populateMapColorSelect();
         renderLapsList();
         updatePlot();
       }
@@ -269,6 +273,7 @@
       channelMap = normalized;
       if (logs.length > 0) {
         populateYSelect();
+        populateMapColorSelect();
         updatePlot();
       }
     } catch (err) {
@@ -337,45 +342,148 @@
     }
   }
 
-  function populateXCustomSelect() {
-    if (!xCustomSelect) return;
-
-    const previous = xCustomSelect.value;
+  function getNumericColumns() {
     const numericCols = new Set();
-    logs.forEach((l) => {
-      l.cols.forEach((col) => {
+    logs.forEach((log) => {
+      log.cols.forEach((col) => {
         if (col === 'Lap Time' || col === 'Lap Number') return;
-        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        const sample = log.data.find((row) => row[col] !== null && row[col] !== undefined && row[col] !== '');
         if (!sample) return;
-        const val = sample[col];
-        if (typeof val === 'number' || !isNaN(Number(val))) numericCols.add(col);
+        const value = sample[col];
+        if (typeof value === 'number' || !isNaN(Number(value))) {
+          numericCols.add(col);
+        }
       });
     });
+    return Array.from(numericCols).sort();
+  }
 
-    const arr = Array.from(numericCols).sort();
-    const makeOpt = (c) => {
+  function populateNumericChannelSelect(selectEl, previousValue, preferredValues) {
+    if (!selectEl) return;
+    const columns = getNumericColumns();
+    const makeOpt = (col) => {
       let unit = '';
-      for (const l of logs) {
-        if (l.meta && l.meta.units && l.meta.units[c]) {
-          unit = l.meta.units[c];
+      for (const log of logs) {
+        if (log.meta && log.meta.units && log.meta.units[col]) {
+          unit = log.meta.units[col];
           break;
         }
       }
-      const label = unit ? `${c} [${unit}]` : c;
-      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+      const label = unit ? `${col} [${unit}]` : col;
+      return `<option value="${escapeHtml(col)}">${escapeHtml(label)}</option>`;
     };
 
-    xCustomSelect.innerHTML = arr.map(makeOpt).join('');
+    selectEl.innerHTML = columns.map(makeOpt).join('');
 
-    if (arr.some(c => c === previous)) {
-      xCustomSelect.value = previous;
+    if (columns.some((col) => col === previousValue)) {
+      selectEl.value = previousValue;
       return;
     }
 
-    const defaultCol = arr.find(c => c.toLowerCase() === 'posx')
-      || arr.find(c => c.toLowerCase() === 'map x')
-      || arr[0];
-    if (defaultCol) xCustomSelect.value = defaultCol;
+    const preferred = (Array.isArray(preferredValues) ? preferredValues : [])
+      .map((candidate) => columns.find((col) => col.toLowerCase() === String(candidate).toLowerCase()))
+      .find(Boolean);
+    if (preferred) {
+      selectEl.value = preferred;
+    } else if (columns.length > 0) {
+      selectEl.value = columns[0];
+    }
+  }
+
+  function populateMapColorSelect() {
+    const previousValue = mapColorSelect ? mapColorSelect.value : '';
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    mapColorSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(mapColorSelect.options).some(o => o.value === previousValue)) {
+      mapColorSelect.value = previousValue;
+    } else if (mapColorSelect.options.length > 0) {
+      mapColorSelect.value = mapColorSelect.options[0].value;
+    }
+  }
+
+  function populateXCustomSelect() {
+    const previousValue = xCustomSelect ? xCustomSelect.value : '';
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    xCustomSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(xCustomSelect.options).some(o => o.value === previousValue)) {
+      xCustomSelect.value = previousValue;
+    } else if (xCustomSelect.options.length > 0) {
+      xCustomSelect.value = xCustomSelect.options[0].value;
+    }
   }
 
   function renderLapsList() {
@@ -1108,14 +1216,22 @@
 
   function updateMapPlot(selFiles, selectedLaps) {
     if (!mapDiv) return;
+    const mapColorEnabled = !!(mapColorEnabledInput && mapColorEnabledInput.checked);
+    const mapColorChannel = mapColorSelect ? mapColorSelect.value : '';
+    const mapColorMode = mapColorModeSelect ? mapColorModeSelect.value : 'continuous';
     const traces = [];
+    const pendingTraces = [];
     const nextHoverLookup = new Map();
     let axisTitles = { x: 'Map X (m)', y: 'Map Y (m)' };
+    let mapColorMin = Infinity;
+    let mapColorMax = -Infinity;
 
     selFiles.forEach((log, fileIdx) => {
       const mapSource = getMapSourceForLog(log);
       if (!mapSource) return;
       axisTitles = { x: mapSource.axisXTitle, y: mapSource.axisYTitle };
+      const mapColorCol = mapColorEnabled && mapColorChannel ? resolveChannelForLog(mapColorChannel, log) : '';
+      const canColorByChannel = !!(mapColorEnabled && mapColorCol && log.cols.includes(mapColorCol));
 
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
@@ -1124,10 +1240,18 @@
         const xArr = [];
         const yArr = [];
         const keyArr = [];
+        const colorArr = [];
         maskIdx.forEach((i) => {
           const xRaw = mapSource.xAt(i);
           const yRaw = mapSource.yAt(i);
           if (!Number.isFinite(xRaw) || !Number.isFinite(yRaw)) return;
+          if (canColorByChannel) {
+            const colorValue = Number(log.data[i][mapColorCol]);
+            if (!Number.isFinite(colorValue)) return;
+            colorArr.push(colorValue);
+            if (colorValue < mapColorMin) mapColorMin = colorValue;
+            if (colorValue > mapColorMax) mapColorMax = colorValue;
+          }
           const x = xRaw;
           const y = yRaw;
           const key = rowKey(log.id, lap, i);
@@ -1140,9 +1264,10 @@
 
         const color = colorForLap(lap);
         const dash = DASHES[fileIdx % DASHES.length];
-        traces.push({
+        pendingTraces.push({
           x: xArr,
           y: yArr,
+          colorArr: canColorByChannel ? colorArr : null,
           mode: 'lines',
           customdata: keyArr,
           name: `${log.name} — Lap ${lap}`,
@@ -1150,6 +1275,64 @@
           hovertemplate: `${log.name}<br>Lap ${lap}<br>${mapSource.hoverXTitle}: %{x}<br>${mapSource.hoverYTitle}: %{y}<extra></extra>`
         });
       });
+    });
+
+    let mapColorScaleConfig = null;
+    if (mapColorEnabled && Number.isFinite(mapColorMin) && Number.isFinite(mapColorMax)) {
+      let markerCmin = mapColorMin;
+      let markerCmax = mapColorMax;
+      let markerColorscale = 'Viridis';
+
+      if (mapColorMode === 'divergent') {
+        markerColorscale = 'RdBu';
+        if (mapColorMin < 0 && mapColorMax > 0) {
+          const zeroPos = (0 - markerCmin) / (markerCmax - markerCmin);
+          markerColorscale = [
+            [0, '#2166ac'],
+            [zeroPos, '#f7f7f7'],
+            [1, '#b2182b']
+          ];
+        }
+      }
+
+      if (markerCmin === markerCmax) {
+        markerCmax = markerCmin + 1;
+      }
+
+      mapColorScaleConfig = {
+        cmin: markerCmin,
+        cmax: markerCmax,
+        colorscale: markerColorscale
+      };
+    }
+
+    let mapColorTraceUsed = false;
+    pendingTraces.forEach((entry) => {
+      const trace = {
+        x: entry.x,
+        y: entry.y,
+        customdata: entry.customdata,
+        name: entry.name,
+        line: entry.line,
+        hovertemplate: entry.hovertemplate,
+        mode: entry.mode
+      };
+
+      if (mapColorEnabled && mapColorScaleConfig && Array.isArray(entry.colorArr) && entry.colorArr.length === entry.x.length && entry.colorArr.length > 0) {
+        trace.mode = 'lines+markers';
+        trace.marker = {
+          size: 6,
+          color: entry.colorArr,
+          colorscale: mapColorScaleConfig.colorscale,
+          cmin: mapColorScaleConfig.cmin,
+          cmax: mapColorScaleConfig.cmax,
+          showscale: !mapColorTraceUsed,
+          colorbar: !mapColorTraceUsed ? { title: { text: mapColorChannel || 'Map Color' } } : undefined
+        };
+        mapColorTraceUsed = true;
+      }
+
+      traces.push(trace);
     });
 
     if (traces.length === 0) {
@@ -1402,6 +1585,15 @@
     updatePlot();
   });
   if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());
+  if (mapColorEnabledInput) {
+    mapColorEnabledInput.addEventListener('change', () => {
+      if (mapColorSelect) mapColorSelect.disabled = !mapColorEnabledInput.checked;
+      if (mapColorModeSelect) mapColorModeSelect.disabled = !mapColorEnabledInput.checked;
+      updatePlot();
+    });
+  }
+  if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
+  if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
   ySelect.addEventListener('change', ()=> updatePlot());
 
   filesList.addEventListener('click', (ev)=>{
@@ -1415,6 +1607,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
+        populateMapColorSelect();
         renderLapsList();
         Plotly.purge(plotDiv);
         if (mapDiv) {
@@ -1458,6 +1651,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
+    populateMapColorSelect();
     renderLapsList();
     Plotly.purge(plotDiv);
     if (mapDiv) {
@@ -1479,6 +1673,12 @@
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
     xCustomSelect.disabled = !checkedMode || checkedMode.value !== 'custom';
+  }
+  if (mapColorSelect) {
+    mapColorSelect.disabled = !(mapColorEnabledInput && mapColorEnabledInput.checked);
+  }
+  if (mapColorModeSelect) {
+    mapColorModeSelect.disabled = !(mapColorEnabledInput && mapColorEnabledInput.checked);
   }
 
 })();
