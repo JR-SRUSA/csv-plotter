@@ -14,6 +14,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .file-item{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px dashed #eee}
 .axis-controls{margin-top:12px;display:flex;flex-direction:column;gap:8px}
 .axis-controls select{width:100%}
+.axis-controls #xCustomSelect{margin-top:6px}
 .map-align-controls{padding-top:6px;border-top:1px dashed #e7edf5}
 .map-align-controls input{width:100%}
 .map-fit-info{margin-top:6px;font-size:12px;color:#5a6b82;min-height:16px}
