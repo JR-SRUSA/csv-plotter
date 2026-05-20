@@ -11,6 +11,7 @@
     "serve:esp32-test": "python scripts/serve-dist-gzip.py --directory dist --port 8000"
   },
   "dependencies": {
+    "leaflet": "^1.9.4",
     "papaparse": "^5.5.3",
     "plotly.js-basic-dist": "^3.5.0",
     "terser": "^5.46.1"

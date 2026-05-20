@@ -23,7 +23,10 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .controls-version{margin-top:16px;padding-top:12px;border-top:1px solid #e7edf5;font-size:12px;color:#5a6b82}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 4px rgba(10,20,40,0.04)}
 #plotDiv{height:640px;width:100%;max-width:100%}
-#mapDiv{height:300px;width:100%;max-width:100%;margin-top:12px}
+.maps-container{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;margin-top:12px;width:100%;align-items:stretch}
+.map-panel{min-width:0;height:300px;min-height:300px}
+#mapDiv{max-width:100%;height:300px}
+#leafletMapDiv{max-width:100%;height:300px;min-height:300px;display:block}
 #plotDiv .plot-container,
 #plotDiv .svg-container,
 #plotDiv .main-svg,
@@ -55,10 +58,8 @@ footer{padding:8px 16px;font-size:12px;color:#445;max-width:100%;overflow-x:clip
 		height:48dvh;
 		min-height:220px;
 	}
-	#mapDiv{
-		height:28dvh;
-		min-height:170px;
-	}
+	.maps-container{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+	.map-panel{height:28dvh;min-height:170px}
 	body.controls-open{overflow:hidden}
 
 	.hamburger-btn{
@@ -117,8 +118,12 @@ footer{padding:8px 16px;font-size:12px;color:#445;max-width:100%;overflow-x:clip
 		height:45dvh;
 		min-height:180px;
 	}
-	#mapDiv{
+	.map-panel{
 		height:24dvh;
 		min-height:140px;
 	}
+}
+
+@media (max-width: 700px){
+	.maps-container{grid-template-columns:1fr}
 }
