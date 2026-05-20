@@ -10,6 +10,7 @@
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
+  const leafletMapDiv = document.getElementById('leafletMapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
   const controlsClose = document.getElementById('controlsClose');
   const controlsBackdrop = document.getElementById('controlsBackdrop');
@@ -47,6 +48,20 @@
   let mapCenterManuallyAdjusted = false;
   let lastAutoOffsetSignature = '';
   let mapViewState = null;
+  let leafletMap = null;
+  let leafletLayers = []; // array of layer groups
+  let leafletViewState = null;
+  let leafletViewStateUserSet = false;
+  let isApplyingLeafletProgrammaticView = false;
+  let leafletHoverLookup = new Map(); // key -> {lat, lon}
+  let leafletHoverMarker = null;
+
+  function syncLeafletContainerHeight() {
+    if (!leafletMapDiv || !mapDiv) return;
+    const targetHeight = Math.max(160, Math.round(mapDiv.clientHeight || getMapFigureHeight() || 300));
+    leafletMapDiv.style.height = `${targetHeight}px`;
+    leafletMapDiv.style.minHeight = `${targetHeight}px`;
+  }
 
   function rowKey(fileId, lap, rowIndex) {
     return `${fileId}|${lap}|${rowIndex}`;
@@ -75,6 +90,43 @@
     if (lastIndex < 0 || mapDiv.data[lastIndex].name !== HOVER_MARKER_TRACE_NAME) return;
     Plotly.restyle(mapDiv, { x: [[]], y: [[]], visible: false }, [lastIndex]);
     mapHoverMarkerVisible = false;
+  }
+
+  function showLeafletHoverMarker(key) {
+    if (!leafletMap || !key || !leafletHoverLookup.has(key)) {
+      clearLeafletHoverMarker();
+      return;
+    }
+
+    const point = leafletHoverLookup.get(key);
+    if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) {
+      clearLeafletHoverMarker();
+      return;
+    }
+
+    if (!leafletHoverMarker) {
+      leafletHoverMarker = L.circleMarker([point.lat, point.lon], {
+        radius: 7,
+        color: '#111',
+        weight: 2,
+        fillColor: '#fff',
+        fillOpacity: 0.9,
+        interactive: false
+      }).addTo(leafletMap);
+      return;
+    }
+
+    leafletHoverMarker.setLatLng([point.lat, point.lon]);
+    if (!leafletMap.hasLayer(leafletHoverMarker)) {
+      leafletHoverMarker.addTo(leafletMap);
+    }
+  }
+
+  function clearLeafletHoverMarker() {
+    if (!leafletMap || !leafletHoverMarker) return;
+    if (leafletMap.hasLayer(leafletHoverMarker)) {
+      leafletMap.removeLayer(leafletHoverMarker);
+    }
   }
 
   function bindMapViewStateSync() {
@@ -115,18 +167,22 @@
       const custom = point.data.customdata;
       if (!Array.isArray(custom)) {
         clearMapHoverMarker();
+        clearLeafletHoverMarker();
         return;
       }
       const key = custom[point.pointNumber];
       if (!key) {
         clearMapHoverMarker();
+        clearLeafletHoverMarker();
         return;
       }
       showMapHoverMarker(key);
+      showLeafletHoverMarker(key);
     });
 
     plotDiv.on('plotly_unhover', () => {
       clearMapHoverMarker();
+      clearLeafletHoverMarker();
     });
   }
 
@@ -820,10 +876,30 @@
   }
 
   function getManualMapOrigin() {
-    const lat = Number(mapCenterLatInput && mapCenterLatInput.value);
-    const lon = Number(mapCenterLonInput && mapCenterLonInput.value);
+    const latRaw = mapCenterLatInput ? String(mapCenterLatInput.value).trim() : '';
+    const lonRaw = mapCenterLonInput ? String(mapCenterLonInput.value).trim() : '';
+    if (!latRaw || !lonRaw) return null;
+    const lat = Number(latRaw);
+    const lon = Number(lonRaw);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
     return { originLat: lat, originLon: lon };
+  }
+
+  function runLeafletProgrammaticView(updateFn) {
+    if (!leafletMap || typeof updateFn !== 'function') return;
+
+    isApplyingLeafletProgrammaticView = true;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      isApplyingLeafletProgrammaticView = false;
+    };
+
+    leafletMap.once('moveend', release);
+    leafletMap.once('zoomend', release);
+    updateFn();
+    setTimeout(release, 300);
   }
 
   function setMapOffsetInputs(x, y) {
@@ -1386,6 +1462,176 @@
     mapHoverMarkerVisible = false;
   }
 
+  function initLeafletMap() {
+    if (!leafletMapDiv || leafletMap) return;
+    syncLeafletContainerHeight();
+    
+    // Initialize the map - center on a default location, will be adjusted based on data
+    leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
+    
+    // Add free satellite tile layer (Esri World Imagery)
+    const satelliteLayer = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {
+        attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
+        maxZoom: 20
+      }
+    ).addTo(leafletMap);
+    
+    // Also add an OpenStreetMap layer as fallback
+    const osmLayer = L.tileLayer(
+      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
+      }
+    );
+    
+    // Layer control for toggling between satellite and map
+    L.control.layers(
+      {
+        'Satellite': satelliteLayer,
+        'OpenStreetMap': osmLayer
+      },
+      {},
+      { position: 'topright' }
+    ).addTo(leafletMap);
+
+    leafletMap.on('moveend zoomend', () => {
+      if (isApplyingLeafletProgrammaticView) return;
+      const center = leafletMap.getCenter();
+      const zoom = leafletMap.getZoom();
+      if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) || !Number.isFinite(zoom)) return;
+      leafletViewState = {
+        center: [center.lat, center.lng],
+        zoom
+      };
+      leafletViewStateUserSet = true;
+    });
+
+    // Ensure the map computes tile layout after the element has final dimensions.
+    requestAnimationFrame(() => leafletMap.invalidateSize());
+  }
+
+  function mapPlotlyDashToLeaflet(dash) {
+    switch (dash) {
+      case 'dash': return '10 6';
+      case 'dot': return '2 6';
+      case 'dashdot': return '10 6 2 6';
+      case 'longdash': return '16 8';
+      case 'longdashdot': return '16 8 2 8';
+      case 'solid':
+      default:
+        return null;
+    }
+  }
+
+  function getLeafletLatLonSource(log) {
+    if (!log || !Array.isArray(log.cols)) return null;
+
+    if (log.cols.includes(DERIVED_LAT_COL) && log.cols.includes(DERIVED_LON_COL)) {
+      return {
+        latAt: (index) => Number(log.data[index][DERIVED_LAT_COL]),
+        lonAt: (index) => Number(log.data[index][DERIVED_LON_COL]),
+        source: 'derived'
+      };
+    }
+
+    const cols = findLatLonColumns(log.cols, log.meta);
+    if (!cols) return null;
+
+    return {
+      latAt: (index) => Number(log.data[index][cols.latCol]),
+      lonAt: (index) => Number(log.data[index][cols.lonCol]),
+      source: 'native'
+    };
+  }
+
+  function updateLeafletMap(selFiles, selectedLaps) {
+    if (!leafletMapDiv || !window.L) return;
+    syncLeafletContainerHeight();
+    
+    // Initialize map on first call
+    if (!leafletMap) {
+      initLeafletMap();
+    }
+    
+    // Clear existing layers
+    leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
+    leafletLayers = [];
+    const nextLeafletHoverLookup = new Map();
+    
+    let bounds = null;
+    
+    selFiles.forEach((log, fileIdx) => {
+      const latLonSource = getLeafletLatLonSource(log);
+      if (!latLonSource) return;
+      
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+      lapNums.forEach((lap) => {
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        
+        const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        const latlngs = [];
+        
+        maskIdx.forEach((i) => {
+          const lat = latLonSource.latAt(i);
+          const lon = latLonSource.lonAt(i);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            latlngs.push([lat, lon]);
+            nextLeafletHoverLookup.set(rowKey(log.id, lap, i), { lat, lon });
+            if (!bounds) {
+              bounds = L.latLngBounds([lat, lon], [lat, lon]);
+            } else {
+              bounds.extend([lat, lon]);
+            }
+          }
+        });
+        
+        if (latlngs.length >= 2) {
+          const color = colorForLap(lap);
+          const dash = DASHES[fileIdx % DASHES.length];
+          const polyline = L.polyline(latlngs, {
+            color: color,
+            dashArray: mapPlotlyDashToLeaflet(dash),
+            weight: 2,
+            opacity: 0.7
+          }).addTo(leafletMap);
+          
+          leafletLayers.push(polyline);
+          
+          // Add lap label at start
+          const label = L.circleMarker(latlngs[0], {
+            radius: 4,
+            fillColor: color,
+            color: '#fff',
+            weight: 2,
+            opacity: 1,
+            fillOpacity: 0.8
+          }).bindPopup(`${log.name} - Lap ${lap} (${latLonSource.source === 'derived' ? 'GPBikes derived' : 'GPS'})`).addTo(leafletMap);
+          
+          leafletLayers.push(label);
+        }
+      });
+    });
+    
+    // Fit map to bounds if we have data
+    if (bounds && bounds.isValid()) {
+      runLeafletProgrammaticView(() => {
+        if (leafletViewStateUserSet && leafletViewState && Array.isArray(leafletViewState.center) && Number.isFinite(leafletViewState.zoom)) {
+          leafletMap.setView(leafletViewState.center, leafletViewState.zoom, { animate: false });
+        } else {
+          leafletMap.fitBounds(bounds, { padding: [50, 50] });
+        }
+      });
+    }
+
+    leafletHoverLookup = nextLeafletHoverLookup;
+    clearLeafletHoverMarker();
+
+    requestAnimationFrame(() => leafletMap.invalidateSize());
+  }
+
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
     const mainDomain = includeTimeSlip ? [0.16,1] : [0,1];
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
@@ -1551,6 +1797,7 @@
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     updateMapPlot(selFiles, selectedLaps);
+    updateLeafletMap(selFiles, selectedLaps);
   }
 
   // event handlers
@@ -1616,6 +1863,10 @@
           mapViewState = null;
           Plotly.purge(mapDiv);
         }
+        leafletHoverLookup = new Map();
+        clearLeafletHoverMarker();
+        leafletViewState = null;
+        leafletViewStateUserSet = false;
       }
     }
   });
@@ -1659,6 +1910,14 @@
       mapHoverMarkerVisible = false;
       mapViewState = null;
       Plotly.purge(mapDiv);
+    }
+    leafletHoverLookup = new Map();
+    clearLeafletHoverMarker();
+    leafletViewState = null;
+    leafletViewStateUserSet = false;
+    if (leafletMap) {
+      leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
+      leafletLayers = [];
     }
     if (window.innerWidth <= 980) setControlsOpen(true);
   });
