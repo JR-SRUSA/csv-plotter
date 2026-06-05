@@ -26,6 +26,7 @@
   const DERIVED_MAP_Y_COL = 'Map Y';
   const DERIVED_LAT_COL = 'Derived Latitude';
   const DERIVED_LON_COL = 'Derived Longitude';
+  const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -975,6 +976,106 @@
     return pairs;
   }
 
+  function normalizeDistancePointSeries(points) {
+    if (!Array.isArray(points)) return [];
+    const normalized = [];
+    points.forEach((point) => {
+      if (!point) return;
+      const distance = Number(point.distance);
+      const x = Number(point.x);
+      const y = Number(point.y);
+      if (!Number.isFinite(distance) || !Number.isFinite(x) || !Number.isFinite(y)) return;
+
+      const nextPoint = { distance, x, y };
+      if (normalized.length === 0) {
+        normalized.push(nextPoint);
+        return;
+      }
+
+      const lastPoint = normalized[normalized.length - 1];
+      if (distance < lastPoint.distance) return;
+      if (Math.abs(distance - lastPoint.distance) <= 1e-6) {
+        normalized[normalized.length - 1] = nextPoint;
+        return;
+      }
+
+      normalized.push(nextPoint);
+    });
+    return normalized;
+  }
+
+  function interpolateDistancePointSeries(points, targetDistance) {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    const target = Number(targetDistance);
+    if (!Number.isFinite(target)) return null;
+
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (target < first.distance || target > last.distance) return null;
+
+    let low = 0;
+    let high = points.length - 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const midPoint = points[mid];
+      if (Math.abs(midPoint.distance - target) <= 1e-6) {
+        return { distance: target, x: midPoint.x, y: midPoint.y };
+      }
+      if (midPoint.distance < target) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    const rightIndex = Math.min(points.length - 1, Math.max(1, low));
+    const leftPoint = points[rightIndex - 1];
+    const rightPoint = points[rightIndex];
+    const span = rightPoint.distance - leftPoint.distance;
+    if (!Number.isFinite(span) || span <= 0) {
+      return { distance: target, x: leftPoint.x, y: leftPoint.y };
+    }
+
+    const ratio = (target - leftPoint.distance) / span;
+    return {
+      distance: target,
+      x: leftPoint.x + (rightPoint.x - leftPoint.x) * ratio,
+      y: leftPoint.y + (rightPoint.y - leftPoint.y) * ratio
+    };
+  }
+
+  function buildDistanceAlignedPairs(posPts, mapPts, sampleStepMeters = AUTO_MAP_OFFSET_SAMPLE_STEP_M) {
+    const posSeries = normalizeDistancePointSeries(posPts);
+    const mapSeries = normalizeDistancePointSeries(mapPts);
+    if (posSeries.length < 2 || mapSeries.length < 2) return [];
+
+    const overlapStart = Math.max(posSeries[0].distance, mapSeries[0].distance);
+    const overlapEnd = Math.min(posSeries[posSeries.length - 1].distance, mapSeries[mapSeries.length - 1].distance);
+    if (!Number.isFinite(overlapStart) || !Number.isFinite(overlapEnd) || overlapEnd <= overlapStart) return [];
+
+    const step = Number.isFinite(sampleStepMeters) && sampleStepMeters > 0 ? sampleStepMeters : AUTO_MAP_OFFSET_SAMPLE_STEP_M;
+    const sampleDistances = [];
+    for (let distance = overlapStart; distance <= overlapEnd; distance += step) {
+      sampleDistances.push(distance);
+    }
+    if (sampleDistances.length === 0 || Math.abs(sampleDistances[0] - overlapStart) > 1e-6) {
+      sampleDistances.unshift(overlapStart);
+    }
+    if (Math.abs(sampleDistances[sampleDistances.length - 1] - overlapEnd) > 1e-6) {
+      sampleDistances.push(overlapEnd);
+    }
+
+    const pairs = [];
+    sampleDistances.forEach((distance) => {
+      const posPoint = interpolateDistancePointSeries(posSeries, distance);
+      const mapPoint = interpolateDistancePointSeries(mapSeries, distance);
+      if (!posPoint || !mapPoint) return;
+      pairs.push({ posX: posPoint.x, posY: posPoint.y, mapX: mapPoint.x, mapY: mapPoint.y });
+    });
+
+    return pairs.length >= 2 ? pairs : [];
+  }
+
   function getDerivedMapLogs(selFiles) {
     return selFiles.filter(l => Array.isArray(l.cols) && l.cols.includes(DERIVED_MAP_X_COL) && l.cols.includes(DERIVED_MAP_Y_COL));
   }
@@ -983,7 +1084,7 @@
     return selFiles.filter(l => !!getNativeXYCols(l));
   }
 
-  function computeAutoMapOffsetFit(selFiles, selectedLaps) {
+  function computeAutoMapOffsetFit(selFiles, selectedLaps, sampleStepMeters = AUTO_MAP_OFFSET_SAMPLE_STEP_M) {
     if (!window.MapCoordinateUtils || typeof window.MapCoordinateUtils.fitTranslationLeastSquares !== 'function') return null;
 
     const mapLogs = getDerivedMapLogs(selFiles);
@@ -1003,6 +1104,7 @@
         if (sharedLaps.length === 0) return;
 
         const allPairs = [];
+        let usedDistanceSampling = false;
         sharedLaps.forEach((lap) => {
           const posIdx = getRowIndicesForLap(posLog, lap, selectedLaps);
           const mapIdx = getRowIndicesForLap(mapLog, lap, selectedLaps);
@@ -1021,7 +1123,30 @@
             i => mapBaseX ? mapBaseX[i] : mapLog.data[i][DERIVED_MAP_X_COL],
             i => mapBaseY ? mapBaseY[i] : mapLog.data[i][DERIVED_MAP_Y_COL]
           );
-          allPairs.push(...buildLapAlignedPairs(posPts, mapPts));
+          const posDistances = posLog.meta && Array.isArray(posLog.meta.lapRelDist) ? posLog.meta.lapRelDist : null;
+          const mapDistances = mapLog.meta && Array.isArray(mapLog.meta.lapRelDist) ? mapLog.meta.lapRelDist : null;
+
+          if (posDistances && mapDistances) {
+            const posDistancePts = posIdx.map(i => ({
+              distance: Number(posDistances[i]),
+              x: Number(posLog.data[i][posCols.xCol]),
+              y: Number(posLog.data[i][posCols.yCol])
+            }));
+            const mapDistancePts = mapIdx.map(i => ({
+              distance: Number(mapDistances[i]),
+              x: Number(mapBaseX ? mapBaseX[i] : mapLog.data[i][DERIVED_MAP_X_COL]),
+              y: Number(mapBaseY ? mapBaseY[i] : mapLog.data[i][DERIVED_MAP_Y_COL])
+            }));
+            const distancePairs = buildDistanceAlignedPairs(posDistancePts, mapDistancePts, sampleStepMeters);
+            if (distancePairs.length >= 2) {
+              allPairs.push(...distancePairs);
+              usedDistanceSampling = true;
+              return;
+            }
+            allPairs.push(...buildLapAlignedPairs(posPts, mapPts));
+          } else {
+            allPairs.push(...buildLapAlignedPairs(posPts, mapPts));
+          }
         });
 
         const fit = window.MapCoordinateUtils.fitTranslationLeastSquares(allPairs);
@@ -1033,7 +1158,9 @@
           mapLog,
           originLat: mapLog.meta && mapLog.meta.mapDerivedXY ? mapLog.meta.mapDerivedXY.originLat : null,
           originLon: mapLog.meta && mapLog.meta.mapDerivedXY ? mapLog.meta.mapDerivedXY.originLon : null,
-          lapCount: sharedLaps.length
+          lapCount: sharedLaps.length,
+          sampleStepMeters: usedDistanceSampling ? sampleStepMeters : null,
+          fitMode: usedDistanceSampling ? 'distance' : 'lap'
         };
 
         if (!best) {
@@ -1107,7 +1234,7 @@
   }
 
   function maybeAutoFitOffsets(selFiles, selectedLaps) {
-    const fit = computeAutoMapOffsetFit(selFiles, selectedLaps);
+    const fit = computeAutoMapOffsetFit(selFiles, selectedLaps, AUTO_MAP_OFFSET_SAMPLE_STEP_M);
     if (!fit) {
       const aimOrigin = getFirstDerivedMapOrigin(selFiles);
       const manualOrigin = getManualMapOrigin();
@@ -1147,7 +1274,10 @@
 
     const fitErr = Number.isFinite(fit.meanAbsError) ? fit.meanAbsError.toFixed(3) : 'n/a';
     const centerSuffix = buildCenterInfoSuffix(fitOrigin);
-    updateMapFitInfo(`Auto offset X=${fit.offsetX.toFixed(3)} m, Y=${fit.offsetY.toFixed(3)} m | Avg error ${fitErr} m (${fit.pairCount} pts)${centerSuffix}`);
+    const fitDetail = fit.fitMode === 'distance' && Number.isFinite(fit.sampleStepMeters)
+      ? `${fit.pairCount} samples @ ${fit.sampleStepMeters} m`
+      : `${fit.pairCount} lap-aligned pairs`;
+    updateMapFitInfo(`Auto offset X=${fit.offsetX.toFixed(3)} m, Y=${fit.offsetY.toFixed(3)} m | Avg error ${fitErr} m (${fitDetail})${centerSuffix}`);
   }
 
   function findColumnIgnoreCase(cols, candidates) {
