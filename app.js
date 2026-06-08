@@ -56,6 +56,27 @@
   let isApplyingLeafletProgrammaticView = false;
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
+  let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
+
+  function resizeVisualizations() {
+    if (plotDiv && plotDiv.data) {
+      Plotly.Plots.resize(plotDiv);
+    }
+    if (mapDiv && mapDiv.data) {
+      Plotly.Plots.resize(mapDiv);
+    }
+    if (leafletMap) {
+      syncLeafletContainerHeight();
+      leafletMap.invalidateSize();
+    }
+  }
+
+  function scheduleVisualizationResize() {
+    // Resize now and again after CSS transitions so Plotly/Leaflet fill the new width.
+    requestAnimationFrame(resizeVisualizations);
+    setTimeout(resizeVisualizations, 120);
+    setTimeout(resizeVisualizations, 240);
+  }
 
   function syncLeafletContainerHeight() {
     if (!leafletMapDiv || !mapDiv) return;
@@ -157,6 +178,68 @@
     });
   }
 
+  function computeTsYRangeForXWindow(x0, x1) {
+    // Scan all current timeslip traces and return a padded [min, max] for Y values
+    // whose corresponding X falls within [x0, x1]. Returns null if no data found.
+    let yMin = null;
+    let yMax = null;
+    for (const trace of currentTsTraces) {
+      const xs = trace.x;
+      const ys = trace.y;
+      if (!xs || !ys) continue;
+      for (let i = 0; i < xs.length; i++) {
+        const x = xs[i];
+        const y = ys[i];
+        if (y == null || !Number.isFinite(y)) continue;
+        if (x < x0 || x > x1) continue;
+        if (yMin === null || y < yMin) yMin = y;
+        if (yMax === null || y > yMax) yMax = y;
+      }
+    }
+    if (yMin === null || yMax === null) return null;
+    const pad = Math.max(0.05, Math.abs(yMax - yMin) * 0.1);
+    return [yMin - pad, yMax + pad];
+  }
+
+  function bindMainPlotRelayoutSync() {
+    if (!plotDiv || plotDiv.__tsRelayoutBound) return;
+    if (typeof plotDiv.on !== 'function') return;
+    plotDiv.__tsRelayoutBound = true;
+    let _applying = false;
+
+    plotDiv.on('plotly_relayout', (eventData) => {
+      if (_applying || !eventData || currentTsTraces.length === 0) return;
+
+      // X axis reset — restore full-data Y range
+      if (Object.prototype.hasOwnProperty.call(eventData, 'xaxis.autorange') && eventData['xaxis.autorange']) {
+        let yMin = null, yMax = null;
+        for (const trace of currentTsTraces) {
+          (trace.y || []).forEach(v => {
+            if (v == null || !Number.isFinite(v)) return;
+            if (yMin === null || v < yMin) yMin = v;
+            if (yMax === null || v > yMax) yMax = v;
+          });
+        }
+        if (yMin !== null && yMax !== null) {
+          const pad = Math.max(0.05, Math.abs(yMax - yMin) * 0.1);
+          _applying = true;
+          Plotly.relayout(plotDiv, {'yaxis2.range': [yMin - pad, yMax + pad]}).then(() => { _applying = false; });
+        }
+        return;
+      }
+
+      // X axis zoomed/panned
+      const x0 = Number(eventData['xaxis.range[0]']);
+      const x1 = Number(eventData['xaxis.range[1]']);
+      if (!Number.isFinite(x0) || !Number.isFinite(x1)) return;
+
+      const newRange = computeTsYRangeForXWindow(x0, x1);
+      if (!newRange) return;
+      _applying = true;
+      Plotly.relayout(plotDiv, {'yaxis2.range': newRange}).then(() => { _applying = false; });
+    });
+  }
+
   function bindMainPlotHoverSync() {
     if (!plotDiv || plotDiv.__mapHoverSyncBound) return;
     if (typeof plotDiv.on !== 'function') return;
@@ -194,19 +277,36 @@
   }
 
   function setControlsOpen(isOpen) {
-    document.body.classList.toggle('controls-open', isOpen);
-    if (controlsBackdrop) controlsBackdrop.hidden = !isOpen;
+    const isMobile = window.innerWidth <= 980;
+    if (isMobile) {
+      document.body.classList.toggle('controls-open', isOpen);
+      if (controlsBackdrop) controlsBackdrop.hidden = !isOpen;
+    } else {
+      // Desktop: sidebar is visible by default; 'sidebar-collapsed' hides it.
+      document.body.classList.toggle('sidebar-collapsed', !isOpen);
+      if (controlsBackdrop) controlsBackdrop.hidden = true;
+    }
     if (controlsToggle) controlsToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+
+    if (logs.length > 0) {
+      scheduleVisualizationResize();
+    }
   }
 
+  // Mobile auto-opens controls on first load; desktop starts with sidebar visible.
   if (window.innerWidth <= 980 && logs.length === 0) {
     setControlsOpen(true);
   }
 
   if (controlsToggle) {
     controlsToggle.addEventListener('click', () => {
-      const next = !document.body.classList.contains('controls-open');
-      setControlsOpen(next);
+      const isMobile = window.innerWidth <= 980;
+      if (isMobile) {
+        setControlsOpen(!document.body.classList.contains('controls-open'));
+      } else {
+        // Toggle: collapsed -> open, open -> collapse
+        setControlsOpen(document.body.classList.contains('sidebar-collapsed'));
+      }
     });
   }
 
@@ -220,8 +320,12 @@
   });
 
   window.addEventListener('resize', () => {
-    if (window.innerWidth > 980 && document.body.classList.contains('controls-open')) {
-      setControlsOpen(false);
+    // Clean up class state when the viewport crosses the mobile/desktop breakpoint.
+    if (window.innerWidth > 980) {
+      document.body.classList.remove('controls-open');
+      if (controlsBackdrop) controlsBackdrop.hidden = true;
+    } else {
+      document.body.classList.remove('sidebar-collapsed');
     }
     if (logs.length > 0) updatePlot();
   });
@@ -778,10 +882,34 @@
   function buildChannelAxisConfig(ycols, mainDomain) {
     const channelToRef = new Map();
     const axisLayout = {};
+    const axisChannels = new Map();
+    const axisUnits = new Map();
     const mobile = window.innerWidth <= 980;
 
+    const addAxisChannel = (axisRef, channel) => {
+      if (!axisChannels.has(axisRef)) axisChannels.set(axisRef, new Set());
+      axisChannels.get(axisRef).add(channel);
+    };
+
+    const setAxisUnit = (axisRef, unit) => {
+      if (unit == null || unit === '') return;
+      axisUnits.set(axisRef, unit);
+    };
+
+    const formatAxisTitle = (axisRef) => {
+      const channels = axisChannels.has(axisRef) ? Array.from(axisChannels.get(axisRef)) : [];
+      const unit = axisUnits.get(axisRef);
+      const channelTitle = channels.join(' / ');
+      if (channelTitle && unit) return `${channelTitle} [${unit}]`;
+      if (channelTitle) return channelTitle;
+      if (unit) return `[${unit}]`;
+      return 'Value';
+    };
+
+    const titleObject = (text) => ({ text, standoff: 8 });
+
     if (!ycols || ycols.length === 0) {
-      axisLayout.yaxis = {title:'Value', domain: mainDomain, automargin:true};
+      axisLayout.yaxis = {title:titleObject('Value'), domain: mainDomain, automargin:true};
       return {channelToRef, axisLayout, marginLeft: mobile ? 54 : 80, marginRight: mobile ? 54 : 80};
     }
 
@@ -795,11 +923,10 @@
     // Primary Y axis gets the first channel
     const firstUnit = getUnitForChannel(ycols[0]);
     channelToRef.set(ycols[0], 'y');
-    const firstTitle = (firstUnit != null && firstUnit !== '') ? `[${firstUnit}]` : ycols[0];
-    axisLayout.yaxis = {title: firstTitle, domain: mainDomain, automargin:true};
-    if (firstUnit != null && firstUnit !== '') {
-      unitToAxis.set(firstUnit, 'y');
-    }
+    addAxisChannel('y', ycols[0]);
+    setAxisUnit('y', firstUnit);
+    axisLayout.yaxis = {title: titleObject(formatAxisTitle('y')), domain: mainDomain, automargin:true};
+    if (firstUnit != null && firstUnit !== '') unitToAxis.set(firstUnit, 'y');
 
     // Additional overlaid Y axes (skip y2, reserved for time slip subplot)
     let leftExtraCount = 0;
@@ -812,7 +939,9 @@
 
       // Check if an existing axis covers this unit
       if (hasUnit && unitToAxis.has(unit)) {
-        channelToRef.set(channel, unitToAxis.get(unit));
+        const existingAxisRef = unitToAxis.get(unit);
+        channelToRef.set(channel, existingAxisRef);
+        addAxisChannel(existingAxisRef, channel);
         continue; // reuse existing axis, no new axis needed
       }
 
@@ -832,11 +961,12 @@
         position = Math.min(0.38, leftExtraCount * 0.06);
       }
 
-      const axisTitle = hasUnit ? `[${unit}]` : channel;
       channelToRef.set(channel, axisRef);
+      addAxisChannel(axisRef, channel);
+      setAxisUnit(axisRef, unit);
       if (hasUnit) unitToAxis.set(unit, axisRef);
       axisLayout[axisKey] = {
-        title: axisTitle,
+        title: titleObject(formatAxisTitle(axisRef)),
         domain: mainDomain,
         overlaying: 'y',
         anchor: 'free',
@@ -844,6 +974,12 @@
         position,
         automargin: true
       };
+    }
+
+    for (const axisRef of axisChannels.keys()) {
+      const axisKey = axisRef === 'y' ? 'yaxis' : `yaxis${axisRef.slice(1)}`;
+      if (!axisLayout[axisKey]) continue;
+      axisLayout[axisKey].title = titleObject(formatAxisTitle(axisRef));
     }
 
     const baseMargin = mobile ? 54 : 80;
@@ -856,15 +992,15 @@
   function getFigureHeight(includeTimeSlip) {
     const mobile = window.innerWidth <= 980;
     if (!mobile) return includeTimeSlip ? 860 : 640;
-
-    const reserve = includeTimeSlip ? 145 : 125;
-    const available = Math.max(220, window.innerHeight - reserve);
-    return Math.min(Math.max(available, 260), Math.max(320, window.innerHeight - 70));
+    // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh.
+    const main = Math.max(200, Math.round(window.innerHeight * 0.33));
+    const timeSlip = Math.max(160, Math.round(window.innerHeight * 0.25));
+    return includeTimeSlip ? (main + timeSlip) : main;
   }
 
   function getMapFigureHeight() {
     const mobile = window.innerWidth <= 980;
-    return mobile ? Math.min(Math.max(window.innerHeight * 0.28, 170), 340) : 300;
+    return mobile ? Math.max(200, Math.round(window.innerHeight * 0.33)) : 300;
   }
 
   function getMapOffsets() {
@@ -1763,13 +1899,13 @@
   }
 
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
-    const mainDomain = includeTimeSlip ? [0.16,1] : [0,1];
+    const mainDomain = includeTimeSlip ? [0.48,1] : [0,1];
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
 
     if (!includeTimeSlip) {
       const layout = {
         margin:{t:30},
-        xaxis:{title: mainXTitle},
+        xaxis:{title:{text: mainXTitle, standoff: 8}, automargin:true},
         showlegend:false,
         height: getFigureHeight(false)
       };
@@ -1781,9 +1917,9 @@
 
     const layout = {
       margin:{t:30},
-      xaxis:{title: mainXTitle, domain:[0,1], anchor:'y'},
-      xaxis2:{title:'Lap Distance (m)', domain:[0,1], anchor:'y2', matches:'x'},
-      yaxis2:{title:'Time Slip (s)', domain:[0,0.12]},
+      xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y'},
+      xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false},
+      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain:[0,0.43]},
       showlegend:false,
       height: getFigureHeight(true)
     };
@@ -1801,8 +1937,18 @@
     if (xMode === 'time') {
       return maskIdx.map(i => log.meta.lapTime[i]);
     }
-    if (!customXCol || !log.cols.includes(customXCol)) return null;
-    return maskIdx.map(i => log.data[i][customXCol]);
+    if (!customXCol) return null;
+    const resolvedCol = resolveChannelForLog(customXCol, log);
+    if (!resolvedCol || !log.cols.includes(resolvedCol)) return null;
+    return maskIdx.map(i => log.data[i][resolvedCol]);
+  }
+
+  function getXAxisTitle(xMode, customXCol) {
+    if (xMode === 'distance') return 'Lap Distance (m)';
+    if (xMode === 'time') return 'Lap Time (s)';
+    if (!customXCol) return 'X Axis';
+    const unit = getUnitForChannel(customXCol);
+    return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
   function buildSortedNumericSeries(xArr, yArr) {
@@ -1831,9 +1977,7 @@
     const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
     const singleLapSelected = totalSelectedLaps === 1;
     const channelColors = new Map(ycols.map((y, i) => [y, COLORS[i % COLORS.length]]));
-    const mainXTitle = xMode === 'distance'
-      ? 'Lap Distance (m)'
-      : (xMode === 'time' ? 'Lap Time (s)' : (customXCol || 'X Axis'));
+    const mainXTitle = getXAxisTitle(xMode, customXCol);
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
@@ -1924,8 +2068,20 @@
       });
     }
 
+    currentTsTraces = tsPreview.slice();
+    // uirevision controls when Plotly.react resets the user's zoom/pan.
+    // Keyed on axis config + loaded files, but NOT lap selection — so toggling
+    // a lap keeps the current view instead of resetting it.
+    layout.uirevision = [
+      xMode,
+      customXCol || '',
+      [...ycols].sort().join('\x00'),
+      selFiles.map(f => f.id).sort().join('\x00'),
+      String(includeTimeSlip)
+    ].join('|');
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
+    bindMainPlotRelayoutSync();
     updateMapPlot(selFiles, selectedLaps);
     updateLeafletMap(selFiles, selectedLaps);
   }
