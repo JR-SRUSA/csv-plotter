@@ -1816,6 +1816,94 @@
     };
   }
 
+  function hasRenderableLeafletMapData(selFiles, selectedLaps) {
+    if (!Array.isArray(selFiles) || selFiles.length === 0) return false;
+
+    for (const log of selFiles) {
+      const latLonSource = getLeafletLatLonSource(log);
+      if (!latLonSource) continue;
+
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a, b) => a - b);
+      for (const lap of lapNums) {
+        if (!isLapSelected(selectedLaps, log.id, lap)) continue;
+
+        const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        let validPoints = 0;
+        for (const i of maskIdx) {
+          const lat = latLonSource.latAt(i);
+          const lon = latLonSource.lonAt(i);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            validPoints += 1;
+            if (validPoints >= 2) return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function hasRenderableXYMapData(selFiles, selectedLaps) {
+    if (!Array.isArray(selFiles) || selFiles.length === 0) return false;
+
+    for (const log of selFiles) {
+      const mapSource = getMapSourceForLog(log);
+      if (!mapSource) continue;
+
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a, b) => a - b);
+      for (const lap of lapNums) {
+        if (!isLapSelected(selectedLaps, log.id, lap)) continue;
+
+        const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        let validPoints = 0;
+        for (const i of maskIdx) {
+          const x = mapSource.xAt(i);
+          const y = mapSource.yAt(i);
+          if (Number.isFinite(x) && Number.isFinite(y)) {
+            validPoints += 1;
+            if (validPoints >= 2) return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function setMapDisplayMode(mode) {
+    const mapsContainer = document.querySelector('.maps-container');
+    if (mapsContainer) {
+      mapsContainer.style.display = mode === 'none' ? 'none' : 'block';
+    }
+
+    if (mapDiv) {
+      mapDiv.style.display = mode === 'xy' ? 'block' : 'none';
+    }
+
+    if (leafletMapDiv) {
+      leafletMapDiv.style.display = mode === 'leaflet' ? 'block' : 'none';
+    }
+  }
+
+  function clearXYMapPlot() {
+    if (!mapDiv) return;
+    mapHoverLookup = new Map();
+    mapHoverMarkerVisible = false;
+    mapViewState = null;
+    Plotly.purge(mapDiv);
+  }
+
+  function clearLeafletMapPlot() {
+    leafletHoverLookup = new Map();
+    clearLeafletHoverMarker();
+    leafletViewState = null;
+    leafletViewStateUserSet = false;
+    if (leafletMap) {
+      leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
+      leafletLayers = [];
+    }
+  }
+
   function updateLeafletMap(selFiles, selectedLaps) {
     if (!leafletMapDiv || !window.L) return;
     syncLeafletContainerHeight();
@@ -2085,8 +2173,23 @@
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
-    updateMapPlot(selFiles, selectedLaps);
-    updateLeafletMap(selFiles, selectedLaps);
+
+    const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
+    const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
+
+    if (hasLeafletData) {
+      setMapDisplayMode('leaflet');
+      clearXYMapPlot();
+      updateLeafletMap(selFiles, selectedLaps);
+    } else if (hasXYData) {
+      setMapDisplayMode('xy');
+      clearLeafletMapPlot();
+      updateMapPlot(selFiles, selectedLaps);
+    } else {
+      setMapDisplayMode('none');
+      clearXYMapPlot();
+      clearLeafletMapPlot();
+    }
   }
 
   // event handlers
@@ -2146,16 +2249,8 @@
         populateMapColorSelect();
         renderLapsList();
         Plotly.purge(plotDiv);
-        if (mapDiv) {
-          mapHoverLookup = new Map();
-          mapHoverMarkerVisible = false;
-          mapViewState = null;
-          Plotly.purge(mapDiv);
-        }
-        leafletHoverLookup = new Map();
-        clearLeafletHoverMarker();
-        leafletViewState = null;
-        leafletViewStateUserSet = false;
+        clearXYMapPlot();
+        clearLeafletMapPlot();
       }
     }
   });
@@ -2194,20 +2289,9 @@
     populateMapColorSelect();
     renderLapsList();
     Plotly.purge(plotDiv);
-    if (mapDiv) {
-      mapHoverLookup = new Map();
-      mapHoverMarkerVisible = false;
-      mapViewState = null;
-      Plotly.purge(mapDiv);
-    }
-    leafletHoverLookup = new Map();
-    clearLeafletHoverMarker();
-    leafletViewState = null;
-    leafletViewStateUserSet = false;
-    if (leafletMap) {
-      leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
-      leafletLayers = [];
-    }
+    clearXYMapPlot();
+    clearLeafletMapPlot();
+    setMapDisplayMode('none');
     if (window.innerWidth <= 980) setControlsOpen(true);
   });
 
@@ -2228,5 +2312,7 @@
   if (mapColorModeSelect) {
     mapColorModeSelect.disabled = !(mapColorEnabledInput && mapColorEnabledInput.checked);
   }
+
+  setMapDisplayMode('none');
 
 })();

@@ -3,6 +3,9 @@
   const CRASH_LAP_DISTANCE_RATIO = 0.8;
   const DISTANCE_MONO_EPS_M = 0.5;
   const SCAN_MY_TESLA_DEFAULT_RESAMPLE_HZ = 20;
+  const SMT_CALC_BATTERY_AMPS_COL = 'Battery Amps (calc)';
+  const SMT_CALC_MOTOR_POWER_TOTAL_COL = 'Motor Power Total (calc)';
+  const SMT_CALC_EFFICIENCY_COL = 'Efficiency (calc)';
 
   function normalizedCells(row) {
     if (!Array.isArray(row)) return [];
@@ -212,7 +215,9 @@
     const base = processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
     normalizeScanMyTeslaTimeToSeconds(base);
     applyScanMyTeslaDefaultUnits(base);
-    return resampleProcessedData(base, resampleHz);
+    const resampled = resampleProcessedData(base, resampleHz);
+    addScanMyTeslaCalculatedChannels(resampled);
+    return resampled;
   }
 
   function processScanMyTeslaSparseRows(rows, headerRowIndex, source, format, metadata = {}, resampleHz = SCAN_MY_TESLA_DEFAULT_RESAMPLE_HZ) {
@@ -282,13 +287,16 @@
     const sparseWide = { data, cols, units, meta, source, format };
     normalizeScanMyTeslaTimeToSeconds(sparseWide);
     applyScanMyTeslaDefaultUnits(sparseWide);
-    return resampleProcessedData(sparseWide, resampleHz);
+    const resampled = resampleProcessedData(sparseWide, resampleHz);
+    addScanMyTeslaCalculatedChannels(resampled);
+    return resampled;
   }
 
   function inferScanMyTeslaUnitFromColumn(colName) {
     const name = String(colName == null ? '' : colName).toLowerCase();
     if (!name) return '';
     if (isScanMyTeslaTorqueBiasColumn(name)) return 'Percent';
+    if (isScanMyTeslaConsumptionColumn(name)) return 'W/km';
     if (name.includes('voltage')) return 'Volts';
     if (name.includes('power')) return 'kW';
     if (name.includes('torque')) return 'Nm';
@@ -307,8 +315,146 @@
     return name.includes('torque bias') || (name.includes('torque') && name.includes('bias'));
   }
 
+  function isScanMyTeslaConsumptionColumn(colName) {
+    const name = String(colName == null ? '' : colName).toLowerCase();
+    return name.includes('consumption');
+  }
+
   function shouldUseLinearInterpolationForColumn(colName) {
-    return isScanMyTeslaTemperatureColumn(colName) || isScanMyTeslaTorqueBiasColumn(colName);
+    return isScanMyTeslaTemperatureColumn(colName)
+      || isScanMyTeslaTorqueBiasColumn(colName)
+      || isScanMyTeslaConsumptionColumn(colName);
+  }
+
+  function normalizeScanMyTeslaColumnName(name) {
+    return String(name == null ? '' : name)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function findScanMyTeslaColumnByTokenSets(cols, tokenSets) {
+    if (!Array.isArray(cols) || cols.length === 0) return null;
+    if (!Array.isArray(tokenSets) || tokenSets.length === 0) return null;
+
+    for (const col of cols) {
+      const norm = normalizeScanMyTeslaColumnName(col);
+      if (!norm) continue;
+      const matched = tokenSets.some((tokens) => {
+        if (!Array.isArray(tokens) || tokens.length === 0) return false;
+        return tokens.every(token => norm.includes(String(token).toLowerCase()));
+      });
+      if (matched) return col;
+    }
+
+    return null;
+  }
+
+  function refreshProcessedMeta(processed) {
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return;
+    if (!processed.units || typeof processed.units !== 'object') {
+      processed.units = {};
+    }
+
+    const meta = analyzeColumns(processed.data, processed.cols, processed.units);
+    meta.units = processed.units;
+    meta.source = processed.source;
+    meta.format = processed.format;
+    meta.metadata = (processed.meta && processed.meta.metadata) || {};
+    if (processed.meta && Number.isFinite(processed.meta.resampledHz)) {
+      meta.resampledHz = processed.meta.resampledHz;
+    }
+    computeLaps(meta, meta.metadata);
+    processed.meta = meta;
+  }
+
+  function addScanMyTeslaCalculatedChannels(processed) {
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return;
+    if (processed.data.length === 0) return;
+    if (!processed.units || typeof processed.units !== 'object') {
+      processed.units = {};
+    }
+
+    const batteryPowerCol = findScanMyTeslaColumnByTokenSets(processed.cols, [
+      ['battery', 'power'],
+      ['batt', 'power']
+    ]);
+    const batteryVoltageCol = findScanMyTeslaColumnByTokenSets(processed.cols, [
+      ['battery', 'voltage'],
+      ['batt', 'voltage']
+    ]);
+    const frontPowerCol = findScanMyTeslaColumnByTokenSets(processed.cols, [
+      ['front', 'power'],
+      ['f', 'power']
+    ]);
+    const rearPowerCol = findScanMyTeslaColumnByTokenSets(processed.cols, [
+      ['rear', 'power'],
+      ['r', 'power']
+    ]);
+
+    let addedAny = false;
+
+    if (batteryPowerCol && batteryVoltageCol) {
+      if (!processed.cols.includes(SMT_CALC_BATTERY_AMPS_COL)) {
+        processed.cols.push(SMT_CALC_BATTERY_AMPS_COL);
+      }
+      processed.units[SMT_CALC_BATTERY_AMPS_COL] = 'A';
+
+      processed.data.forEach((row) => {
+        const powerKw = toFiniteNumber(row[batteryPowerCol]);
+        const voltageV = toFiniteNumber(row[batteryVoltageCol]);
+        if (!Number.isFinite(powerKw) || !Number.isFinite(voltageV) || Math.abs(voltageV) <= 1e-9) {
+          row[SMT_CALC_BATTERY_AMPS_COL] = null;
+          return;
+        }
+        row[SMT_CALC_BATTERY_AMPS_COL] = (powerKw * 1000) / voltageV;
+      });
+      addedAny = true;
+    }
+
+    if (frontPowerCol && rearPowerCol) {
+      if (!processed.cols.includes(SMT_CALC_MOTOR_POWER_TOTAL_COL)) {
+        processed.cols.push(SMT_CALC_MOTOR_POWER_TOTAL_COL);
+      }
+      processed.units[SMT_CALC_MOTOR_POWER_TOTAL_COL] = 'kW';
+
+      processed.data.forEach((row) => {
+        const fPower = toFiniteNumber(row[frontPowerCol]);
+        const rPower = toFiniteNumber(row[rearPowerCol]);
+        if (!Number.isFinite(fPower) || !Number.isFinite(rPower)) {
+          row[SMT_CALC_MOTOR_POWER_TOTAL_COL] = null;
+          return;
+        }
+        row[SMT_CALC_MOTOR_POWER_TOTAL_COL] = fPower + rPower;
+      });
+      addedAny = true;
+    }
+
+    const batteryPowerForEfficiencyCol = batteryPowerCol || findScanMyTeslaColumnByTokenSets(processed.cols, [
+      ['battery', 'power'],
+      ['batt', 'power']
+    ]);
+    if (batteryPowerForEfficiencyCol && processed.cols.includes(SMT_CALC_MOTOR_POWER_TOTAL_COL)) {
+      if (!processed.cols.includes(SMT_CALC_EFFICIENCY_COL)) {
+        processed.cols.push(SMT_CALC_EFFICIENCY_COL);
+      }
+      processed.units[SMT_CALC_EFFICIENCY_COL] = '%';
+
+      processed.data.forEach((row) => {
+        const motorPowerTotal = toFiniteNumber(row[SMT_CALC_MOTOR_POWER_TOTAL_COL]);
+        const batteryPower = toFiniteNumber(row[batteryPowerForEfficiencyCol]);
+        if (!Number.isFinite(motorPowerTotal) || !Number.isFinite(batteryPower) || Math.abs(batteryPower) < 10) {
+          row[SMT_CALC_EFFICIENCY_COL] = null;
+          return;
+        }
+        row[SMT_CALC_EFFICIENCY_COL] = 100 * (motorPowerTotal / batteryPower);
+      });
+      addedAny = true;
+    }
+
+    if (addedAny) {
+      refreshProcessedMeta(processed);
+    }
   }
 
   function applyScanMyTeslaDefaultUnits(processed) {
