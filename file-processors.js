@@ -2,6 +2,7 @@
   const LAP_SPLIT_DISTANCE_M = 100;
   const CRASH_LAP_DISTANCE_RATIO = 0.8;
   const DISTANCE_MONO_EPS_M = 0.5;
+  const SCAN_MY_TESLA_DEFAULT_RESAMPLE_HZ = 20;
 
   function normalizedCells(row) {
     if (!Array.isArray(row)) return [];
@@ -79,6 +80,47 @@
     return /^aim\s+csv\s+file$/i.test(format || '');
   }
 
+  function isScanMyTeslaFormat(format, rows = [], headerRowIndex = 0, metadata = {}) {
+    if (/scan\s*my\s*tesla/i.test(format || '')) return true;
+    const source = getMetadataValue(metadata, 'data source') || getMetadataValue(metadata, 'source');
+    if (/scan\s*my\s*tesla/i.test(source || '')) return true;
+
+    const header = (rows[headerRowIndex] || []).map(c => String(c == null ? '' : c).trim().toLowerCase());
+    if (header.length === 0) return false;
+
+    const hasTime = header.some(c => /time|timestamp|date|utc/.test(c));
+    const hasChannel = header.some(c => /channel|signal|name|parameter|pid/.test(c));
+    const hasValue = header.some(c => /value|reading|data/.test(c));
+    if (hasTime && hasChannel && hasValue) return true;
+
+    // Sparse wide Scan My Tesla CSVs: first column is Time, many channel columns,
+    // and each row updates only a small subset of channels.
+    const firstCol = header[0] || '';
+    if (!/time|timestamp|date|utc/.test(firstCol)) return false;
+    if (header.length < 6) return false;
+
+    const probeRows = rows.slice(headerRowIndex + 1, headerRowIndex + 1 + 50);
+    if (probeRows.length === 0) return false;
+    let sparseRows = 0;
+    let validRows = 0;
+    for (const row of probeRows) {
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const t = parseTimeValue(row[0], '');
+      if (!Number.isFinite(t)) continue;
+      validRows += 1;
+
+      const nonEmptySignals = row.slice(1).reduce((count, cell) => {
+        const text = cell == null ? '' : String(cell).trim();
+        return text ? (count + 1) : count;
+      }, 0);
+      if (nonEmptySignals > 0 && nonEmptySignals <= 2) {
+        sparseRows += 1;
+      }
+    }
+
+    return validRows >= 5 && (sparseRows / validRows) >= 0.6;
+  }
+
   function isStandardFormat(rows, headerRowIndex, metadata = {}) {
     const format = getMetadataValue(metadata, 'format');
     if (isGPBikesFormat(format) || isAiMFormat(format)) return false;
@@ -105,7 +147,8 @@
     return dataLikeRowCount >= minDataLikeRows;
   }
 
-  function processCsvRows(rows) {
+  function processCsvRows(rows, options = {}) {
+    const parsedOptions = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
     const headerRowIndex = findHeaderRowIndex(rows);
     const metadata = extractMetadata(rows, headerRowIndex);
     const format = getMetadataValue(metadata, 'format');
@@ -117,6 +160,12 @@
 
     if (isAiMFormat(format)) {
       return processAiMRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
+    if (isScanMyTeslaFormat(format, rows, headerRowIndex, metadata)) {
+      return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata }, {
+        resampleHz: parsedOptions.scanMyTeslaHz
+      });
     }
 
     if (isStandardFormat(rows, headerRowIndex, metadata)) {
@@ -148,6 +197,372 @@
     const source = details.source || 'Unknown';
     const format = details.format || 'Unknown';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+  }
+
+  function processScanMyTeslaRows(rows, headerRowIndex, details = {}, options = {}) {
+    const source = details.source || 'ScanMyTesla';
+    const format = details.format || 'ScanMyTesla CSV';
+    const resampleHz = normalizeResampleHz(options.resampleHz);
+
+    const sparseResult = processScanMyTeslaSparseRows(rows, headerRowIndex, source, format, details.metadata || {}, resampleHz);
+    if (sparseResult) {
+      return sparseResult;
+    }
+
+    const base = processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
+    normalizeScanMyTeslaTimeToSeconds(base);
+    applyScanMyTeslaDefaultUnits(base);
+    return resampleProcessedData(base, resampleHz);
+  }
+
+  function processScanMyTeslaSparseRows(rows, headerRowIndex, source, format, metadata = {}, resampleHz = SCAN_MY_TESLA_DEFAULT_RESAMPLE_HZ) {
+    const rawCols = (rows[headerRowIndex] || []).map(c => String(c == null ? '' : c).trim());
+    if (rawCols.length === 0) return null;
+
+    const lc = rawCols.map(c => c.toLowerCase());
+    const timeIdx = lc.findIndex(c => /time|timestamp|date|utc/.test(c));
+    const channelIdx = lc.findIndex(c => /channel|signal|name|parameter|pid/.test(c));
+    const valueIdx = lc.findIndex(c => /value|reading|data/.test(c));
+    const unitIdx = lc.findIndex(c => /^unit$|\bunit\b/.test(c));
+
+    if (timeIdx < 0 || channelIdx < 0 || valueIdx < 0) return null;
+
+    const rowsData = rows.slice(headerRowIndex + 1);
+    const byTime = new Map();
+    const channelOrder = [];
+    const channelSet = new Set();
+    const units = { Time: 's' };
+
+    rowsData.forEach((row) => {
+      if (!Array.isArray(row)) return;
+      const channelName = row[channelIdx] == null ? '' : String(row[channelIdx]).trim();
+      if (!channelName) return;
+      const rawValue = row[valueIdx];
+      const numericValue = toFiniteNumber(rawValue);
+      if (!Number.isFinite(numericValue)) return;
+
+      const timeValueRaw = parseTimeValue(row[timeIdx], '');
+      if (!Number.isFinite(timeValueRaw)) return;
+      const timeValue = timeValueRaw / 1000;
+
+      if (!channelSet.has(channelName)) {
+        channelSet.add(channelName);
+        channelOrder.push(channelName);
+      }
+
+      if (unitIdx >= 0 && units[channelName] == null) {
+        const unitText = row[unitIdx] == null ? '' : String(row[unitIdx]).trim();
+        units[channelName] = unitText;
+      }
+
+      const timeKey = String(timeValue);
+      let packed = byTime.get(timeKey);
+      if (!packed) {
+        packed = { Time: timeValue };
+        byTime.set(timeKey, packed);
+      }
+      packed[channelName] = numericValue;
+    });
+
+    const cols = ['Time', ...channelOrder];
+    if (byTime.size < 2 || cols.length < 2) return null;
+
+    const data = Array.from(byTime.values()).sort((a, b) => a.Time - b.Time);
+    cols.forEach((col) => {
+      if (units[col] == null) units[col] = '';
+    });
+
+    const meta = analyzeColumns(data, cols, units);
+    meta.units = units;
+    meta.source = source;
+    meta.format = format;
+    meta.metadata = metadata;
+    computeLaps(meta, metadata);
+
+    const sparseWide = { data, cols, units, meta, source, format };
+    normalizeScanMyTeslaTimeToSeconds(sparseWide);
+    applyScanMyTeslaDefaultUnits(sparseWide);
+    return resampleProcessedData(sparseWide, resampleHz);
+  }
+
+  function inferScanMyTeslaUnitFromColumn(colName) {
+    const name = String(colName == null ? '' : colName).toLowerCase();
+    if (!name) return '';
+    if (isScanMyTeslaTorqueBiasColumn(name)) return 'Percent';
+    if (name.includes('voltage')) return 'Volts';
+    if (name.includes('power')) return 'kW';
+    if (name.includes('torque')) return 'Nm';
+    if (name.includes('speed')) return 'km/h';
+    if (name.includes('temp')) return 'C';
+    return '';
+  }
+
+  function isScanMyTeslaTemperatureColumn(colName) {
+    const name = String(colName == null ? '' : colName).toLowerCase();
+    return name.includes('temp') || name.includes('temperature');
+  }
+
+  function isScanMyTeslaTorqueBiasColumn(colName) {
+    const name = String(colName == null ? '' : colName).toLowerCase();
+    return name.includes('torque bias') || (name.includes('torque') && name.includes('bias'));
+  }
+
+  function shouldUseLinearInterpolationForColumn(colName) {
+    return isScanMyTeslaTemperatureColumn(colName) || isScanMyTeslaTorqueBiasColumn(colName);
+  }
+
+  function applyScanMyTeslaDefaultUnits(processed) {
+    if (!processed || !Array.isArray(processed.cols)) return;
+    if (!processed.units || typeof processed.units !== 'object') {
+      processed.units = {};
+    }
+
+    processed.cols.forEach((col) => {
+      const existing = processed.units[col];
+      if (typeof existing === 'string' && existing.trim()) return;
+      const inferred = inferScanMyTeslaUnitFromColumn(col);
+      if (inferred) {
+        processed.units[col] = inferred;
+      }
+    });
+  }
+
+  function normalizeScanMyTeslaTimeToSeconds(processed) {
+    if (!processed || !processed.meta || !Array.isArray(processed.data)) return;
+    const timeCol = processed.meta.timeCol;
+    if (!timeCol) return;
+
+    for (let i = 0; i < processed.data.length; i++) {
+      const row = processed.data[i];
+      if (!row || !Object.prototype.hasOwnProperty.call(row, timeCol)) continue;
+      const raw = row[timeCol];
+      const numeric = toFiniteNumber(raw);
+      if (Number.isFinite(numeric)) {
+        row[timeCol] = numeric / 1000;
+      } else {
+        const parsed = parseTimeValue(raw, '');
+        if (Number.isFinite(parsed)) {
+          row[timeCol] = parsed;
+        }
+      }
+    }
+
+    if (!processed.units || typeof processed.units !== 'object') {
+      processed.units = {};
+    }
+    processed.units[timeCol] = 's';
+
+    const refreshedMeta = analyzeColumns(processed.data, processed.cols || [], processed.units);
+    refreshedMeta.units = processed.units;
+    refreshedMeta.source = processed.source;
+    refreshedMeta.format = processed.format;
+    refreshedMeta.metadata = (processed.meta && processed.meta.metadata) || {};
+    processed.meta = refreshedMeta;
+  }
+
+  function normalizeResampleHz(hz) {
+    const n = Number(hz);
+    if (Number.isFinite(n) && n > 0) return n;
+    return SCAN_MY_TESLA_DEFAULT_RESAMPLE_HZ;
+  }
+
+  function toFiniteNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (value == null) return null;
+    const n = Number(String(value).trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function buildUniformTimeGrid(timeValues, hz) {
+    let start = Infinity;
+    let end = -Infinity;
+    let count = 0;
+    for (let i = 0; i < timeValues.length; i++) {
+      const v = timeValues[i];
+      if (!Number.isFinite(v)) continue;
+      if (v < start) start = v;
+      if (v > end) end = v;
+      count += 1;
+    }
+    if (count < 2) return [];
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+
+    const step = 1 / normalizeResampleHz(hz);
+    const grid = [];
+    for (let t = start; t <= end + step * 0.5; t += step) {
+      grid.push(Number(t.toFixed(6)));
+    }
+    return grid;
+  }
+
+  function dedupeSortedSamples(xs, ys) {
+    const outX = [];
+    const outY = [];
+    for (let i = 0; i < xs.length; i++) {
+      const x = xs[i];
+      const y = ys[i];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const last = outX.length - 1;
+      if (last >= 0 && Math.abs(outX[last] - x) <= 1e-9) {
+        outY[last] = y;
+      } else {
+        outX.push(x);
+        outY.push(y);
+      }
+    }
+    return { x: outX, y: outY };
+  }
+
+  function buildNaturalCubicSpline(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+
+    const a = ys.slice();
+    const b = new Array(n - 1).fill(0);
+    const c = new Array(n).fill(0);
+    const d = new Array(n - 1).fill(0);
+    const h = new Array(n - 1).fill(0);
+
+    for (let i = 0; i < n - 1; i++) {
+      h[i] = xs[i + 1] - xs[i];
+      if (h[i] <= 0) return null;
+    }
+
+    const alpha = new Array(n).fill(0);
+    for (let i = 1; i < n - 1; i++) {
+      alpha[i] = (3 / h[i]) * (a[i + 1] - a[i]) - (3 / h[i - 1]) * (a[i] - a[i - 1]);
+    }
+
+    const l = new Array(n).fill(0);
+    const mu = new Array(n).fill(0);
+    const z = new Array(n).fill(0);
+    l[0] = 1;
+    for (let i = 1; i < n - 1; i++) {
+      l[i] = 2 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1];
+      if (Math.abs(l[i]) <= 1e-12) return null;
+      mu[i] = h[i] / l[i];
+      z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+    }
+    l[n - 1] = 1;
+    c[n - 1] = 0;
+
+    for (let j = n - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j + 1];
+      b[j] = (a[j + 1] - a[j]) / h[j] - (h[j] * (c[j + 1] + 2 * c[j])) / 3;
+      d[j] = (c[j + 1] - c[j]) / (3 * h[j]);
+    }
+
+    return { x: xs, a, b, c, d };
+  }
+
+  function evaluateNaturalCubicSpline(spline, xq) {
+    const xs = spline.x;
+    const n = xs.length;
+    if (xq <= xs[0]) return spline.a[0];
+    if (xq >= xs[n - 1]) return spline.a[n - 1];
+
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xs[mid] <= xq) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+
+    const dx = xq - xs[lo];
+    return spline.a[lo] + spline.b[lo] * dx + spline.c[lo] * dx * dx + spline.d[lo] * dx * dx * dx;
+  }
+
+  function evaluateLinear(xs, ys, xq) {
+    const n = xs.length;
+    if (n === 0) return null;
+    if (n === 1) return ys[0];
+    if (xq <= xs[0]) return ys[0];
+    if (xq >= xs[n - 1]) return ys[n - 1];
+
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xs[mid] <= xq) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+
+    const x0 = xs[lo];
+    const x1 = xs[hi];
+    const y0 = ys[lo];
+    const y1 = ys[hi];
+    if (!Number.isFinite(x0) || !Number.isFinite(x1) || x1 === x0) return y0;
+    const ratio = (xq - x0) / (x1 - x0);
+    return y0 + (y1 - y0) * ratio;
+  }
+
+  function resampleProcessedData(processed, resampleHz) {
+    if (!processed || !processed.meta || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
+      return processed;
+    }
+
+    const timeCol = processed.meta.timeCol;
+    if (!timeCol) return processed;
+
+    const baseTime = processed.meta._time || [];
+    const grid = buildUniformTimeGrid(baseTime, resampleHz);
+    if (grid.length < 2) return processed;
+
+    const columns = processed.cols.slice();
+    const resampledData = grid.map(t => ({ [timeCol]: t }));
+
+    columns.forEach((col) => {
+      if (col === timeCol) return;
+
+      const points = [];
+      for (let i = 0; i < processed.data.length; i++) {
+        const tx = baseTime[i];
+        const vy = toFiniteNumber(processed.data[i][col]);
+        if (Number.isFinite(tx) && Number.isFinite(vy)) {
+          points.push({ x: tx, y: vy });
+        }
+      }
+      if (points.length === 0) return;
+
+      points.sort((a, b) => a.x - b.x);
+      const deduped = dedupeSortedSamples(points.map(p => p.x), points.map(p => p.y));
+      if (deduped.x.length === 0) return;
+
+      const preferLinear = shouldUseLinearInterpolationForColumn(col);
+      const spline = preferLinear ? null : buildNaturalCubicSpline(deduped.x, deduped.y);
+      for (let i = 0; i < grid.length; i++) {
+        const xq = grid[i];
+        const yq = spline
+          ? evaluateNaturalCubicSpline(spline, xq)
+          : evaluateLinear(deduped.x, deduped.y, xq);
+        resampledData[i][col] = Number.isFinite(yq) ? yq : null;
+      }
+    });
+
+    const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
+    const meta = analyzeColumns(resampledData, columns, units);
+    meta.units = units;
+    meta.source = processed.source;
+    meta.format = processed.format;
+    meta.metadata = processed.meta.metadata || {};
+    meta.resampledHz = normalizeResampleHz(resampleHz);
+    computeLaps(meta, meta.metadata);
+
+    return {
+      data: resampledData,
+      cols: columns,
+      units,
+      meta,
+      source: processed.source,
+      format: processed.format
+    };
   }
 
   function processRowsWithCurrentMethod(rows, headerRowIndex, source, format, metadata = {}, options = {}) {
@@ -440,6 +855,7 @@
     processCsvRows,
     isGPBikesFormat,
     isAiMFormat,
-    isStandardFormat
+    isStandardFormat,
+    isScanMyTeslaFormat
   };
 })();
