@@ -908,9 +908,12 @@
 
     const titleObject = (text) => ({ text, standoff: 8 });
 
+    const baseMarginLeft = mobile ? 48 : 80;
+    const baseMarginRight = mobile ? 22 : 80;
+
     if (!ycols || ycols.length === 0) {
       axisLayout.yaxis = {title:titleObject('Value'), domain: mainDomain, automargin:true};
-      return {channelToRef, axisLayout, marginLeft: mobile ? 54 : 80, marginRight: mobile ? 54 : 80};
+      return {channelToRef, axisLayout, marginLeft: baseMarginLeft, marginRight: baseMarginRight};
     }
 
     // Group channels by unit; channels with same unit share an axis.
@@ -982,10 +985,9 @@
       axisLayout[axisKey].title = titleObject(formatAxisTitle(axisRef));
     }
 
-    const baseMargin = mobile ? 54 : 80;
-    const marginStep = mobile ? 22 : 40;
-    const marginLeft = Math.min(baseMargin + leftExtraCount * marginStep, mobile ? 120 : 260);
-    const marginRight = Math.min(baseMargin + rightExtraCount * marginStep, mobile ? 120 : 260);
+    const marginStep = mobile ? 18 : 40;
+    const marginLeft = Math.min(baseMarginLeft + leftExtraCount * marginStep, mobile ? 130 : 260);
+    const marginRight = Math.min(baseMarginRight + rightExtraCount * marginStep, mobile ? 110 : 260);
     return {channelToRef, axisLayout, marginLeft, marginRight};
   }
 
@@ -1701,8 +1703,9 @@
       visible: false
     });
 
+    const isMobile = window.innerWidth <= 980;
     const mapLayout = {
-      margin: { t: 30, l: 60, r: 20, b: 55 },
+      margin: { t: 30, l: isMobile ? 52 : 60, r: isMobile ? 10 : 20, b: 55 },
       xaxis: { title: (axisTitles && axisTitles.x) || 'Map X (m)', automargin: true },
       yaxis: {
         title: (axisTitles && axisTitles.y) || 'Map Y (m)',

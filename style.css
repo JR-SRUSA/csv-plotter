@@ -73,8 +73,8 @@ body.sidebar-collapsed .controls{display:none}
 
 @media (max-width: 980px){
 	.hamburger-btn{flex:0 0 auto}
-	main{display:block;padding:12px}
-	.plot{padding:8px;overflow:hidden}
+	main{display:block;padding:4px}
+	.plot{padding-left:0px;padding-right:0px;overflow:hidden}
 	#plotDiv{
 		height:33dvh;
 		min-height:200px;
