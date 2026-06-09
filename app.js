@@ -2,6 +2,7 @@
   const fileInput = document.getElementById('fileInput');
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
+  const selectedYColors = document.getElementById('selectedYColors');
   const xCustomSelect = document.getElementById('xCustomSelect');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
@@ -38,6 +39,7 @@
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
+  const channelColorOverrides = new Map();
 
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
@@ -276,6 +278,42 @@
     return COLORS[idx];
   }
 
+  function getLineDashForFileIndex(fileIdx) {
+    return DASHES[fileIdx % DASHES.length];
+  }
+
+  function getSvgDashArray(dash) {
+    if (dash === 'dash') return '10 6';
+    if (dash === 'dot') return '2 4';
+    if (dash === 'dashdot') return '10 4 2 4';
+    if (dash === 'longdash') return '14 6';
+    if (dash === 'longdashdot') return '14 4 2 4';
+    return '';
+  }
+
+  function normalizeHexColor(color) {
+    return /^#[0-9a-f]{6}$/i.test(String(color)) ? String(color) : COLORS[0];
+  }
+
+  function syncSelectedChannelColors(selectedChannels) {
+    const activeColors = new Set();
+    selectedChannels.forEach((channel) => {
+      if (!channelColorOverrides.has(channel)) return;
+      activeColors.add(channelColorOverrides.get(channel));
+    });
+    selectedChannels.forEach((channel, index) => {
+      if (channelColorOverrides.has(channel)) return;
+      let color = COLORS.find((candidate) => !activeColors.has(candidate));
+      if (!color) color = COLORS[index % COLORS.length];
+      channelColorOverrides.set(channel, color);
+      activeColors.add(color);
+    });
+  }
+
+  function getChannelColor(channel) {
+    return normalizeHexColor(channelColorOverrides.get(channel));
+  }
+
   function setControlsOpen(isOpen) {
     const isMobile = window.innerWidth <= 980;
     if (isMobile) {
@@ -393,12 +431,35 @@
 
   function renderFilesList() {
     filesList.innerHTML = '';
-    logs.forEach(log => {
+    logs.forEach((log, fileIdx) => {
       const el = document.createElement('div');
       el.className = 'file-item';
       el.dataset.id = log.id;
-      el.innerHTML = `<label><input type="checkbox" data-id="${log.id}" checked /> <strong>${escapeHtml(log.name)}</strong></label>
-        <button data-remove="${log.id}">Remove</button>`;
+      const dash = getLineDashForFileIndex(fileIdx);
+      const dashArray = getSvgDashArray(dash);
+      const label = document.createElement('label');
+      label.className = 'file-toggle';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.dataset.id = log.id;
+      checkbox.checked = true;
+      const nameWrap = document.createElement('span');
+      nameWrap.className = 'file-name-wrap';
+      const name = document.createElement('strong');
+      name.textContent = log.name;
+      const linePreview = document.createElement('span');
+      linePreview.className = 'file-line-preview';
+      linePreview.title = `Line type: ${dash}`;
+      linePreview.innerHTML = `<svg viewBox="0 0 44 8" aria-hidden="true" focusable="false"><line x1="1" y1="4" x2="43" y2="4" stroke="currentColor" stroke-width="2" stroke-linecap="round"${dashArray ? ` stroke-dasharray="${dashArray}"` : ''}></line></svg>`;
+      nameWrap.appendChild(name);
+      nameWrap.appendChild(linePreview);
+      label.appendChild(checkbox);
+      label.appendChild(nameWrap);
+      const removeBtn = document.createElement('button');
+      removeBtn.textContent = 'Remove';
+      removeBtn.setAttribute('data-remove', log.id);
+      el.appendChild(label);
+      el.appendChild(removeBtn);
       filesList.appendChild(el);
     });
   }
@@ -501,6 +562,7 @@
         opts[0].selected = true;
       }
     }
+    renderSelectedChannelColorControls();
   }
 
   function getNumericColumns() {
@@ -743,6 +805,34 @@
     return Array.from(ySelect.selectedOptions).map(o=>o.value);
   }
 
+  function getChannelLabel(channel) {
+    const unit = getUnitForChannel(channel);
+    return (unit != null && unit !== '') ? `${channel} [${unit}]` : channel;
+  }
+
+  function renderSelectedChannelColorControls() {
+    if (!selectedYColors) return;
+    const selectedChannels = getSelectedY();
+    syncSelectedChannelColors(selectedChannels);
+    selectedYColors.innerHTML = '';
+    selectedChannels.forEach((channel) => {
+      const color = getChannelColor(channel);
+      const item = document.createElement('label');
+      item.className = 'selected-y-color-item';
+      const input = document.createElement('input');
+      input.type = 'color';
+      input.value = color;
+      input.setAttribute('data-channel', channel);
+      input.setAttribute('aria-label', `Color for ${getChannelLabel(channel)}`);
+      const text = document.createElement('span');
+      text.textContent = getChannelLabel(channel);
+      text.style.color = color;
+      item.appendChild(input);
+      item.appendChild(text);
+      selectedYColors.appendChild(item);
+    });
+  }
+
   // Resolve a Y channel value (which may be a CHANNEL_MAP displayName) to
   // the actual column name present in the given log, based on its file format.
   function resolveChannelForLog(yValue, log) {
@@ -783,7 +873,7 @@
     }
 
     const lapSeries = [];
-    selFiles.forEach((log) => {
+    selFiles.forEach((log, fileIdx) => {
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
@@ -792,7 +882,7 @@
         const tArr = maskIdx.map(i => log.meta.lapTime[i]);
         if (xArr.length > 1) {
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
-          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, isCrashLap});
+          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, isCrashLap, fileIdx});
         }
       });
     });
@@ -864,7 +954,17 @@
         }
       }
       const color = colorForLap(s.lap);
-      tsTraces.push({x: grid, y: deltas, xaxis:'x2', yaxis:'y2', name: `${s.file} — Lap ${s.lap}`, mode:'lines', line:{color}});
+      const dash = getLineDashForFileIndex(s.fileIdx);
+      tsTraces.push({
+        x: grid,
+        y: deltas,
+        xaxis:'x2',
+        yaxis:'y2',
+        name: `${s.file} — Lap ${s.lap}`,
+        mode:'lines',
+        line:{color, dash},
+        hovertemplate: 'Lap Distance (m): %{x:.3f}<br>Time Slip (s): %{y:.3f}<extra></extra>'
+      });
     }
 
     return {traces: tsTraces, nonCrashMaxDelta, nonCrashMinDelta, allMaxDelta, allMinDelta};
@@ -2042,6 +2142,10 @@
     return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
+  function buildHoverTemplate(xLabel, yLabel) {
+    return `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}<extra></extra>`;
+  }
+
   function buildSortedNumericSeries(xArr, yArr) {
     const pairs = [];
     for (let i = 0; i < xArr.length; i++) {
@@ -2067,7 +2171,8 @@
     // singleLapSelected: true when exactly one lap is visible across all files
     const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
     const singleLapSelected = totalSelectedLaps === 1;
-    const channelColors = new Map(ycols.map((y, i) => [y, COLORS[i % COLORS.length]]));
+    syncSelectedChannelColors(ycols);
+    const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
@@ -2076,6 +2181,9 @@
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
+    layout.hovermode = 'x';
+    layout.hoverlabel = { namelength: -1 };
+    layout.hoverdistance = 40;
 
     if (plotDiv && Number.isFinite(layout.height)) {
       plotDiv.style.height = `${layout.height}px`;
@@ -2112,8 +2220,18 @@
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
           const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
-          const dash = DASHES[li % DASHES.length];
-          traces.push({x: xArr, y: yArr, customdata: keyArr, yaxis: channelToRef.get(y) || 'y', name: `${log.name} — Lap ${lap} — ${y}`, mode: 'lines', marker:{color: traceColor}, line:{color: traceColor, dash}});
+          const dash = getLineDashForFileIndex(li);
+          traces.push({
+            x: xArr,
+            y: yArr,
+            customdata: keyArr,
+            yaxis: channelToRef.get(y) || 'y',
+            name: `${log.name} — Lap ${lap} — ${y}`,
+            mode: 'lines',
+            marker:{color: traceColor},
+            line:{color: traceColor, dash},
+            hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y))
+          });
         });
       });
     });
@@ -2233,7 +2351,23 @@
   }
   if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
-  ySelect.addEventListener('change', ()=> updatePlot());
+  ySelect.addEventListener('change', ()=> {
+    renderSelectedChannelColorControls();
+    updatePlot();
+  });
+  if (selectedYColors) {
+    selectedYColors.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'color') return;
+      const channel = target.getAttribute('data-channel');
+      if (!channel) return;
+      const color = normalizeHexColor(target.value);
+      channelColorOverrides.set(channel, color);
+      const label = target.parentElement && target.parentElement.querySelector('span');
+      if (label) label.style.color = color;
+      updatePlot();
+    });
+  }
 
   filesList.addEventListener('click', (ev)=>{
     if (ev.target.matches('button[data-remove]')) {
