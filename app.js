@@ -61,6 +61,8 @@
   let isApplyingLeafletProgrammaticView = false;
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
+  let leafletColorLegendControl = null;
+  let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
   let lastLinkedHover = { key: null, source: null };
@@ -1825,34 +1827,9 @@
       });
     });
 
-    let mapColorScaleConfig = null;
-    if (mapColorEnabled && Number.isFinite(mapColorMin) && Number.isFinite(mapColorMax)) {
-      let markerCmin = mapColorMin;
-      let markerCmax = mapColorMax;
-      let markerColorscale = 'Viridis';
-
-      if (mapColorMode === 'divergent') {
-        markerColorscale = 'RdBu';
-        if (mapColorMin < 0 && mapColorMax > 0) {
-          const zeroPos = (0 - markerCmin) / (markerCmax - markerCmin);
-          markerColorscale = [
-            [0, '#2166ac'],
-            [zeroPos, '#f7f7f7'],
-            [1, '#b2182b']
-          ];
-        }
-      }
-
-      if (markerCmin === markerCmax) {
-        markerCmax = markerCmin + 1;
-      }
-
-      mapColorScaleConfig = {
-        cmin: markerCmin,
-        cmax: markerCmax,
-        colorscale: markerColorscale
-      };
-    }
+    const mapColorScaleConfig = mapColorEnabled
+      ? getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode)
+      : null;
 
     let mapColorTraceUsed = false;
     pendingTraces.forEach((entry) => {
@@ -2030,6 +2007,277 @@
     }
   }
 
+  function getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode) {
+    if (!Number.isFinite(mapColorMin) || !Number.isFinite(mapColorMax)) return null;
+
+    let markerCmin = mapColorMin;
+    let markerCmax = mapColorMax;
+    let markerColorscale = 'Viridis';
+
+    if (mapColorMode === 'divergent') {
+      markerColorscale = 'RedGreen';
+      if (mapColorMin < 0 && mapColorMax > 0) {
+        const zeroPos = (0 - markerCmin) / (markerCmax - markerCmin);
+        // Keep the neutral center intentionally narrow so red/green variation is more visible.
+        // Example: centerFraction=0.20 approximates a 40/20/40 split.
+        const centerFraction = 0.10;
+        const halfCenter = centerFraction * 0.5;
+        const centerStart = Math.max(0, zeroPos - halfCenter);
+        const centerEnd = Math.min(1, zeroPos + halfCenter);
+        const edgeEps = 1e-4;
+        const MIN_COLOR = '#b2182b',
+          MIN_MID_COLOR = '#d98c95',
+          MAX_MID_COLOR = '#8dcca8',
+          MAX_COLOR = '#1a9850',
+          NEUTRAL_COLOR = '#f7f7f7';
+        markerColorscale = [
+          [0, MIN_COLOR],
+          [Math.max(0, centerStart - edgeEps), MIN_MID_COLOR],
+          [centerStart, NEUTRAL_COLOR],
+          [centerEnd, NEUTRAL_COLOR],
+          [Math.min(1, centerEnd + edgeEps), MAX_MID_COLOR],
+          [1, MAX_COLOR]
+        ];
+      }
+    }
+
+    if (markerCmin === markerCmax) {
+      markerCmax = markerCmin + 1;
+    }
+
+    return {
+      cmin: markerCmin,
+      cmax: markerCmax,
+      colorscale: markerColorscale
+    };
+  }
+
+  function lerpColorRgb(rgbA, rgbB, t) {
+    const clamped = Math.max(0, Math.min(1, t));
+    const r = Math.round(rgbA[0] + (rgbB[0] - rgbA[0]) * clamped);
+    const g = Math.round(rgbA[1] + (rgbB[1] - rgbA[1]) * clamped);
+    const b = Math.round(rgbA[2] + (rgbB[2] - rgbA[2]) * clamped);
+    return [r, g, b];
+  }
+
+  function colorRgbToHex(rgb) {
+    const r = Math.max(0, Math.min(255, Math.round(rgb[0])));
+    const g = Math.max(0, Math.min(255, Math.round(rgb[1])));
+    const b = Math.max(0, Math.min(255, Math.round(rgb[2])));
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+  }
+
+  function normalizeLeafletColorScaleStops(colorscale) {
+    if (Array.isArray(colorscale)) {
+      const stops = colorscale
+        .map((entry) => {
+          if (!Array.isArray(entry) || entry.length < 2) return null;
+          const pos = Number(entry[0]);
+          const color = String(entry[1] || '').trim();
+          if (!Number.isFinite(pos) || !color) return null;
+          return [Math.max(0, Math.min(1, pos)), color];
+        })
+        .filter(Boolean)
+        .sort((a, b) => a[0] - b[0]);
+      if (stops.length > 0) return stops;
+    }
+
+    if (String(colorscale).toLowerCase() === 'rdbu') {
+      return [
+        [0, '#2166ac'],
+        [0.5, '#f7f7f7'],
+        [1, '#b2182b']
+      ];
+    }
+
+    if (String(colorscale).toLowerCase() === 'redgreen') {
+      return [
+        [0, '#b2182b'],
+        [0.5, '#f7f7f7'],
+        [1, '#1a9850']
+      ];
+    }
+
+    return [
+      [0, '#440154'],
+      [0.25, '#3b528b'],
+      [0.5, '#21918c'],
+      [0.75, '#5ec962'],
+      [1, '#fde725']
+    ];
+  }
+
+  function parseHexColorToRgb(color) {
+    const s = String(color || '').trim();
+    const hex = s.startsWith('#') ? s.slice(1) : s;
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+    return [
+      parseInt(hex.slice(0, 2), 16),
+      parseInt(hex.slice(2, 4), 16),
+      parseInt(hex.slice(4, 6), 16)
+    ];
+  }
+
+  function getLeafletColorForValue(value, scaleConfig) {
+    const v = Number(value);
+    if (!Number.isFinite(v) || !scaleConfig) return null;
+
+    const cmin = Number(scaleConfig.cmin);
+    const cmax = Number(scaleConfig.cmax);
+    if (!Number.isFinite(cmin) || !Number.isFinite(cmax) || cmax <= cmin) return null;
+
+    const t = (v - cmin) / (cmax - cmin);
+    const clamped = Math.max(0, Math.min(1, t));
+
+    const stops = normalizeLeafletColorScaleStops(scaleConfig.colorscale)
+      .map(([pos, color]) => [pos, parseHexColorToRgb(color)])
+      .filter((entry) => Array.isArray(entry[1]));
+
+    if (stops.length === 0) return null;
+    if (stops.length === 1) return colorRgbToHex(stops[0][1]);
+    if (clamped <= stops[0][0]) return colorRgbToHex(stops[0][1]);
+    if (clamped >= stops[stops.length - 1][0]) return colorRgbToHex(stops[stops.length - 1][1]);
+
+    for (let i = 1; i < stops.length; i++) {
+      const left = stops[i - 1];
+      const right = stops[i];
+      if (clamped >= left[0] && clamped <= right[0]) {
+        const span = Math.max(1e-9, right[0] - left[0]);
+        const localT = (clamped - left[0]) / span;
+        return colorRgbToHex(lerpColorRgb(left[1], right[1], localT));
+      }
+    }
+
+    return colorRgbToHex(stops[stops.length - 1][1]);
+  }
+
+  function removeLeafletColorLegend() {
+    if (!leafletMap || !leafletColorLegendControl) return;
+    leafletMap.removeControl(leafletColorLegendControl);
+    leafletColorLegendControl = null;
+  }
+
+  function updateLeafletColorLegend(channelName, scaleConfig, autoScaleConfig) {
+    if (!leafletMap || !scaleConfig || !Number.isFinite(scaleConfig.cmin) || !Number.isFinite(scaleConfig.cmax)) {
+      removeLeafletColorLegend();
+      return;
+    }
+
+    removeLeafletColorLegend();
+
+    const sampleCount = 16;
+    const sampleColors = [];
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / (sampleCount - 1);
+      const value = scaleConfig.cmin + (scaleConfig.cmax - scaleConfig.cmin) * t;
+      sampleColors.push(getLeafletColorForValue(value, scaleConfig) || '#888888');
+    }
+
+    const control = L.control({ position: 'topright' });
+    control.onAdd = () => {
+      const div = L.DomUtil.create('div', 'leaflet-map-color-legend');
+      const gradient = `linear-gradient(to right, ${sampleColors.join(',')})`;
+      div.style.background = 'rgba(255,255,255,0.95)';
+      div.style.border = '1px solid #c8d2df';
+      div.style.borderRadius = '6px';
+      div.style.padding = '6px 8px';
+      div.style.font = '12px/1.2 sans-serif';
+      div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.15)';
+      div.style.minWidth = '150px';
+      div.style.cursor = 'pointer';
+
+      const currentMin = Number(scaleConfig.cmin);
+      const currentMax = Number(scaleConfig.cmax);
+      const autoMin = Number(autoScaleConfig && autoScaleConfig.cmin);
+      const autoMax = Number(autoScaleConfig && autoScaleConfig.cmax);
+      const hasAutoRange = Number.isFinite(autoMin) && Number.isFinite(autoMax);
+      const isManualRange = hasAutoRange && (Math.abs(currentMin - autoMin) > 1e-9 || Math.abs(currentMax - autoMax) > 1e-9);
+
+      div.innerHTML = [
+        `<div style="margin-bottom:4px;font-weight:600;color:#223;">${escapeHtml(channelName || 'Map Color')}</div>`,
+        `<div style="height:10px;border-radius:3px;border:1px solid #9fb0c5;background:${gradient};"></div>`,
+        '<div style="display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+        `<span>${currentMin.toFixed(2)}</span>`,
+        `<span>${currentMax.toFixed(2)}</span>`,
+        '</div>',
+        `<div style="margin-top:4px;color:#5a6b82;">${isManualRange ? 'Manual bounds active' : 'Auto bounds active'} (click to edit)</div>`,
+        '<div class="leaflet-map-color-range-editor" style="display:none;margin-top:6px;border-top:1px solid #d7e0ec;padding-top:6px;">',
+        '<div style="display:flex;gap:6px;align-items:center;">',
+        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Min <input type="number" step="any" class="leaflet-map-color-min" value="${currentMin.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
+        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Max <input type="number" step="any" class="leaflet-map-color-max" value="${currentMax.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
+        '</div>',
+        '<div style="display:flex;gap:6px;margin-top:6px;">',
+        '<button type="button" class="leaflet-map-color-apply" style="padding:2px 8px;font-size:12px;">Apply</button>',
+        '<button type="button" class="leaflet-map-color-auto" style="padding:2px 8px;font-size:12px;">Auto</button>',
+        '</div>',
+        '<div class="leaflet-map-color-error" style="display:none;color:#9b1c1c;margin-top:5px;"></div>',
+        '</div>'
+      ].join('');
+
+      const editor = div.querySelector('.leaflet-map-color-range-editor');
+      const minInput = div.querySelector('.leaflet-map-color-min');
+      const maxInput = div.querySelector('.leaflet-map-color-max');
+      const applyBtn = div.querySelector('.leaflet-map-color-apply');
+      const autoBtn = div.querySelector('.leaflet-map-color-auto');
+      const errorEl = div.querySelector('.leaflet-map-color-error');
+
+      const showError = (message) => {
+        if (!errorEl) return;
+        if (!message) {
+          errorEl.style.display = 'none';
+          errorEl.textContent = '';
+          return;
+        }
+        errorEl.style.display = 'block';
+        errorEl.textContent = message;
+      };
+
+      div.addEventListener('click', (ev) => {
+        if (!editor) return;
+        const target = ev.target;
+        const isEditorElement = target && target.closest && target.closest('.leaflet-map-color-range-editor');
+        if (isEditorElement) return;
+        editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
+      });
+
+      if (applyBtn && minInput && maxInput) {
+        applyBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const min = Number(minInput.value);
+          const max = Number(maxInput.value);
+          if (!Number.isFinite(min) || !Number.isFinite(max)) {
+            showError('Bounds must be numeric.');
+            return;
+          }
+          if (max <= min) {
+            showError('Max must be greater than Min.');
+            return;
+          }
+          showError('');
+          leafletMapColorManualRanges.set(channelName, { min, max });
+          updatePlot();
+        });
+      }
+
+      if (autoBtn) {
+        autoBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          leafletMapColorManualRanges.delete(channelName);
+          showError('');
+          updatePlot();
+        });
+      }
+
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+
+    control.addTo(leafletMap);
+    leafletColorLegendControl = control;
+  }
+
   function getLeafletLatLonSource(log) {
     if (!log || !Array.isArray(log.cols)) return null;
 
@@ -2131,6 +2379,7 @@
   function clearLeafletMapPlot() {
     leafletHoverLookup = new Map();
     clearLeafletHoverMarker();
+    removeLeafletColorLegend();
     leafletViewState = null;
     leafletViewStateUserSet = false;
     leafletXYViewState = null;
@@ -2151,12 +2400,46 @@
     leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
     leafletLayers = [];
     const nextLeafletHoverLookup = new Map();
+    const mapColorEnabled = !!(mapColorEnabledInput && mapColorEnabledInput.checked);
+    const mapColorChannel = mapColorSelect ? mapColorSelect.value : '';
+    const mapColorMode = mapColorModeSelect ? mapColorModeSelect.value : 'continuous';
+    let mapColorMin = Infinity;
+    let mapColorMax = -Infinity;
+
+    if (mapColorEnabled && mapColorChannel) {
+      selFiles.forEach((log) => {
+        const mapColorCol = resolveChannelForLog(mapColorChannel, log);
+        if (!mapColorCol || !log.cols.includes(mapColorCol)) return;
+        log.data.forEach((row) => {
+          const v = Number(row[mapColorCol]);
+          if (!Number.isFinite(v)) return;
+          if (v < mapColorMin) mapColorMin = v;
+          if (v > mapColorMax) mapColorMax = v;
+        });
+      });
+    }
+
+    const mapColorScaleConfig = mapColorEnabled
+      ? getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode)
+      : null;
+    const manualRange = mapColorEnabled && mapColorChannel
+      ? leafletMapColorManualRanges.get(mapColorChannel)
+      : null;
+    const effectiveMapColorScaleConfig = (mapColorScaleConfig && manualRange && Number.isFinite(manualRange.min) && Number.isFinite(manualRange.max) && manualRange.max > manualRange.min)
+      ? {
+          cmin: manualRange.min,
+          cmax: manualRange.max,
+          colorscale: mapColorScaleConfig.colorscale
+        }
+      : mapColorScaleConfig;
     
     let bounds = null;
     
     selFiles.forEach((log, fileIdx) => {
       const latLonSource = mode === 'geo' ? getLeafletLatLonSource(log) : null;
       const mapSource = mode === 'xy' ? getMapSourceForLog(log) : null;
+      const mapColorCol = mapColorEnabled && mapColorChannel ? resolveChannelForLog(mapColorChannel, log) : '';
+      const canColorByChannel = !!(mapColorEnabled && effectiveMapColorScaleConfig && mapColorCol && log.cols.includes(mapColorCol));
       if (mode === 'geo' && !latLonSource) return;
       if (mode === 'xy' && !mapSource) return;
       
@@ -2166,12 +2449,14 @@
         
         const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
         const latlngs = [];
+        const colorValues = [];
         
         maskIdx.forEach((i) => {
           const lat = mode === 'geo' ? latLonSource.latAt(i) : mapSource.yAt(i);
           const lon = mode === 'geo' ? latLonSource.lonAt(i) : mapSource.xAt(i);
           if (Number.isFinite(lat) && Number.isFinite(lon)) {
             latlngs.push([lat, lon]);
+            colorValues.push(canColorByChannel ? Number(log.data[i][mapColorCol]) : null);
             nextLeafletHoverLookup.set(rowKey(log.id, lap, i), { lat, lon });
             if (!bounds) {
               bounds = L.latLngBounds([lat, lon], [lat, lon]);
@@ -2184,14 +2469,27 @@
         if (latlngs.length >= 2) {
           const color = colorForLap(lap);
           const dash = DASHES[fileIdx % DASHES.length];
-          const polyline = L.polyline(latlngs, {
-            color: color,
-            dashArray: mapPlotlyDashToLeaflet(dash),
-            weight: 2,
-            opacity: 0.7
-          }).addTo(leafletMap);
-          
-          leafletLayers.push(polyline);
+          if (canColorByChannel) {
+            const dashArray = mapPlotlyDashToLeaflet(dash);
+            for (let si = 0; si < latlngs.length - 1; si++) {
+              const segmentColor = getLeafletColorForValue(colorValues[si], effectiveMapColorScaleConfig) || color;
+              const segment = L.polyline([latlngs[si], latlngs[si + 1]], {
+                color: segmentColor,
+                dashArray,
+                weight: 2,
+                opacity: 0.85
+              }).addTo(leafletMap);
+              leafletLayers.push(segment);
+            }
+          } else {
+            const polyline = L.polyline(latlngs, {
+              color: color,
+              dashArray: mapPlotlyDashToLeaflet(dash),
+              weight: 2,
+              opacity: 0.7
+            }).addTo(leafletMap);
+            leafletLayers.push(polyline);
+          }
           
           // Add lap label at start
           const label = L.circleMarker(latlngs[0], {
@@ -2223,6 +2521,7 @@
 
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
+    updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig);
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
