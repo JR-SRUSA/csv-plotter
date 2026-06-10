@@ -27,6 +27,9 @@
   const DERIVED_MAP_Y_COL = 'Map Y';
   const DERIVED_LAT_COL = 'Derived Latitude';
   const DERIVED_LON_COL = 'Derived Longitude';
+  const COMMON_LAT_ACC_CHANNEL = 'LatAcc';
+  const COMMON_LONG_ACC_CHANNEL = 'LongAcc';
+  const TOTAL_ACCEL_CALC_CHANNEL = 'Total Acceleration (calc) [g]';
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
@@ -37,6 +40,7 @@
     { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed' },
     { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc' },
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
+    { displayName: 'Total Acceleration (calc) [g]', piboso: 'Total Acceleration (calc) [g]', aim: 'Total Acceleration (calc) [g]' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   const channelColorOverrides = new Map();
@@ -478,6 +482,7 @@
         meta.lapNum = lapNum;
         meta.lapTime = lapTime;
 
+        addCalculatedCommonChannels(data, cols, meta);
         deriveAndExposeMapXY(data, cols, meta);
 
         // expose lap columns in data rows and cols list
@@ -915,6 +920,32 @@
     if (LP && LP.isAiMFormat(fmt)) return mapping.aim;
     // Standard/unknown: fall back to displayName then piboso
     return mapping.displayName || mapping.piboso;
+  }
+
+  function addCalculatedCommonChannels(data, cols, meta) {
+    if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
+
+    const mappingContext = { meta };
+    const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, mappingContext);
+    const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, mappingContext);
+    if (!latAccCol || !longAccCol) return;
+    const LP = window.LogFileProcessors;
+    if (LP && typeof LP.addTotalAccelerationCalculatedChannel === 'function') {
+      LP.addTotalAccelerationCalculatedChannel({ data, cols, units: meta.units || {}, meta }, latAccCol, longAccCol);
+      return;
+    }
+
+    if (!cols.includes(latAccCol) || !cols.includes(longAccCol)) return;
+    if (!cols.includes(TOTAL_ACCEL_CALC_CHANNEL)) cols.push(TOTAL_ACCEL_CALC_CHANNEL);
+    data.forEach((row) => {
+      const latAcc = Number(row[latAccCol]);
+      const longAcc = Number(row[longAccCol]);
+      row[TOTAL_ACCEL_CALC_CHANNEL] = (Number.isFinite(latAcc) && Number.isFinite(longAcc))
+        ? Math.sqrt((latAcc * latAcc) + (longAcc * longAcc))
+        : null;
+    });
+    if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+    meta.units[TOTAL_ACCEL_CALC_CHANNEL] = 'g';
   }
 
   // Linear interpolation over a sorted X array.
