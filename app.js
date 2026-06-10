@@ -1866,8 +1866,16 @@
       });
     });
 
+    const manualRange = mapColorEnabled && mapColorChannel
+      ? leafletMapColorManualRanges.get(mapColorChannel)
+      : null;
+    const normalizedManualRange = manualRange
+      ? normalizeManualMapColorBounds(Number(manualRange.min), Number(manualRange.max))
+      : null;
+    const effectiveColorMin = normalizedManualRange ? normalizedManualRange.min : mapColorMin;
+    const effectiveColorMax = normalizedManualRange ? normalizedManualRange.max : mapColorMax;
     const mapColorScaleConfig = mapColorEnabled
-      ? getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode)
+      ? getMapColorScaleConfig(effectiveColorMin, effectiveColorMax, mapColorMode)
       : null;
 
     let mapColorTraceUsed = false;
@@ -2196,7 +2204,12 @@
     leafletColorLegendControl = null;
   }
 
-  function updateLeafletColorLegend(channelName, scaleConfig, autoScaleConfig) {
+  function normalizeManualMapColorBounds(min, max) {
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null;
+    return { min, max };
+  }
+
+  function updateLeafletColorLegend(channelName, scaleConfig, autoScaleConfig, mapColorMode) {
     if (!leafletMap || !scaleConfig || !Number.isFinite(scaleConfig.cmin) || !Number.isFinite(scaleConfig.cmax)) {
       removeLeafletColorLegend();
       return;
@@ -2231,14 +2244,29 @@
       const autoMax = Number(autoScaleConfig && autoScaleConfig.cmax);
       const hasAutoRange = Number.isFinite(autoMin) && Number.isFinite(autoMax);
       const isManualRange = hasAutoRange && (Math.abs(currentMin - autoMin) > 1e-9 || Math.abs(currentMax - autoMax) > 1e-9);
+      const showZeroLabel = mapColorMode === 'divergent' && currentMin < 0 && currentMax > 0;
+      const zeroPct = showZeroLabel
+        ? Math.max(4, Math.min(96, ((0 - currentMin) / (currentMax - currentMin)) * 100))
+        : null;
+      const rangeLabelsHtml = showZeroLabel
+        ? [
+            '<div style="position:relative;display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+            `<span>${currentMin.toFixed(2)}</span>`,
+            `<span>${currentMax.toFixed(2)}</span>`,
+            `<span style="position:absolute;left:${zeroPct.toFixed(2)}%;transform:translateX(-50%);font-weight:600;">0</span>`,
+            '</div>'
+          ].join('')
+        : [
+            '<div style="display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+            `<span>${currentMin.toFixed(2)}</span>`,
+            `<span>${currentMax.toFixed(2)}</span>`,
+            '</div>'
+          ].join('');
 
       div.innerHTML = [
         `<div style="margin-bottom:4px;font-weight:600;color:#223;">${escapeHtml(channelName || 'Map Color')}</div>`,
         `<div style="height:10px;border-radius:3px;border:1px solid #9fb0c5;background:${gradient};"></div>`,
-        '<div style="display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
-        `<span>${currentMin.toFixed(2)}</span>`,
-        `<span>${currentMax.toFixed(2)}</span>`,
-        '</div>',
+        rangeLabelsHtml,
         `<div style="margin-top:4px;color:#5a6b82;">${isManualRange ? 'Manual bounds active' : 'Auto bounds active'} (click to edit)</div>`,
         '<div class="leaflet-map-color-range-editor" style="display:none;margin-top:6px;border-top:1px solid #d7e0ec;padding-top:6px;">',
         '<div style="display:flex;gap:6px;align-items:center;">',
@@ -2293,8 +2321,17 @@
             showError('Max must be greater than Min.');
             return;
           }
+
+          const normalizedBounds = normalizeManualMapColorBounds(min, max);
+          if (!normalizedBounds) {
+            showError('Bounds are invalid.');
+            return;
+          }
+
           showError('');
-          leafletMapColorManualRanges.set(channelName, { min, max });
+          leafletMapColorManualRanges.set(channelName, normalizedBounds);
+          minInput.value = normalizedBounds.min.toFixed(6);
+          maxInput.value = normalizedBounds.max.toFixed(6);
           updatePlot();
         });
       }
@@ -2464,13 +2501,14 @@
     const manualRange = mapColorEnabled && mapColorChannel
       ? leafletMapColorManualRanges.get(mapColorChannel)
       : null;
-    const effectiveMapColorScaleConfig = (mapColorScaleConfig && manualRange && Number.isFinite(manualRange.min) && Number.isFinite(manualRange.max) && manualRange.max > manualRange.min)
-      ? {
-          cmin: manualRange.min,
-          cmax: manualRange.max,
-          colorscale: mapColorScaleConfig.colorscale
-        }
-      : mapColorScaleConfig;
+    const normalizedManualRange = manualRange
+      ? normalizeManualMapColorBounds(Number(manualRange.min), Number(manualRange.max))
+      : null;
+    const effectiveColorMin = normalizedManualRange ? normalizedManualRange.min : mapColorMin;
+    const effectiveColorMax = normalizedManualRange ? normalizedManualRange.max : mapColorMax;
+    const effectiveMapColorScaleConfig = mapColorEnabled
+      ? getMapColorScaleConfig(effectiveColorMin, effectiveColorMax, mapColorMode)
+      : null;
     
     let bounds = null;
     
@@ -2560,7 +2598,7 @@
 
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
-    updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig);
+    updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig, mapColorMode);
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
