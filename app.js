@@ -55,10 +55,15 @@
   let leafletLayers = []; // array of layer groups
   let leafletViewState = null;
   let leafletViewStateUserSet = false;
+  let leafletXYViewState = null;
+  let leafletXYViewStateUserSet = false;
+  let leafletMapMode = null; // 'geo' | 'xy'
   let isApplyingLeafletProgrammaticView = false;
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
+  let isSyncingPlotHover = false;
+  let lastLinkedHover = { key: null, source: null };
 
   function resizeVisualizations() {
     if (plotDiv && plotDiv.data) {
@@ -247,28 +252,92 @@
     if (typeof plotDiv.on !== 'function') return;
     plotDiv.__mapHoverSyncBound = true;
 
-    plotDiv.on('plotly_hover', (eventData) => {
-      const point = eventData && eventData.points && eventData.points[0];
-      if (!point || point.data == null) return;
-      const custom = point.data.customdata;
-      if (!Array.isArray(custom)) {
-        clearMapHoverMarker();
-        clearLeafletHoverMarker();
-        return;
+    const isTimeSlipPoint = (point) => {
+      const trace = point && (point.fullData || point.data);
+      return !!(trace && (trace.xaxis === 'x2' || trace.yaxis === 'y2'));
+    };
+
+    const hoverLinkedSubplotByKey = (key, source) => {
+      if (!plotDiv || !Array.isArray(plotDiv.data) || !key) return;
+      if (lastLinkedHover.key === key && lastLinkedHover.source === source) return;
+
+      const targetPoints = [];
+      plotDiv.data.forEach((trace, curveNumber) => {
+        if (!trace || !Array.isArray(trace.customdata)) return;
+        const isTimeSlipTrace = (trace.xaxis === 'x2' || trace.yaxis === 'y2');
+        if ((source === 'main' && !isTimeSlipTrace) || (source === 'timeslip' && isTimeSlipTrace)) return;
+
+        const pointNumber = trace.customdata.indexOf(key);
+        if (pointNumber >= 0) targetPoints.push({ curveNumber, pointNumber });
+      });
+
+      if (targetPoints.length === 0) return;
+
+      isSyncingPlotHover = true;
+      Plotly.Fx.hover(plotDiv, targetPoints);
+      lastLinkedHover = { key, source };
+      requestAnimationFrame(() => { isSyncingPlotHover = false; });
+    };
+
+    const getPointKey = (point) => {
+      if (!point) return null;
+
+      // Plotly may provide per-point customdata directly on the hovered point.
+      if (point.customdata != null && point.customdata !== '') {
+        return point.customdata;
       }
-      const key = custom[point.pointNumber];
+
+      const trace = point.fullData || point.data;
+      const custom = trace && trace.customdata;
+      if (!Array.isArray(custom)) return null;
+      return custom[point.pointNumber] || null;
+    };
+
+    const handlePointEvent = (eventData, isTap) => {
+      const points = (eventData && Array.isArray(eventData.points)) ? eventData.points : [];
+      if (points.length === 0) return;
+
+      // With hovermode='x', points[0] is not guaranteed to be a keyed data trace.
+      // Prefer the first point carrying a row key so map marker follows mouse motion.
+      const point = points.find((candidate) => !!getPointKey(candidate)) || points[0];
+      const key = getPointKey(point);
       if (!key) {
-        clearMapHoverMarker();
-        clearLeafletHoverMarker();
+        if (!isTap) {
+          clearMapHoverMarker();
+          clearLeafletHoverMarker();
+        }
         return;
       }
+
       showMapHoverMarker(key);
       showLeafletHoverMarker(key);
+
+      if (isSyncingPlotHover) return;
+      const source = isTimeSlipPoint(point) ? 'timeslip' : 'main';
+      hoverLinkedSubplotByKey(key, source);
+    };
+
+    plotDiv.on('plotly_hover', (eventData) => {
+      handlePointEvent(eventData, false);
+    });
+
+    // Mobile touch interaction primarily fires click events; keep marker linked on tap.
+    plotDiv.on('plotly_click', (eventData) => {
+      handlePointEvent(eventData, true);
     });
 
     plotDiv.on('plotly_unhover', () => {
+      if (isSyncingPlotHover) return;
       clearMapHoverMarker();
       clearLeafletHoverMarker();
+      lastLinkedHover = { key: null, source: null };
+    });
+
+    plotDiv.on('plotly_doubleclick', () => {
+      clearMapHoverMarker();
+      clearLeafletHoverMarker();
+      lastLinkedHover = { key: null, source: null };
+      Plotly.Fx.unhover(plotDiv);
     });
   }
 
@@ -866,6 +935,22 @@
     return y0 + t * (y1 - y0);
   }
 
+  function nearestIndexAtX(xArr, x) {
+    if (!Array.isArray(xArr) || xArr.length === 0) return -1;
+    if (x <= xArr[0]) return 0;
+    if (x >= xArr[xArr.length - 1]) return xArr.length - 1;
+
+    let lo = 0;
+    let hi = xArr.length - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xArr[mid] <= x) lo = mid;
+      else hi = mid;
+    }
+
+    return (Math.abs(x - xArr[lo]) <= Math.abs(xArr[hi] - x)) ? lo : hi;
+  }
+
   function buildTimeSlipTraces(selFiles, selectedLaps, xMode) {
     // Time slip is defined only against distance while split by lap.
     if (xMode !== 'distance') {
@@ -882,7 +967,8 @@
         const tArr = maskIdx.map(i => log.meta.lapTime[i]);
         if (xArr.length > 1) {
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
-          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, isCrashLap, fileIdx});
+          const keys = maskIdx.map(i => rowKey(log.id, lap, i));
+          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
         }
       });
     });
@@ -955,9 +1041,14 @@
       }
       const color = colorForLap(s.lap);
       const dash = getLineDashForFileIndex(s.fileIdx);
+      const keyGrid = grid.map((g) => {
+        const idx = nearestIndexAtX(s.x, g);
+        return idx >= 0 && s.keys ? s.keys[idx] : null;
+      });
       tsTraces.push({
         x: grid,
         y: deltas,
+        customdata: keyGrid,
         xaxis:'x2',
         yaxis:'y2',
         name: `${s.file} — Lap ${s.lap}`,
@@ -1093,7 +1184,18 @@
 
   function getFigureHeight(includeTimeSlip) {
     const mobile = window.innerWidth <= 980;
-    if (!mobile) return includeTimeSlip ? 860 : 640;
+    if (!mobile) {
+      const viewportHeight = Math.max(600, window.innerHeight || 900);
+      const plotTop = (plotDiv && typeof plotDiv.getBoundingClientRect === 'function')
+        ? Math.max(0, Math.round(plotDiv.getBoundingClientRect().top))
+        : 220;
+      const available = viewportHeight - plotTop - 16;
+      const fallback = Math.round(viewportHeight * (includeTimeSlip ? 0.78 : 0.72));
+      const target = (Number.isFinite(available) && available > 320) ? available : fallback;
+      const minHeight = includeTimeSlip ? 520 : 420;
+      const maxHeight = Math.round(viewportHeight * 0.9);
+      return Math.max(minHeight, Math.min(target, maxHeight));
+    }
     // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh.
     const main = Math.max(200, Math.round(window.innerHeight * 0.33));
     const timeSlip = Math.max(160, Math.round(window.innerHeight * 0.25));
@@ -1102,7 +1204,9 @@
 
   function getMapFigureHeight() {
     const mobile = window.innerWidth <= 980;
-    return mobile ? Math.max(200, Math.round(window.innerHeight * 0.33)) : 300;
+    if (mobile) return Math.max(200, Math.round(window.innerHeight * 0.33));
+    const desktopPlotHeight = Math.round(plotDiv && plotDiv.clientHeight ? plotDiv.clientHeight : 0);
+    return Math.max(300, desktopPlotHeight || 640);
   }
 
   function getMapOffsets() {
@@ -1831,59 +1935,83 @@
     mapHoverMarkerVisible = false;
   }
 
-  function initLeafletMap() {
-    if (!leafletMapDiv || leafletMap) return;
+  function initLeafletMap(mode) {
+    if (!leafletMapDiv) return;
+
+    // Recreate the map if switching between geo and XY modes.
+    if (leafletMap && leafletMapMode !== mode) {
+      leafletMap.remove();
+      leafletMap = null;
+      leafletLayers = [];
+      leafletHoverMarker = null;
+    }
+
+    if (leafletMap && leafletMapMode === mode) return;
+
     syncLeafletContainerHeight();
 
-    // Keep no-tile mode visually clean.
     leafletMapDiv.style.background = '#fff';
-    
-    // Initialize the map - center on a default location, will be adjusted based on data
-    leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
-    
-    // Add free satellite tile layer (Esri World Imagery)
-    const satelliteLayer = L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      {
-        attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
-        maxZoom: 20
-      }
-    ).addTo(leafletMap);
-    
-    // Also add an OpenStreetMap layer as fallback
-    const osmLayer = L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19
-      }
-    );
 
-    // Optional white background with no map tiles.
-    const blankLayer = L.layerGroup();
-    
-    // Layer control for toggling between satellite and map
-    L.control.layers(
-      {
-        'Satellite': satelliteLayer,
-        'OpenStreetMap': osmLayer,
-        'Blank (white)': blankLayer
-      },
-      {},
-      { position: 'topright' }
-    ).addTo(leafletMap);
+    if (mode === 'xy') {
+      leafletMap = L.map(leafletMapDiv, {
+        crs: L.CRS.Simple,
+        zoomSnap: 0,
+        zoomDelta: 0.5,
+        minZoom: -6
+      }).setView([0, 0], 0);
+    } else {
+      // Geo mode with map tiles.
+      leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
+
+      const satelliteLayer = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
+          maxZoom: 20
+        }
+      ).addTo(leafletMap);
+
+      const osmLayer = L.tileLayer(
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          maxZoom: 19
+        }
+      );
+
+      const blankLayer = L.layerGroup();
+      L.control.layers(
+        {
+          'Satellite': satelliteLayer,
+          'OpenStreetMap': osmLayer,
+          'Blank (white)': blankLayer
+        },
+        {},
+        { position: 'topright' }
+      ).addTo(leafletMap);
+    }
 
     leafletMap.on('moveend zoomend', () => {
       if (isApplyingLeafletProgrammaticView) return;
       const center = leafletMap.getCenter();
       const zoom = leafletMap.getZoom();
       if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) || !Number.isFinite(zoom)) return;
-      leafletViewState = {
-        center: [center.lat, center.lng],
-        zoom
-      };
-      leafletViewStateUserSet = true;
+      if (leafletMapMode === 'xy') {
+        leafletXYViewState = {
+          center: [center.lat, center.lng],
+          zoom
+        };
+        leafletXYViewStateUserSet = true;
+      } else {
+        leafletViewState = {
+          center: [center.lat, center.lng],
+          zoom
+        };
+        leafletViewStateUserSet = true;
+      }
     });
+
+    leafletMapMode = mode;
 
     // Ensure the map computes tile layout after the element has final dimensions.
     requestAnimationFrame(() => leafletMap.invalidateSize());
@@ -1984,11 +2112,11 @@
     }
 
     if (mapDiv) {
-      mapDiv.style.display = mode === 'xy' ? 'block' : 'none';
+      mapDiv.style.display = 'none';
     }
 
     if (leafletMapDiv) {
-      leafletMapDiv.style.display = mode === 'leaflet' ? 'block' : 'none';
+      leafletMapDiv.style.display = mode === 'none' ? 'none' : 'block';
     }
   }
 
@@ -2005,20 +2133,19 @@
     clearLeafletHoverMarker();
     leafletViewState = null;
     leafletViewStateUserSet = false;
+    leafletXYViewState = null;
+    leafletXYViewStateUserSet = false;
     if (leafletMap) {
       leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
       leafletLayers = [];
     }
   }
 
-  function updateLeafletMap(selFiles, selectedLaps) {
+  function updateLeafletMap(selFiles, selectedLaps, mode) {
     if (!leafletMapDiv || !window.L) return;
     syncLeafletContainerHeight();
-    
-    // Initialize map on first call
-    if (!leafletMap) {
-      initLeafletMap();
-    }
+
+    initLeafletMap(mode);
     
     // Clear existing layers
     leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
@@ -2028,8 +2155,10 @@
     let bounds = null;
     
     selFiles.forEach((log, fileIdx) => {
-      const latLonSource = getLeafletLatLonSource(log);
-      if (!latLonSource) return;
+      const latLonSource = mode === 'geo' ? getLeafletLatLonSource(log) : null;
+      const mapSource = mode === 'xy' ? getMapSourceForLog(log) : null;
+      if (mode === 'geo' && !latLonSource) return;
+      if (mode === 'xy' && !mapSource) return;
       
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
@@ -2039,8 +2168,8 @@
         const latlngs = [];
         
         maskIdx.forEach((i) => {
-          const lat = latLonSource.latAt(i);
-          const lon = latLonSource.lonAt(i);
+          const lat = mode === 'geo' ? latLonSource.latAt(i) : mapSource.yAt(i);
+          const lon = mode === 'geo' ? latLonSource.lonAt(i) : mapSource.xAt(i);
           if (Number.isFinite(lat) && Number.isFinite(lon)) {
             latlngs.push([lat, lon]);
             nextLeafletHoverLookup.set(rowKey(log.id, lap, i), { lat, lon });
@@ -2072,7 +2201,7 @@
             weight: 2,
             opacity: 1,
             fillOpacity: 0.8
-          }).bindPopup(`${log.name} - Lap ${lap} (${latLonSource.source === 'derived' ? 'GPBikes derived' : 'GPS'})`).addTo(leafletMap);
+          }).bindPopup(`${log.name} - Lap ${lap} (${mode === 'geo' ? (latLonSource.source === 'derived' ? 'GPBikes derived' : 'GPS') : 'X/Y meters'})`).addTo(leafletMap);
           
           leafletLayers.push(label);
         }
@@ -2082,8 +2211,10 @@
     // Fit map to bounds if we have data
     if (bounds && bounds.isValid()) {
       runLeafletProgrammaticView(() => {
-        if (leafletViewStateUserSet && leafletViewState && Array.isArray(leafletViewState.center) && Number.isFinite(leafletViewState.zoom)) {
-          leafletMap.setView(leafletViewState.center, leafletViewState.zoom, { animate: false });
+        const savedView = mode === 'geo' ? leafletViewState : leafletXYViewState;
+        const savedViewUserSet = mode === 'geo' ? leafletViewStateUserSet : leafletXYViewStateUserSet;
+        if (savedViewUserSet && savedView && Array.isArray(savedView.center) && Number.isFinite(savedView.zoom)) {
+          leafletMap.setView(savedView.center, savedView.zoom, { animate: false });
         } else {
           leafletMap.fitBounds(bounds, { padding: [50, 50] });
         }
@@ -2097,7 +2228,9 @@
   }
 
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
-    const mainDomain = includeTimeSlip ? [0.48,1] : [0,1];
+    const mobile = window.innerWidth <= 980;
+    const mainDomain = includeTimeSlip ? (mobile ? [0.48,1] : [0.23,1]) : [0,1];
+    const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
 
     if (!includeTimeSlip) {
@@ -2117,7 +2250,7 @@
       margin:{t:30},
       xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y'},
       xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false},
-      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain:[0,0.43]},
+      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain: timeSlipDomain},
       showlegend:false,
       height: getFigureHeight(true)
     };
@@ -2305,11 +2438,11 @@
     if (hasLeafletData) {
       setMapDisplayMode('leaflet');
       clearXYMapPlot();
-      updateLeafletMap(selFiles, selectedLaps);
+      updateLeafletMap(selFiles, selectedLaps, 'geo');
     } else if (hasXYData) {
-      setMapDisplayMode('xy');
-      clearLeafletMapPlot();
-      updateMapPlot(selFiles, selectedLaps);
+      setMapDisplayMode('leaflet');
+      clearXYMapPlot();
+      updateLeafletMap(selFiles, selectedLaps, 'xy');
     } else {
       setMapDisplayMode('none');
       clearXYMapPlot();
