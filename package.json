@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "test": "node --test",
     "build": "node scripts/bump-build-version.js && npm run build-plotly-custom:inner",
     "build:prod": "node scripts/bump-build-version.js && npm install --no-audit --no-fund && node scripts/build-production.js && cp -r ./dist/. ./docs",
     "build:esp32": "node scripts/bump-build-version.js && npm install --no-audit --no-fund && node scripts/build-production.js --gzip-only",
