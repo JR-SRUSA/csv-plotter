@@ -1834,6 +1834,9 @@
   function initLeafletMap() {
     if (!leafletMapDiv || leafletMap) return;
     syncLeafletContainerHeight();
+
+    // Keep no-tile mode visually clean.
+    leafletMapDiv.style.background = '#fff';
     
     // Initialize the map - center on a default location, will be adjusted based on data
     leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
@@ -1855,12 +1858,16 @@
         maxZoom: 19
       }
     );
+
+    // Optional white background with no map tiles.
+    const blankLayer = L.layerGroup();
     
     // Layer control for toggling between satellite and map
     L.control.layers(
       {
         'Satellite': satelliteLayer,
-        'OpenStreetMap': osmLayer
+        'OpenStreetMap': osmLayer,
+        'Blank (white)': blankLayer
       },
       {},
       { position: 'topright' }
