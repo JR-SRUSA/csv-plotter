@@ -30,6 +30,7 @@
   const COMMON_LAT_ACC_CHANNEL = 'LatAcc';
   const COMMON_LONG_ACC_CHANNEL = 'LongAcc';
   const TOTAL_ACCEL_CALC_CHANNEL = 'Total Acceleration (calc) [g]';
+  const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
@@ -732,8 +733,15 @@
 
     if (previousValue && Array.from(mapColorSelect.options).some(o => o.value === previousValue)) {
       mapColorSelect.value = previousValue;
-    } else if (mapColorSelect.options.length > 0) {
-      mapColorSelect.value = mapColorSelect.options[0].value;
+    } else {
+      const preferred = DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES
+        .map((candidate) => Array.from(mapColorSelect.options).find((o) => o.value.toLowerCase() === candidate.toLowerCase()))
+        .find(Boolean);
+      if (preferred) {
+        mapColorSelect.value = preferred.value;
+      } else if (mapColorSelect.options.length > 0) {
+        mapColorSelect.value = mapColorSelect.options[0].value;
+      }
     }
   }
 
