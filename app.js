@@ -27,6 +27,10 @@
   const DERIVED_MAP_Y_COL = 'Map Y';
   const DERIVED_LAT_COL = 'Derived Latitude';
   const DERIVED_LON_COL = 'Derived Longitude';
+  const COMMON_LAT_ACC_CHANNEL = 'LatAcc';
+  const COMMON_LONG_ACC_CHANNEL = 'LongAcc';
+  const TOTAL_ACCEL_CALC_CHANNEL = 'Total Acceleration (calc) [g]';
+  const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
@@ -37,6 +41,7 @@
     { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed' },
     { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc' },
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
+    { displayName: 'Total Acceleration (calc) [g]', piboso: 'Total Acceleration (calc) [g]', aim: 'Total Acceleration (calc) [g]' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   const channelColorOverrides = new Map();
@@ -55,10 +60,17 @@
   let leafletLayers = []; // array of layer groups
   let leafletViewState = null;
   let leafletViewStateUserSet = false;
+  let leafletXYViewState = null;
+  let leafletXYViewStateUserSet = false;
+  let leafletMapMode = null; // 'geo' | 'xy'
   let isApplyingLeafletProgrammaticView = false;
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
+  let leafletColorLegendControl = null;
+  let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
+  let isSyncingPlotHover = false;
+  let lastLinkedHover = { key: null, source: null };
 
   function resizeVisualizations() {
     if (plotDiv && plotDiv.data) {
@@ -247,28 +259,92 @@
     if (typeof plotDiv.on !== 'function') return;
     plotDiv.__mapHoverSyncBound = true;
 
-    plotDiv.on('plotly_hover', (eventData) => {
-      const point = eventData && eventData.points && eventData.points[0];
-      if (!point || point.data == null) return;
-      const custom = point.data.customdata;
-      if (!Array.isArray(custom)) {
-        clearMapHoverMarker();
-        clearLeafletHoverMarker();
-        return;
+    const isTimeSlipPoint = (point) => {
+      const trace = point && (point.fullData || point.data);
+      return !!(trace && (trace.xaxis === 'x2' || trace.yaxis === 'y2'));
+    };
+
+    const hoverLinkedSubplotByKey = (key, source) => {
+      if (!plotDiv || !Array.isArray(plotDiv.data) || !key) return;
+      if (lastLinkedHover.key === key && lastLinkedHover.source === source) return;
+
+      const targetPoints = [];
+      plotDiv.data.forEach((trace, curveNumber) => {
+        if (!trace || !Array.isArray(trace.customdata)) return;
+        const isTimeSlipTrace = (trace.xaxis === 'x2' || trace.yaxis === 'y2');
+        if ((source === 'main' && !isTimeSlipTrace) || (source === 'timeslip' && isTimeSlipTrace)) return;
+
+        const pointNumber = trace.customdata.indexOf(key);
+        if (pointNumber >= 0) targetPoints.push({ curveNumber, pointNumber });
+      });
+
+      if (targetPoints.length === 0) return;
+
+      isSyncingPlotHover = true;
+      Plotly.Fx.hover(plotDiv, targetPoints);
+      lastLinkedHover = { key, source };
+      requestAnimationFrame(() => { isSyncingPlotHover = false; });
+    };
+
+    const getPointKey = (point) => {
+      if (!point) return null;
+
+      // Plotly may provide per-point customdata directly on the hovered point.
+      if (point.customdata != null && point.customdata !== '') {
+        return point.customdata;
       }
-      const key = custom[point.pointNumber];
+
+      const trace = point.fullData || point.data;
+      const custom = trace && trace.customdata;
+      if (!Array.isArray(custom)) return null;
+      return custom[point.pointNumber] || null;
+    };
+
+    const handlePointEvent = (eventData, isTap) => {
+      const points = (eventData && Array.isArray(eventData.points)) ? eventData.points : [];
+      if (points.length === 0) return;
+
+      // With hovermode='x', points[0] is not guaranteed to be a keyed data trace.
+      // Prefer the first point carrying a row key so map marker follows mouse motion.
+      const point = points.find((candidate) => !!getPointKey(candidate)) || points[0];
+      const key = getPointKey(point);
       if (!key) {
-        clearMapHoverMarker();
-        clearLeafletHoverMarker();
+        if (!isTap) {
+          clearMapHoverMarker();
+          clearLeafletHoverMarker();
+        }
         return;
       }
+
       showMapHoverMarker(key);
       showLeafletHoverMarker(key);
+
+      if (isSyncingPlotHover) return;
+      const source = isTimeSlipPoint(point) ? 'timeslip' : 'main';
+      hoverLinkedSubplotByKey(key, source);
+    };
+
+    plotDiv.on('plotly_hover', (eventData) => {
+      handlePointEvent(eventData, false);
+    });
+
+    // Mobile touch interaction primarily fires click events; keep marker linked on tap.
+    plotDiv.on('plotly_click', (eventData) => {
+      handlePointEvent(eventData, true);
     });
 
     plotDiv.on('plotly_unhover', () => {
+      if (isSyncingPlotHover) return;
       clearMapHoverMarker();
       clearLeafletHoverMarker();
+      lastLinkedHover = { key: null, source: null };
+    });
+
+    plotDiv.on('plotly_doubleclick', () => {
+      clearMapHoverMarker();
+      clearLeafletHoverMarker();
+      lastLinkedHover = { key: null, source: null };
+      Plotly.Fx.unhover(plotDiv);
     });
   }
 
@@ -407,6 +483,7 @@
         meta.lapNum = lapNum;
         meta.lapTime = lapTime;
 
+        addCalculatedCommonChannels(data, cols, meta);
         deriveAndExposeMapXY(data, cols, meta);
 
         // expose lap columns in data rows and cols list
@@ -656,8 +733,15 @@
 
     if (previousValue && Array.from(mapColorSelect.options).some(o => o.value === previousValue)) {
       mapColorSelect.value = previousValue;
-    } else if (mapColorSelect.options.length > 0) {
-      mapColorSelect.value = mapColorSelect.options[0].value;
+    } else {
+      const preferred = DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES
+        .map((candidate) => Array.from(mapColorSelect.options).find((o) => o.value.toLowerCase() === candidate.toLowerCase()))
+        .find(Boolean);
+      if (preferred) {
+        mapColorSelect.value = preferred.value;
+      } else if (mapColorSelect.options.length > 0) {
+        mapColorSelect.value = mapColorSelect.options[0].value;
+      }
     }
   }
 
@@ -846,6 +930,32 @@
     return mapping.displayName || mapping.piboso;
   }
 
+  function addCalculatedCommonChannels(data, cols, meta) {
+    if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
+
+    const mappingContext = { meta };
+    const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, mappingContext);
+    const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, mappingContext);
+    if (!latAccCol || !longAccCol) return;
+    const LP = window.LogFileProcessors;
+    if (LP && typeof LP.addTotalAccelerationCalculatedChannel === 'function') {
+      LP.addTotalAccelerationCalculatedChannel({ data, cols, units: meta.units || {}, meta }, latAccCol, longAccCol);
+      return;
+    }
+
+    if (!cols.includes(latAccCol) || !cols.includes(longAccCol)) return;
+    if (!cols.includes(TOTAL_ACCEL_CALC_CHANNEL)) cols.push(TOTAL_ACCEL_CALC_CHANNEL);
+    data.forEach((row) => {
+      const latAcc = Number(row[latAccCol]);
+      const longAcc = Number(row[longAccCol]);
+      row[TOTAL_ACCEL_CALC_CHANNEL] = (Number.isFinite(latAcc) && Number.isFinite(longAcc))
+        ? Math.sqrt((latAcc * latAcc) + (longAcc * longAcc))
+        : null;
+    });
+    if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+    meta.units[TOTAL_ACCEL_CALC_CHANNEL] = 'g';
+  }
+
   // Linear interpolation over a sorted X array.
   function interpAt(xArr, yArr, x) {
     if (!xArr || xArr.length === 0) return null;
@@ -866,6 +976,22 @@
     return y0 + t * (y1 - y0);
   }
 
+  function nearestIndexAtX(xArr, x) {
+    if (!Array.isArray(xArr) || xArr.length === 0) return -1;
+    if (x <= xArr[0]) return 0;
+    if (x >= xArr[xArr.length - 1]) return xArr.length - 1;
+
+    let lo = 0;
+    let hi = xArr.length - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xArr[mid] <= x) lo = mid;
+      else hi = mid;
+    }
+
+    return (Math.abs(x - xArr[lo]) <= Math.abs(xArr[hi] - x)) ? lo : hi;
+  }
+
   function buildTimeSlipTraces(selFiles, selectedLaps, xMode) {
     // Time slip is defined only against distance while split by lap.
     if (xMode !== 'distance') {
@@ -882,7 +1008,8 @@
         const tArr = maskIdx.map(i => log.meta.lapTime[i]);
         if (xArr.length > 1) {
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
-          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, isCrashLap, fileIdx});
+          const keys = maskIdx.map(i => rowKey(log.id, lap, i));
+          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
         }
       });
     });
@@ -955,9 +1082,14 @@
       }
       const color = colorForLap(s.lap);
       const dash = getLineDashForFileIndex(s.fileIdx);
+      const keyGrid = grid.map((g) => {
+        const idx = nearestIndexAtX(s.x, g);
+        return idx >= 0 && s.keys ? s.keys[idx] : null;
+      });
       tsTraces.push({
         x: grid,
         y: deltas,
+        customdata: keyGrid,
         xaxis:'x2',
         yaxis:'y2',
         name: `${s.file} — Lap ${s.lap}`,
@@ -1093,7 +1225,18 @@
 
   function getFigureHeight(includeTimeSlip) {
     const mobile = window.innerWidth <= 980;
-    if (!mobile) return includeTimeSlip ? 860 : 640;
+    if (!mobile) {
+      const viewportHeight = Math.max(600, window.innerHeight || 900);
+      const plotTop = (plotDiv && typeof plotDiv.getBoundingClientRect === 'function')
+        ? Math.max(0, Math.round(plotDiv.getBoundingClientRect().top))
+        : 220;
+      const available = viewportHeight - plotTop - 16;
+      const fallback = Math.round(viewportHeight * (includeTimeSlip ? 0.78 : 0.72));
+      const target = (Number.isFinite(available) && available > 320) ? available : fallback;
+      const minHeight = includeTimeSlip ? 520 : 420;
+      const maxHeight = Math.round(viewportHeight * 0.9);
+      return Math.max(minHeight, Math.min(target, maxHeight));
+    }
     // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh.
     const main = Math.max(200, Math.round(window.innerHeight * 0.33));
     const timeSlip = Math.max(160, Math.round(window.innerHeight * 0.25));
@@ -1102,7 +1245,9 @@
 
   function getMapFigureHeight() {
     const mobile = window.innerWidth <= 980;
-    return mobile ? Math.max(200, Math.round(window.innerHeight * 0.33)) : 300;
+    if (mobile) return Math.max(200, Math.round(window.innerHeight * 0.33));
+    const desktopPlotHeight = Math.round(plotDiv && plotDiv.clientHeight ? plotDiv.clientHeight : 0);
+    return Math.max(300, desktopPlotHeight || 640);
   }
 
   function getMapOffsets() {
@@ -1721,34 +1866,9 @@
       });
     });
 
-    let mapColorScaleConfig = null;
-    if (mapColorEnabled && Number.isFinite(mapColorMin) && Number.isFinite(mapColorMax)) {
-      let markerCmin = mapColorMin;
-      let markerCmax = mapColorMax;
-      let markerColorscale = 'Viridis';
-
-      if (mapColorMode === 'divergent') {
-        markerColorscale = 'RdBu';
-        if (mapColorMin < 0 && mapColorMax > 0) {
-          const zeroPos = (0 - markerCmin) / (markerCmax - markerCmin);
-          markerColorscale = [
-            [0, '#2166ac'],
-            [zeroPos, '#f7f7f7'],
-            [1, '#b2182b']
-          ];
-        }
-      }
-
-      if (markerCmin === markerCmax) {
-        markerCmax = markerCmin + 1;
-      }
-
-      mapColorScaleConfig = {
-        cmin: markerCmin,
-        cmax: markerCmax,
-        colorscale: markerColorscale
-      };
-    }
+    const mapColorScaleConfig = mapColorEnabled
+      ? getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode)
+      : null;
 
     let mapColorTraceUsed = false;
     pendingTraces.forEach((entry) => {
@@ -1831,52 +1951,83 @@
     mapHoverMarkerVisible = false;
   }
 
-  function initLeafletMap() {
-    if (!leafletMapDiv || leafletMap) return;
+  function initLeafletMap(mode) {
+    if (!leafletMapDiv) return;
+
+    // Recreate the map if switching between geo and XY modes.
+    if (leafletMap && leafletMapMode !== mode) {
+      leafletMap.remove();
+      leafletMap = null;
+      leafletLayers = [];
+      leafletHoverMarker = null;
+    }
+
+    if (leafletMap && leafletMapMode === mode) return;
+
     syncLeafletContainerHeight();
-    
-    // Initialize the map - center on a default location, will be adjusted based on data
-    leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
-    
-    // Add free satellite tile layer (Esri World Imagery)
-    const satelliteLayer = L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      {
-        attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
-        maxZoom: 20
-      }
-    ).addTo(leafletMap);
-    
-    // Also add an OpenStreetMap layer as fallback
-    const osmLayer = L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19
-      }
-    );
-    
-    // Layer control for toggling between satellite and map
-    L.control.layers(
-      {
-        'Satellite': satelliteLayer,
-        'OpenStreetMap': osmLayer
-      },
-      {},
-      { position: 'topright' }
-    ).addTo(leafletMap);
+
+    leafletMapDiv.style.background = '#fff';
+
+    if (mode === 'xy') {
+      leafletMap = L.map(leafletMapDiv, {
+        crs: L.CRS.Simple,
+        zoomSnap: 0,
+        zoomDelta: 0.5,
+        minZoom: -6
+      }).setView([0, 0], 0);
+    } else {
+      // Geo mode with map tiles.
+      leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
+
+      const satelliteLayer = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
+          maxZoom: 20
+        }
+      ).addTo(leafletMap);
+
+      const osmLayer = L.tileLayer(
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          maxZoom: 19
+        }
+      );
+
+      const blankLayer = L.layerGroup();
+      L.control.layers(
+        {
+          'Satellite': satelliteLayer,
+          'OpenStreetMap': osmLayer,
+          'Blank (white)': blankLayer
+        },
+        {},
+        { position: 'topright' }
+      ).addTo(leafletMap);
+    }
 
     leafletMap.on('moveend zoomend', () => {
       if (isApplyingLeafletProgrammaticView) return;
       const center = leafletMap.getCenter();
       const zoom = leafletMap.getZoom();
       if (!center || !Number.isFinite(center.lat) || !Number.isFinite(center.lng) || !Number.isFinite(zoom)) return;
-      leafletViewState = {
-        center: [center.lat, center.lng],
-        zoom
-      };
-      leafletViewStateUserSet = true;
+      if (leafletMapMode === 'xy') {
+        leafletXYViewState = {
+          center: [center.lat, center.lng],
+          zoom
+        };
+        leafletXYViewStateUserSet = true;
+      } else {
+        leafletViewState = {
+          center: [center.lat, center.lng],
+          zoom
+        };
+        leafletViewStateUserSet = true;
+      }
     });
+
+    leafletMapMode = mode;
 
     // Ensure the map computes tile layout after the element has final dimensions.
     requestAnimationFrame(() => leafletMap.invalidateSize());
@@ -1893,6 +2044,277 @@
       default:
         return null;
     }
+  }
+
+  function getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode) {
+    if (!Number.isFinite(mapColorMin) || !Number.isFinite(mapColorMax)) return null;
+
+    let markerCmin = mapColorMin;
+    let markerCmax = mapColorMax;
+    let markerColorscale = 'Viridis';
+
+    if (mapColorMode === 'divergent') {
+      markerColorscale = 'RedGreen';
+      if (mapColorMin < 0 && mapColorMax > 0) {
+        const zeroPos = (0 - markerCmin) / (markerCmax - markerCmin);
+        // Keep the neutral center intentionally narrow so red/green variation is more visible.
+        // Example: centerFraction=0.20 approximates a 40/20/40 split.
+        const centerFraction = 0.10;
+        const halfCenter = centerFraction * 0.5;
+        const centerStart = Math.max(0, zeroPos - halfCenter);
+        const centerEnd = Math.min(1, zeroPos + halfCenter);
+        const edgeEps = 1e-4;
+        const MIN_COLOR = '#b2182b',
+          MIN_MID_COLOR = '#d98c95',
+          MAX_MID_COLOR = '#8dcca8',
+          MAX_COLOR = '#1a9850',
+          NEUTRAL_COLOR = '#f7f7f7';
+        markerColorscale = [
+          [0, MIN_COLOR],
+          [Math.max(0, centerStart - edgeEps), MIN_MID_COLOR],
+          [centerStart, NEUTRAL_COLOR],
+          [centerEnd, NEUTRAL_COLOR],
+          [Math.min(1, centerEnd + edgeEps), MAX_MID_COLOR],
+          [1, MAX_COLOR]
+        ];
+      }
+    }
+
+    if (markerCmin === markerCmax) {
+      markerCmax = markerCmin + 1;
+    }
+
+    return {
+      cmin: markerCmin,
+      cmax: markerCmax,
+      colorscale: markerColorscale
+    };
+  }
+
+  function lerpColorRgb(rgbA, rgbB, t) {
+    const clamped = Math.max(0, Math.min(1, t));
+    const r = Math.round(rgbA[0] + (rgbB[0] - rgbA[0]) * clamped);
+    const g = Math.round(rgbA[1] + (rgbB[1] - rgbA[1]) * clamped);
+    const b = Math.round(rgbA[2] + (rgbB[2] - rgbA[2]) * clamped);
+    return [r, g, b];
+  }
+
+  function colorRgbToHex(rgb) {
+    const r = Math.max(0, Math.min(255, Math.round(rgb[0])));
+    const g = Math.max(0, Math.min(255, Math.round(rgb[1])));
+    const b = Math.max(0, Math.min(255, Math.round(rgb[2])));
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+  }
+
+  function normalizeLeafletColorScaleStops(colorscale) {
+    if (Array.isArray(colorscale)) {
+      const stops = colorscale
+        .map((entry) => {
+          if (!Array.isArray(entry) || entry.length < 2) return null;
+          const pos = Number(entry[0]);
+          const color = String(entry[1] || '').trim();
+          if (!Number.isFinite(pos) || !color) return null;
+          return [Math.max(0, Math.min(1, pos)), color];
+        })
+        .filter(Boolean)
+        .sort((a, b) => a[0] - b[0]);
+      if (stops.length > 0) return stops;
+    }
+
+    if (String(colorscale).toLowerCase() === 'rdbu') {
+      return [
+        [0, '#2166ac'],
+        [0.5, '#f7f7f7'],
+        [1, '#b2182b']
+      ];
+    }
+
+    if (String(colorscale).toLowerCase() === 'redgreen') {
+      return [
+        [0, '#b2182b'],
+        [0.5, '#f7f7f7'],
+        [1, '#1a9850']
+      ];
+    }
+
+    return [
+      [0, '#440154'],
+      [0.25, '#3b528b'],
+      [0.5, '#21918c'],
+      [0.75, '#5ec962'],
+      [1, '#fde725']
+    ];
+  }
+
+  function parseHexColorToRgb(color) {
+    const s = String(color || '').trim();
+    const hex = s.startsWith('#') ? s.slice(1) : s;
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return null;
+    return [
+      parseInt(hex.slice(0, 2), 16),
+      parseInt(hex.slice(2, 4), 16),
+      parseInt(hex.slice(4, 6), 16)
+    ];
+  }
+
+  function getLeafletColorForValue(value, scaleConfig) {
+    const v = Number(value);
+    if (!Number.isFinite(v) || !scaleConfig) return null;
+
+    const cmin = Number(scaleConfig.cmin);
+    const cmax = Number(scaleConfig.cmax);
+    if (!Number.isFinite(cmin) || !Number.isFinite(cmax) || cmax <= cmin) return null;
+
+    const t = (v - cmin) / (cmax - cmin);
+    const clamped = Math.max(0, Math.min(1, t));
+
+    const stops = normalizeLeafletColorScaleStops(scaleConfig.colorscale)
+      .map(([pos, color]) => [pos, parseHexColorToRgb(color)])
+      .filter((entry) => Array.isArray(entry[1]));
+
+    if (stops.length === 0) return null;
+    if (stops.length === 1) return colorRgbToHex(stops[0][1]);
+    if (clamped <= stops[0][0]) return colorRgbToHex(stops[0][1]);
+    if (clamped >= stops[stops.length - 1][0]) return colorRgbToHex(stops[stops.length - 1][1]);
+
+    for (let i = 1; i < stops.length; i++) {
+      const left = stops[i - 1];
+      const right = stops[i];
+      if (clamped >= left[0] && clamped <= right[0]) {
+        const span = Math.max(1e-9, right[0] - left[0]);
+        const localT = (clamped - left[0]) / span;
+        return colorRgbToHex(lerpColorRgb(left[1], right[1], localT));
+      }
+    }
+
+    return colorRgbToHex(stops[stops.length - 1][1]);
+  }
+
+  function removeLeafletColorLegend() {
+    if (!leafletMap || !leafletColorLegendControl) return;
+    leafletMap.removeControl(leafletColorLegendControl);
+    leafletColorLegendControl = null;
+  }
+
+  function updateLeafletColorLegend(channelName, scaleConfig, autoScaleConfig) {
+    if (!leafletMap || !scaleConfig || !Number.isFinite(scaleConfig.cmin) || !Number.isFinite(scaleConfig.cmax)) {
+      removeLeafletColorLegend();
+      return;
+    }
+
+    removeLeafletColorLegend();
+
+    const sampleCount = 16;
+    const sampleColors = [];
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / (sampleCount - 1);
+      const value = scaleConfig.cmin + (scaleConfig.cmax - scaleConfig.cmin) * t;
+      sampleColors.push(getLeafletColorForValue(value, scaleConfig) || '#888888');
+    }
+
+    const control = L.control({ position: 'topright' });
+    control.onAdd = () => {
+      const div = L.DomUtil.create('div', 'leaflet-map-color-legend');
+      const gradient = `linear-gradient(to right, ${sampleColors.join(',')})`;
+      div.style.background = 'rgba(255,255,255,0.95)';
+      div.style.border = '1px solid #c8d2df';
+      div.style.borderRadius = '6px';
+      div.style.padding = '6px 8px';
+      div.style.font = '12px/1.2 sans-serif';
+      div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.15)';
+      div.style.minWidth = '150px';
+      div.style.cursor = 'pointer';
+
+      const currentMin = Number(scaleConfig.cmin);
+      const currentMax = Number(scaleConfig.cmax);
+      const autoMin = Number(autoScaleConfig && autoScaleConfig.cmin);
+      const autoMax = Number(autoScaleConfig && autoScaleConfig.cmax);
+      const hasAutoRange = Number.isFinite(autoMin) && Number.isFinite(autoMax);
+      const isManualRange = hasAutoRange && (Math.abs(currentMin - autoMin) > 1e-9 || Math.abs(currentMax - autoMax) > 1e-9);
+
+      div.innerHTML = [
+        `<div style="margin-bottom:4px;font-weight:600;color:#223;">${escapeHtml(channelName || 'Map Color')}</div>`,
+        `<div style="height:10px;border-radius:3px;border:1px solid #9fb0c5;background:${gradient};"></div>`,
+        '<div style="display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+        `<span>${currentMin.toFixed(2)}</span>`,
+        `<span>${currentMax.toFixed(2)}</span>`,
+        '</div>',
+        `<div style="margin-top:4px;color:#5a6b82;">${isManualRange ? 'Manual bounds active' : 'Auto bounds active'} (click to edit)</div>`,
+        '<div class="leaflet-map-color-range-editor" style="display:none;margin-top:6px;border-top:1px solid #d7e0ec;padding-top:6px;">',
+        '<div style="display:flex;gap:6px;align-items:center;">',
+        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Min <input type="number" step="any" class="leaflet-map-color-min" value="${currentMin.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
+        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Max <input type="number" step="any" class="leaflet-map-color-max" value="${currentMax.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
+        '</div>',
+        '<div style="display:flex;gap:6px;margin-top:6px;">',
+        '<button type="button" class="leaflet-map-color-apply" style="padding:2px 8px;font-size:12px;">Apply</button>',
+        '<button type="button" class="leaflet-map-color-auto" style="padding:2px 8px;font-size:12px;">Auto</button>',
+        '</div>',
+        '<div class="leaflet-map-color-error" style="display:none;color:#9b1c1c;margin-top:5px;"></div>',
+        '</div>'
+      ].join('');
+
+      const editor = div.querySelector('.leaflet-map-color-range-editor');
+      const minInput = div.querySelector('.leaflet-map-color-min');
+      const maxInput = div.querySelector('.leaflet-map-color-max');
+      const applyBtn = div.querySelector('.leaflet-map-color-apply');
+      const autoBtn = div.querySelector('.leaflet-map-color-auto');
+      const errorEl = div.querySelector('.leaflet-map-color-error');
+
+      const showError = (message) => {
+        if (!errorEl) return;
+        if (!message) {
+          errorEl.style.display = 'none';
+          errorEl.textContent = '';
+          return;
+        }
+        errorEl.style.display = 'block';
+        errorEl.textContent = message;
+      };
+
+      div.addEventListener('click', (ev) => {
+        if (!editor) return;
+        const target = ev.target;
+        const isEditorElement = target && target.closest && target.closest('.leaflet-map-color-range-editor');
+        if (isEditorElement) return;
+        editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
+      });
+
+      if (applyBtn && minInput && maxInput) {
+        applyBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const min = Number(minInput.value);
+          const max = Number(maxInput.value);
+          if (!Number.isFinite(min) || !Number.isFinite(max)) {
+            showError('Bounds must be numeric.');
+            return;
+          }
+          if (max <= min) {
+            showError('Max must be greater than Min.');
+            return;
+          }
+          showError('');
+          leafletMapColorManualRanges.set(channelName, { min, max });
+          updatePlot();
+        });
+      }
+
+      if (autoBtn) {
+        autoBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          leafletMapColorManualRanges.delete(channelName);
+          showError('');
+          updatePlot();
+        });
+      }
+
+      L.DomEvent.disableClickPropagation(div);
+      return div;
+    };
+
+    control.addTo(leafletMap);
+    leafletColorLegendControl = control;
   }
 
   function getLeafletLatLonSource(log) {
@@ -1977,11 +2399,11 @@
     }
 
     if (mapDiv) {
-      mapDiv.style.display = mode === 'xy' ? 'block' : 'none';
+      mapDiv.style.display = 'none';
     }
 
     if (leafletMapDiv) {
-      leafletMapDiv.style.display = mode === 'leaflet' ? 'block' : 'none';
+      leafletMapDiv.style.display = mode === 'none' ? 'none' : 'block';
     }
   }
 
@@ -1996,33 +2418,69 @@
   function clearLeafletMapPlot() {
     leafletHoverLookup = new Map();
     clearLeafletHoverMarker();
+    removeLeafletColorLegend();
     leafletViewState = null;
     leafletViewStateUserSet = false;
+    leafletXYViewState = null;
+    leafletXYViewStateUserSet = false;
     if (leafletMap) {
       leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
       leafletLayers = [];
     }
   }
 
-  function updateLeafletMap(selFiles, selectedLaps) {
+  function updateLeafletMap(selFiles, selectedLaps, mode) {
     if (!leafletMapDiv || !window.L) return;
     syncLeafletContainerHeight();
-    
-    // Initialize map on first call
-    if (!leafletMap) {
-      initLeafletMap();
-    }
+
+    initLeafletMap(mode);
     
     // Clear existing layers
     leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
     leafletLayers = [];
     const nextLeafletHoverLookup = new Map();
+    const mapColorEnabled = !!(mapColorEnabledInput && mapColorEnabledInput.checked);
+    const mapColorChannel = mapColorSelect ? mapColorSelect.value : '';
+    const mapColorMode = mapColorModeSelect ? mapColorModeSelect.value : 'continuous';
+    let mapColorMin = Infinity;
+    let mapColorMax = -Infinity;
+
+    if (mapColorEnabled && mapColorChannel) {
+      selFiles.forEach((log) => {
+        const mapColorCol = resolveChannelForLog(mapColorChannel, log);
+        if (!mapColorCol || !log.cols.includes(mapColorCol)) return;
+        log.data.forEach((row) => {
+          const v = Number(row[mapColorCol]);
+          if (!Number.isFinite(v)) return;
+          if (v < mapColorMin) mapColorMin = v;
+          if (v > mapColorMax) mapColorMax = v;
+        });
+      });
+    }
+
+    const mapColorScaleConfig = mapColorEnabled
+      ? getMapColorScaleConfig(mapColorMin, mapColorMax, mapColorMode)
+      : null;
+    const manualRange = mapColorEnabled && mapColorChannel
+      ? leafletMapColorManualRanges.get(mapColorChannel)
+      : null;
+    const effectiveMapColorScaleConfig = (mapColorScaleConfig && manualRange && Number.isFinite(manualRange.min) && Number.isFinite(manualRange.max) && manualRange.max > manualRange.min)
+      ? {
+          cmin: manualRange.min,
+          cmax: manualRange.max,
+          colorscale: mapColorScaleConfig.colorscale
+        }
+      : mapColorScaleConfig;
     
     let bounds = null;
     
     selFiles.forEach((log, fileIdx) => {
-      const latLonSource = getLeafletLatLonSource(log);
-      if (!latLonSource) return;
+      const latLonSource = mode === 'geo' ? getLeafletLatLonSource(log) : null;
+      const mapSource = mode === 'xy' ? getMapSourceForLog(log) : null;
+      const mapColorCol = mapColorEnabled && mapColorChannel ? resolveChannelForLog(mapColorChannel, log) : '';
+      const canColorByChannel = !!(mapColorEnabled && effectiveMapColorScaleConfig && mapColorCol && log.cols.includes(mapColorCol));
+      if (mode === 'geo' && !latLonSource) return;
+      if (mode === 'xy' && !mapSource) return;
       
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
@@ -2030,12 +2488,14 @@
         
         const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
         const latlngs = [];
+        const colorValues = [];
         
         maskIdx.forEach((i) => {
-          const lat = latLonSource.latAt(i);
-          const lon = latLonSource.lonAt(i);
+          const lat = mode === 'geo' ? latLonSource.latAt(i) : mapSource.yAt(i);
+          const lon = mode === 'geo' ? latLonSource.lonAt(i) : mapSource.xAt(i);
           if (Number.isFinite(lat) && Number.isFinite(lon)) {
             latlngs.push([lat, lon]);
+            colorValues.push(canColorByChannel ? Number(log.data[i][mapColorCol]) : null);
             nextLeafletHoverLookup.set(rowKey(log.id, lap, i), { lat, lon });
             if (!bounds) {
               bounds = L.latLngBounds([lat, lon], [lat, lon]);
@@ -2048,14 +2508,27 @@
         if (latlngs.length >= 2) {
           const color = colorForLap(lap);
           const dash = DASHES[fileIdx % DASHES.length];
-          const polyline = L.polyline(latlngs, {
-            color: color,
-            dashArray: mapPlotlyDashToLeaflet(dash),
-            weight: 2,
-            opacity: 0.7
-          }).addTo(leafletMap);
-          
-          leafletLayers.push(polyline);
+          if (canColorByChannel) {
+            const dashArray = mapPlotlyDashToLeaflet(dash);
+            for (let si = 0; si < latlngs.length - 1; si++) {
+              const segmentColor = getLeafletColorForValue(colorValues[si], effectiveMapColorScaleConfig) || color;
+              const segment = L.polyline([latlngs[si], latlngs[si + 1]], {
+                color: segmentColor,
+                dashArray,
+                weight: 2,
+                opacity: 0.85
+              }).addTo(leafletMap);
+              leafletLayers.push(segment);
+            }
+          } else {
+            const polyline = L.polyline(latlngs, {
+              color: color,
+              dashArray: mapPlotlyDashToLeaflet(dash),
+              weight: 2,
+              opacity: 0.7
+            }).addTo(leafletMap);
+            leafletLayers.push(polyline);
+          }
           
           // Add lap label at start
           const label = L.circleMarker(latlngs[0], {
@@ -2065,7 +2538,7 @@
             weight: 2,
             opacity: 1,
             fillOpacity: 0.8
-          }).bindPopup(`${log.name} - Lap ${lap} (${latLonSource.source === 'derived' ? 'GPBikes derived' : 'GPS'})`).addTo(leafletMap);
+          }).bindPopup(`${log.name} - Lap ${lap} (${mode === 'geo' ? (latLonSource.source === 'derived' ? 'GPBikes derived' : 'GPS') : 'X/Y meters'})`).addTo(leafletMap);
           
           leafletLayers.push(label);
         }
@@ -2075,8 +2548,10 @@
     // Fit map to bounds if we have data
     if (bounds && bounds.isValid()) {
       runLeafletProgrammaticView(() => {
-        if (leafletViewStateUserSet && leafletViewState && Array.isArray(leafletViewState.center) && Number.isFinite(leafletViewState.zoom)) {
-          leafletMap.setView(leafletViewState.center, leafletViewState.zoom, { animate: false });
+        const savedView = mode === 'geo' ? leafletViewState : leafletXYViewState;
+        const savedViewUserSet = mode === 'geo' ? leafletViewStateUserSet : leafletXYViewStateUserSet;
+        if (savedViewUserSet && savedView && Array.isArray(savedView.center) && Number.isFinite(savedView.zoom)) {
+          leafletMap.setView(savedView.center, savedView.zoom, { animate: false });
         } else {
           leafletMap.fitBounds(bounds, { padding: [50, 50] });
         }
@@ -2085,12 +2560,15 @@
 
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
+    updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig);
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
 
   function buildLayout(mainXTitle, ycols, includeTimeSlip) {
-    const mainDomain = includeTimeSlip ? [0.48,1] : [0,1];
+    const mobile = window.innerWidth <= 980;
+    const mainDomain = includeTimeSlip ? (mobile ? [0.48,1] : [0.23,1]) : [0,1];
+    const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
 
     if (!includeTimeSlip) {
@@ -2110,7 +2588,7 @@
       margin:{t:30},
       xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y'},
       xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false},
-      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain:[0,0.43]},
+      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain: timeSlipDomain},
       showlegend:false,
       height: getFigureHeight(true)
     };
@@ -2298,11 +2776,11 @@
     if (hasLeafletData) {
       setMapDisplayMode('leaflet');
       clearXYMapPlot();
-      updateLeafletMap(selFiles, selectedLaps);
+      updateLeafletMap(selFiles, selectedLaps, 'geo');
     } else if (hasXYData) {
-      setMapDisplayMode('xy');
-      clearLeafletMapPlot();
-      updateMapPlot(selFiles, selectedLaps);
+      setMapDisplayMode('leaflet');
+      clearXYMapPlot();
+      updateLeafletMap(selFiles, selectedLaps, 'xy');
     } else {
       setMapDisplayMode('none');
       clearXYMapPlot();

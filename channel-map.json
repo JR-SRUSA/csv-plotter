@@ -13,5 +13,10 @@
     "displayName": "LongAcc",
     "piboso": "LonAcc",
     "aim": "GPS LonAcc"
+  },
+  {
+    "displayName": "Total Acceleration (calc) [g]",
+    "piboso": "Total Acceleration (calc) [g]",
+    "aim": "Total Acceleration (calc) [g]"
   }
 ]

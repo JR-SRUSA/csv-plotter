@@ -6,6 +6,7 @@
   const SMT_CALC_BATTERY_AMPS_COL = 'Battery Amps (calc)';
   const SMT_CALC_MOTOR_POWER_TOTAL_COL = 'Motor Power Total (calc)';
   const SMT_CALC_EFFICIENCY_COL = 'Efficiency (calc)';
+  const TOTAL_ACCEL_CALC_COL = 'Total Acceleration (calc) [g]';
 
   function normalizedCells(row) {
     if (!Array.isArray(row)) return [];
@@ -455,6 +456,37 @@
     if (addedAny) {
       refreshProcessedMeta(processed);
     }
+  }
+
+  function addTotalAccelerationCalculatedChannel(processed, lateralCol, longitudinalCol) {
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return false;
+    if (!lateralCol || !longitudinalCol) return false;
+    if (!processed.cols.includes(lateralCol) || !processed.cols.includes(longitudinalCol)) return false;
+
+    if (!processed.units || typeof processed.units !== 'object') {
+      processed.units = {};
+    }
+
+    if (!processed.cols.includes(TOTAL_ACCEL_CALC_COL)) {
+      processed.cols.push(TOTAL_ACCEL_CALC_COL);
+    }
+
+    processed.data.forEach((row) => {
+      const latAcc = toFiniteNumber(row[lateralCol]);
+      const longAcc = toFiniteNumber(row[longitudinalCol]);
+      if (!Number.isFinite(latAcc) || !Number.isFinite(longAcc)) {
+        row[TOTAL_ACCEL_CALC_COL] = null;
+        return;
+      }
+      row[TOTAL_ACCEL_CALC_COL] = Math.sqrt((latAcc * latAcc) + (longAcc * longAcc));
+    });
+
+    processed.units[TOTAL_ACCEL_CALC_COL] = 'g';
+
+    if (processed.meta && typeof processed.meta === 'object') {
+      processed.meta.units = processed.units;
+    }
+    return true;
   }
 
   function applyScanMyTeslaDefaultUnits(processed) {
@@ -1002,6 +1034,7 @@
     isGPBikesFormat,
     isAiMFormat,
     isStandardFormat,
-    isScanMyTeslaFormat
+    isScanMyTeslaFormat,
+    addTotalAccelerationCalculatedChannel
   };
 })();
