@@ -125,9 +125,25 @@
     return validRows >= 5 && (sparseRows / validRows) >= 0.6;
   }
 
+  function isVIGradeFormat(rows, headerRowIndex) {
+    // VIGrade files have no metadata preamble – header is the very first row.
+    if (headerRowIndex !== 0) return false;
+    const headerCells = normalizedCells(rows[0]);
+    // VIGrade files are wide (typically hundreds of channels).
+    if (headerCells.length < 10) return false;
+    // The overwhelming majority of VIGrade column names use dot notation:
+    //   Component.Channel  or  Component.Channel.Qualifier
+    const dotNotationCount = headerCells.filter(c => /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(c)).length;
+    if (dotNotationCount / headerCells.length < 0.5) return false;
+    // The first column is always the time channel and contains "time" in its name.
+    return /time/i.test(headerCells[0]);
+  }
+
   function isStandardFormat(rows, headerRowIndex, metadata = {}) {
     const format = getMetadataValue(metadata, 'format');
     if (isGPBikesFormat(format) || isAiMFormat(format)) return false;
+    // VIGrade files would otherwise pass the standard-format check.
+    if (isVIGradeFormat(rows, headerRowIndex)) return false;
 
     // Standard CSV is expected to be: one header row at the top, then data.
     if (headerRowIndex !== 0) return false;
@@ -166,6 +182,10 @@
       return processAiMRows(rows, headerRowIndex, { source, format, metadata });
     }
 
+    if (isVIGradeFormat(rows, headerRowIndex)) {
+      return processVIGradeRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
     if (isScanMyTeslaFormat(format, rows, headerRowIndex, metadata)) {
       return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata }, {
         resampleHz: parsedOptions.scanMyTeslaHz
@@ -201,6 +221,46 @@
     const source = details.source || 'Unknown';
     const format = details.format || 'Unknown';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+  }
+
+  function processVIGradeRows(rows, headerRowIndex, details = {}) {
+    const source = details.source || 'VIGrade';
+    const format = details.format || 'VIGrade CSV';
+    const processed = processRowsWithCurrentMethod(
+      rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false }
+    );
+    filterAllZeroColumns(processed);
+    return processed;
+  }
+
+  function filterAllZeroColumns(processed) {
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return;
+    if (processed.data.length === 0) return;
+
+    const timeCol = processed.meta && processed.meta.timeCol;
+
+    const colsToKeep = processed.cols.filter((col) => {
+      if (col === timeCol) return true;
+      return processed.data.some((row) => {
+        const v = toFiniteNumber(row[col]);
+        return Number.isFinite(v) && v !== 0;
+      });
+    });
+
+    const removedCols = new Set(processed.cols.filter(c => !colsToKeep.includes(c)));
+    if (removedCols.size === 0) return;
+
+    processed.cols = colsToKeep;
+
+    if (processed.units) {
+      removedCols.forEach(col => { delete processed.units[col]; });
+    }
+
+    processed.data.forEach((row) => {
+      removedCols.forEach(col => { delete row[col]; });
+    });
+
+    refreshProcessedMeta(processed);
   }
 
   function processScanMyTeslaRows(rows, headerRowIndex, details = {}, options = {}) {
@@ -1035,6 +1095,7 @@
     isAiMFormat,
     isStandardFormat,
     isScanMyTeslaFormat,
+    isVIGradeFormat,
     addTotalAccelerationCalculatedChannel
   };
 })();
