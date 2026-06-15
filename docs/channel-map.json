@@ -15,8 +15,8 @@
     "aim": "GPS LonAcc"
   },
   {
-    "displayName": "Total Acceleration (calc) [g]",
-    "piboso": "Total Acceleration (calc) [g]",
-    "aim": "Total Acceleration (calc) [g]"
+    "displayName": "Total Acceleration (calc)",
+    "piboso": "Total Acceleration (calc)",
+    "aim": "Total Acceleration (calc)"
   }
 ]

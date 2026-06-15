@@ -29,7 +29,13 @@
   const DERIVED_LON_COL = 'Derived Longitude';
   const COMMON_LAT_ACC_CHANNEL = 'LatAcc';
   const COMMON_LONG_ACC_CHANNEL = 'LongAcc';
-  const TOTAL_ACCEL_CALC_CHANNEL = 'Total Acceleration (calc) [g]';
+  const TOTAL_ACCEL_CALC_CHANNEL = 'Total Acceleration (calc)';
+  const TURN_STATE_CALC_CHANNEL = 'Turn State (calc)';
+  const TURN_DIRECTION_SIGNED_CALC_CHANNEL = 'Turn Direction Signed (calc)';
+  const TURN_LATACC_CENTER_AVG_CALC_CHANNEL = 'LatAcc Center Average (calc)';
+  const TURN_CLASSIFICATION_THRESHOLD_G = 0.25;
+  const TURN_CLASSIFICATION_CENTER_WINDOW_SEC = 0.6;
+  const TURN_FILTER_FALLBACK_RADIUS_SAMPLES = 3;
   const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
 
@@ -41,7 +47,7 @@
     { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed' },
     { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc' },
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
-    { displayName: 'Total Acceleration (calc) [g]', piboso: 'Total Acceleration (calc) [g]', aim: 'Total Acceleration (calc) [g]' },
+    { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   const channelColorOverrides = new Map();
@@ -936,24 +942,130 @@
     const mappingContext = { meta };
     const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, mappingContext);
     const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, mappingContext);
-    if (!latAccCol || !longAccCol) return;
+    if (!latAccCol) return;
     const LP = window.LogFileProcessors;
-    if (LP && typeof LP.addTotalAccelerationCalculatedChannel === 'function') {
+
+    if (longAccCol && LP && typeof LP.addTotalAccelerationCalculatedChannel === 'function') {
       LP.addTotalAccelerationCalculatedChannel({ data, cols, units: meta.units || {}, meta }, latAccCol, longAccCol);
-      return;
+    } else if (longAccCol && cols.includes(latAccCol) && cols.includes(longAccCol)) {
+      if (!cols.includes(TOTAL_ACCEL_CALC_CHANNEL)) cols.push(TOTAL_ACCEL_CALC_CHANNEL);
+      data.forEach((row) => {
+        const latAcc = Number(row[latAccCol]);
+        const longAcc = Number(row[longAccCol]);
+        row[TOTAL_ACCEL_CALC_CHANNEL] = (Number.isFinite(latAcc) && Number.isFinite(longAcc))
+          ? Math.sqrt((latAcc * latAcc) + (longAcc * longAcc))
+          : null;
+      });
+      if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+      meta.units[TOTAL_ACCEL_CALC_CHANNEL] = 'g';
     }
 
-    if (!cols.includes(latAccCol) || !cols.includes(longAccCol)) return;
-    if (!cols.includes(TOTAL_ACCEL_CALC_CHANNEL)) cols.push(TOTAL_ACCEL_CALC_CHANNEL);
-    data.forEach((row) => {
-      const latAcc = Number(row[latAccCol]);
-      const longAcc = Number(row[longAccCol]);
-      row[TOTAL_ACCEL_CALC_CHANNEL] = (Number.isFinite(latAcc) && Number.isFinite(longAcc))
-        ? Math.sqrt((latAcc * latAcc) + (longAcc * longAcc))
-        : null;
+    if (!cols.includes(latAccCol)) return;
+
+    const halfWindowSec = Math.max(0, Number(TURN_CLASSIFICATION_CENTER_WINDOW_SEC) / 2);
+    const thresholdG = Math.max(0, Number(TURN_CLASSIFICATION_THRESHOLD_G));
+    const timeCol = meta.timeCol;
+    const hasFiniteTime = timeCol && data.some((row) => Number.isFinite(Number(row[timeCol])));
+    const latValues = data.map((row) => Number(row && row[latAccCol]));
+    const timeValues = hasFiniteTime ? data.map((row) => Number(row && row[timeCol])) : null;
+    let isMonotonicTime = true;
+    if (timeValues) {
+      for (let i = 1; i < timeValues.length; i++) {
+        if (!Number.isFinite(timeValues[i - 1]) || !Number.isFinite(timeValues[i])) continue;
+        if (timeValues[i] < timeValues[i - 1]) {
+          isMonotonicTime = false;
+          break;
+        }
+      }
+    }
+
+    const getFilteredLatAcc = (index) => {
+      const centerLat = latValues[index];
+      if (!Number.isFinite(centerLat)) return null;
+
+      if (!hasFiniteTime || halfWindowSec <= 0) {
+        let weightedSum = 0;
+        let weightTotal = 0;
+        for (let j = Math.max(0, index - TURN_FILTER_FALLBACK_RADIUS_SAMPLES); j <= Math.min(data.length - 1, index + TURN_FILTER_FALLBACK_RADIUS_SAMPLES); j++) {
+          const sample = latValues[j];
+          if (!Number.isFinite(sample)) continue;
+          const dist = Math.abs(j - index);
+          const w = (TURN_FILTER_FALLBACK_RADIUS_SAMPLES + 1) - dist;
+          if (w <= 0) continue;
+          weightedSum += sample * w;
+          weightTotal += w;
+        }
+        return weightTotal > 0 ? (weightedSum / weightTotal) : centerLat;
+      }
+
+      const centerTime = timeValues[index];
+      if (!Number.isFinite(centerTime)) return centerLat;
+
+      let weightedSum = 0;
+      let weightTotal = 0;
+
+      const accumulateSample = (j) => {
+        const sample = latValues[j];
+        const tj = timeValues[j];
+        if (!Number.isFinite(sample) || !Number.isFinite(tj)) return false;
+        const dt = Math.abs(tj - centerTime);
+        if (dt > halfWindowSec) return true;
+        const w = 1 - (dt / halfWindowSec);
+        if (w <= 0) return false;
+        weightedSum += sample * w;
+        weightTotal += w;
+        return false;
+      };
+
+      if (isMonotonicTime) {
+        accumulateSample(index);
+
+        for (let j = index - 1; j >= 0; j--) {
+          if (accumulateSample(j)) break;
+        }
+
+        for (let j = index + 1; j < data.length; j++) {
+          if (accumulateSample(j)) break;
+        }
+      } else {
+        for (let j = 0; j < data.length; j++) {
+          const sample = latValues[j];
+          const tj = timeValues[j];
+          if (!Number.isFinite(sample) || !Number.isFinite(tj)) continue;
+          const dt = Math.abs(tj - centerTime);
+          if (dt > halfWindowSec) continue;
+          const w = 1 - (dt / halfWindowSec);
+          if (w <= 0) continue;
+          weightedSum += sample * w;
+          weightTotal += w;
+        }
+      }
+
+      return weightTotal > 0 ? (weightedSum / weightTotal) : centerLat;
+    };
+
+    if (!cols.includes(TURN_LATACC_CENTER_AVG_CALC_CHANNEL)) cols.push(TURN_LATACC_CENTER_AVG_CALC_CHANNEL);
+    if (!cols.includes(TURN_STATE_CALC_CHANNEL)) cols.push(TURN_STATE_CALC_CHANNEL);
+    if (!cols.includes(TURN_DIRECTION_SIGNED_CALC_CHANNEL)) cols.push(TURN_DIRECTION_SIGNED_CALC_CHANNEL);
+
+    data.forEach((row, index) => {
+      const filteredLatAcc = getFilteredLatAcc(index);
+      row[TURN_LATACC_CENTER_AVG_CALC_CHANNEL] = Number.isFinite(filteredLatAcc) ? filteredLatAcc : null;
+      if (!Number.isFinite(filteredLatAcc)) {
+        row[TURN_STATE_CALC_CHANNEL] = 0;
+        row[TURN_DIRECTION_SIGNED_CALC_CHANNEL] = 0;
+        return;
+      }
+
+      const isTurning = Math.abs(filteredLatAcc) >= thresholdG;
+      row[TURN_STATE_CALC_CHANNEL] = isTurning ? 1 : 0;
+      row[TURN_DIRECTION_SIGNED_CALC_CHANNEL] = isTurning ? (filteredLatAcc >= 0 ? 1 : -1) : 0;
     });
+
     if (!meta.units || typeof meta.units !== 'object') meta.units = {};
-    meta.units[TOTAL_ACCEL_CALC_CHANNEL] = 'g';
+    meta.units[TURN_LATACC_CENTER_AVG_CALC_CHANNEL] = 'g';
+    meta.units[TURN_STATE_CALC_CHANNEL] = '';
+    meta.units[TURN_DIRECTION_SIGNED_CALC_CHANNEL] = '';
   }
 
   // Linear interpolation over a sorted X array.
