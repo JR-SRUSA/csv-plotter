@@ -31,7 +31,7 @@ function loadLogFileProcessors() {
   return context.window.LogFileProcessors;
 }
 
-test('calculates Total Acceleration (calc) [g] for AiM rows', () => {
+test('calculates Total Acceleration (calc) for AiM rows', () => {
   const processors = loadLogFileProcessors();
   assert.ok(processors, 'LogFileProcessors should be defined');
 
@@ -56,11 +56,11 @@ test('calculates Total Acceleration (calc) [g] for AiM rows', () => {
 
   assert.equal(added, true, 'Total acceleration channel should be added');
   assert.ok(
-    processed.cols.includes('Total Acceleration (calc) [g]'),
+    processed.cols.includes('Total Acceleration (calc)'),
     'Calculated channel should be present in cols'
   );
 
-  const total = 'Total Acceleration (calc) [g]';
+  const total = 'Total Acceleration (calc)';
   assert.equal(processed.data[0][total], 5);
   assert.equal(processed.data[1][total], 13);
   assert.equal(processed.data[2][total], null);

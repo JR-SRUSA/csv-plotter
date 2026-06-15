@@ -6,7 +6,7 @@
   const SMT_CALC_BATTERY_AMPS_COL = 'Battery Amps (calc)';
   const SMT_CALC_MOTOR_POWER_TOTAL_COL = 'Motor Power Total (calc)';
   const SMT_CALC_EFFICIENCY_COL = 'Efficiency (calc)';
-  const TOTAL_ACCEL_CALC_COL = 'Total Acceleration (calc) [g]';
+  const TOTAL_ACCEL_CALC_COL = 'Total Acceleration (calc)';
 
   function normalizedCells(row) {
     if (!Array.isArray(row)) return [];
