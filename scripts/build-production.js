@@ -43,12 +43,16 @@ try {
   const distHtml = path.join(distDir, 'index.html');
   const distCss = path.join(distDir, 'style.css');
   const distChannelMap = path.join(distDir, 'channel-map.json');
+  const distStaticDir = path.join(distDir, 'static');
+  const distTrackMapDefaults = path.join(distStaticDir, 'gpbikes-track-map-defaults.json');
   const sourceChannelMap = path.join(rootDir, 'channel-map.json');
+  const sourceTrackMapDefaults = path.join(rootDir, 'static', 'gpbikes-track-map-defaults.json');
   const plotlySource = require.resolve('plotly.js-basic-dist');
   const papaSource = require.resolve('papaparse/papaparse.min.js');
 
   ensureDir(buildDir);
   resetDir(distDir);
+  ensureDir(distStaticDir);
 
   minifyFile(appSource, appMinified);
 
@@ -76,12 +80,14 @@ try {
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
   writeMaybeCompressed(distCss, fs.readFileSync(path.join(rootDir, 'style.css')), gzipOnly);
   writeMaybeCompressed(distChannelMap, fs.readFileSync(sourceChannelMap), gzipOnly);
+  writeMaybeCompressed(distTrackMapDefaults, fs.readFileSync(sourceTrackMapDefaults), gzipOnly);
 
   if (gzipOnly) {
     console.log(`Built ${bundleFile}.gz`);
     console.log(`Built ${distHtml}.gz`);
     console.log(`Built ${distCss}.gz`);
     console.log(`Built ${distChannelMap}.gz`);
+    console.log(`Built ${distTrackMapDefaults}.gz`);
     console.log('Created gzip-only dist for ESP32-style hosting');
   } else {
     console.log(`Built ${bundleFile}`);
@@ -89,6 +95,7 @@ try {
     console.log(`Built ${distHtml}`);
     console.log(`Built ${distCss}`);
     console.log(`Built ${distChannelMap}`);
+    console.log(`Built ${distTrackMapDefaults}`);
   }
 } catch (err) {
   console.error('Production build failed:', err.message);

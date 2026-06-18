@@ -1,0 +1,16 @@
+[
+  {
+    "venue": "Mid Ohio Chicane V0.9",
+    "latitude": 40.68990540392548,
+    "longitude": -82.63576100202704,
+    "xOffset": 41,
+    "yOffset": 8
+  }, 
+  {
+    "venue": "Pittsburgh International v1.0b",
+    "latitude": 40.851096,
+    "longitude": -80.351929,
+    "xOffset": -385.178,
+    "yOffset": 281.243
+  }
+]
