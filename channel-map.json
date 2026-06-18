@@ -2,21 +2,25 @@
   {
     "displayName": "Speed",
     "piboso": "Speed",
-    "aim": "GPS Speed"
+    "aim": "GPS Speed",
+    "motec": "Ground Speed"
   },
   {
     "displayName": "LatAcc",
     "piboso": "LatAcc",
-    "aim": "GPS LatAcc"
+    "aim": "GPS LatAcc",
+    "motec": "G Force Lat"
   },
   {
     "displayName": "LongAcc",
     "piboso": "LonAcc",
-    "aim": "GPS LonAcc"
+    "aim": "GPS LonAcc",
+    "motec": "G Force Long"
   },
   {
     "displayName": "Total Acceleration (calc)",
     "piboso": "Total Acceleration (calc)",
-    "aim": "Total Acceleration (calc)"
+    "aim": "Total Acceleration (calc)",
+    "motec": "Total Acceleration (calc)"
   }
 ]

@@ -47,6 +47,23 @@
     return fallbackIdx < 0 ? 0 : fallbackIdx;
   }
 
+  function findMoTeCHeaderRowIndex(rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const cells = normalizedCells(rows[i]);
+      if (cells.length < 5) continue;
+      if (!/^time$/i.test(cells[0])) continue;
+      if (!/^distance$/i.test(cells[1])) continue;
+
+      const nextCells = normalizedCells(rows[i + 1]);
+      const nextTextLikeCount = nextCells.filter(v => v && !isDataLikeCell(v)).length;
+      if (nextCells.length >= 2 && nextTextLikeCount >= 2) {
+        return i;
+      }
+    }
+
+    return findHeaderRowIndex(rows);
+  }
+
   function extractMetadata(rows, headerRowIndex) {
     const metadata = {};
     const maxRows = Math.max(0, Math.min(rows.length, headerRowIndex > 0 ? headerRowIndex : 40));
@@ -82,6 +99,26 @@
 
   function isAiMFormat(format) {
     return /^aim\s+csv\s+file$/i.test(format || '');
+  }
+
+  function isMoTeCFormat(format) {
+    return /(?:^|\b)motec\s+csv\s+file(?:\b|$)/i.test(format || '');
+  }
+
+  function getMetadataValueFromRows(rows, key, maxRows = 40) {
+    if (!Array.isArray(rows) || !key) return '';
+    const keyNorm = String(key).toLowerCase();
+    const limit = Math.max(0, Math.min(rows.length, maxRows));
+    for (let i = 0; i < limit; i++) {
+      const row = rows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+      const rowKey = row[0] == null ? '' : String(row[0]).trim().toLowerCase();
+      if (rowKey !== keyNorm) continue;
+
+      const values = row.slice(1).map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
+      return values.join(', ');
+    }
+    return '';
   }
 
   function isScanMyTeslaFormat(format, rows = [], headerRowIndex = 0, metadata = {}) {
@@ -141,7 +178,7 @@
 
   function isStandardFormat(rows, headerRowIndex, metadata = {}) {
     const format = getMetadataValue(metadata, 'format');
-    if (isGPBikesFormat(format) || isAiMFormat(format)) return false;
+    if (isGPBikesFormat(format) || isAiMFormat(format) || isMoTeCFormat(format)) return false;
     // VIGrade files would otherwise pass the standard-format check.
     if (isVIGradeFormat(rows, headerRowIndex)) return false;
 
@@ -169,7 +206,8 @@
 
   function processCsvRows(rows, options = {}) {
     const parsedOptions = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
-    const headerRowIndex = findHeaderRowIndex(rows);
+    const formatHint = getMetadataValueFromRows(rows, 'format');
+    const headerRowIndex = isMoTeCFormat(formatHint) ? findMoTeCHeaderRowIndex(rows) : findHeaderRowIndex(rows);
     const metadata = extractMetadata(rows, headerRowIndex);
     const format = getMetadataValue(metadata, 'format');
     const source = getMetadataValue(metadata, 'data source') || getMetadataValue(metadata, 'source');
@@ -180,6 +218,10 @@
 
     if (isAiMFormat(format)) {
       return processAiMRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
+    if (isMoTeCFormat(format)) {
+      return processMoTeCRows(rows, headerRowIndex, { source, format, metadata });
     }
 
     if (isVIGradeFormat(rows, headerRowIndex)) {
@@ -208,6 +250,12 @@
   function processAiMRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'AiM';
     const format = details.format || 'AiM CSV File';
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+  }
+
+  function processMoTeCRows(rows, headerRowIndex, details = {}) {
+    const source = details.source || 'MoTeC';
+    const format = details.format || 'MoTeC CSV File';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
   }
 
@@ -927,8 +975,9 @@
   function parseBeaconMarkers(metadata = {}) {
     const raw = getMetadataValue(metadata, 'beacon markers');
     if (!raw) return [];
-    return raw
-      .split(',')
+    const matches = String(raw).match(/-?\d+(?:\.\d+)?/g);
+    if (!matches) return [];
+    return matches
       .map(s => Number(s.trim()))
       .filter(v => Number.isFinite(v) && v >= 0)
       .sort((a, b) => a - b);
@@ -1093,6 +1142,7 @@
     processCsvRows,
     isGPBikesFormat,
     isAiMFormat,
+    isMoTeCFormat,
     isStandardFormat,
     isScanMyTeslaFormat,
     isVIGradeFormat,

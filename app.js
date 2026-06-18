@@ -42,12 +42,12 @@
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
   // Fallback channel mapping if channel-map.json is unavailable.
-  // Each entry: { displayName, piboso, aim }
+  // Each entry: { displayName, piboso, aim, motec }
   const DEFAULT_CHANNEL_MAP = [
-    { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed' },
-    { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc' },
-    { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc' },
-    { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)' },
+    { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed', motec: 'Ground Speed' },
+    { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc', motec: 'G Force Lat' },
+    { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc', motec: 'G Force Long' },
+    { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)', motec: 'Total Acceleration (calc)' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   const channelColorOverrides = new Map();
@@ -561,8 +561,9 @@
         const displayName = entry.displayName == null ? '' : String(entry.displayName).trim();
         const piboso = entry.piboso == null ? '' : String(entry.piboso).trim();
         const aim = entry.aim == null ? '' : String(entry.aim).trim();
+        const motec = entry.motec == null ? '' : String(entry.motec).trim();
         if (!displayName) return null;
-        return { displayName, piboso, aim };
+        return { displayName, piboso, aim, motec };
       })
       .filter(Boolean);
     return normalized.length > 0 ? normalized : null;
@@ -932,6 +933,7 @@
     const fmt = (log.meta && log.meta.format) ? log.meta.format : '';
     if (LP && LP.isGPBikesFormat(fmt)) return mapping.piboso;
     if (LP && LP.isAiMFormat(fmt)) return mapping.aim;
+    if (LP && LP.isMoTeCFormat(fmt)) return mapping.motec || mapping.displayName || mapping.piboso;
     // Standard/unknown: fall back to displayName then piboso
     return mapping.displayName || mapping.piboso;
   }
