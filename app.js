@@ -7,7 +7,6 @@
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
   const mapColorModeSelect = document.getElementById('mapColorMode');
-  const plotBtn = document.getElementById('plotBtn');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -20,6 +19,7 @@
   const mapCenterLatInput = document.getElementById('mapCenterLat');
   const mapCenterLonInput = document.getElementById('mapCenterLon');
   const mapFitInfo = document.getElementById('mapFitInfo');
+  const mapFitBtn = document.getElementById('mapFitBtn');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
@@ -38,6 +38,7 @@
   const TURN_FILTER_FALLBACK_RADIUS_SAMPLES = 3;
   const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
+  const DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS = [];
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -50,6 +51,7 @@
     { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)', motec: 'Total Acceleration (calc)' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
+  let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
 
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
@@ -61,6 +63,7 @@
   let mapOffsetManuallyAdjusted = false;
   let mapCenterManuallyAdjusted = false;
   let lastAutoOffsetSignature = '';
+  let lastTrackDefaultSignature = '';
   let mapViewState = null;
   let leafletMap = null;
   let leafletLayers = []; // array of layer groups
@@ -569,6 +572,25 @@
     return normalized.length > 0 ? normalized : null;
   }
 
+  function normalizeTrackMapDefaultsConfig(config) {
+    if (!Array.isArray(config)) return null;
+    const normalized = config
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const venue = entry.venue == null ? '' : String(entry.venue).trim();
+        const latitude = Number(entry.latitude);
+        const longitude = Number(entry.longitude);
+        const xOffset = Number(entry.xOffset);
+        const yOffset = Number(entry.yOffset);
+        if (!venue) return null;
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+        if (!Number.isFinite(xOffset) || !Number.isFinite(yOffset)) return null;
+        return { venue, latitude, longitude, xOffset, yOffset };
+      })
+      .filter(Boolean);
+    return normalized.length > 0 ? normalized : null;
+  }
+
   async function loadChannelMapConfig() {
     try {
       const response = await fetch('channel-map.json', { cache: 'no-store' });
@@ -585,6 +607,58 @@
     } catch (err) {
       console.warn('Using built-in channel map fallback:', err.message);
       channelMap = DEFAULT_CHANNEL_MAP.slice();
+    }
+  }
+
+  function getLogVenue(log) {
+    if (!log || !log.meta || !log.meta.metadata) return '';
+    const metadata = log.meta.metadata;
+    return metadata.venue == null ? '' : String(metadata.venue).trim();
+  }
+
+  function normalizeVenueKey(value) {
+    return String(value == null ? '' : value)
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  function findTrackMapDefaultsForVenue(venue) {
+    const venueKey = normalizeVenueKey(venue);
+    if (!venueKey) return null;
+    return gpbikesTrackMapDefaults.find(entry => normalizeVenueKey(entry.venue) === venueKey) || null;
+  }
+
+  function getSelectedGpBikesTrackDefaults(selFiles) {
+    const candidates = Array.isArray(selFiles) && selFiles.length > 0 ? selFiles : logs;
+    for (const log of candidates) {
+      const fmt = (log && log.meta && log.meta.format) ? log.meta.format : '';
+      if (!window.LogFileProcessors || !window.LogFileProcessors.isGPBikesFormat(fmt)) continue;
+      const venue = getLogVenue(log);
+      const matched = findTrackMapDefaultsForVenue(venue);
+      if (matched) {
+        return {
+          ...matched,
+          signature: `${normalizeVenueKey(matched.venue)}|${matched.latitude}|${matched.longitude}|${matched.xOffset}|${matched.yOffset}`,
+          venue
+        };
+      }
+    }
+    return null;
+  }
+
+  async function loadTrackMapDefaultsConfig() {
+    try {
+      const response = await fetch('static/gpbikes-track-map-defaults.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const config = await response.json();
+      const normalized = normalizeTrackMapDefaultsConfig(config);
+      if (!normalized) throw new Error('Invalid gpbikes-track-map-defaults.json format');
+      gpbikesTrackMapDefaults = normalized;
+      if (logs.length > 0) updatePlot();
+    } catch (err) {
+      console.warn('Using built-in GP Bikes track map defaults fallback:', err.message);
+      gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
     }
   }
 
@@ -1418,6 +1492,25 @@
     isApplyingAutoCenter = false;
   }
 
+  function applyTrackMapDefaults(trackDefaults) {
+    if (!trackDefaults) return false;
+
+    const shouldApplyOffsets = !mapOffsetManuallyAdjusted || lastTrackDefaultSignature !== trackDefaults.signature;
+    if (shouldApplyOffsets) {
+      setMapOffsetInputs(trackDefaults.xOffset, trackDefaults.yOffset);
+      mapOffsetManuallyAdjusted = false;
+      lastAutoOffsetSignature = `preset:${trackDefaults.signature}`;
+      lastTrackDefaultSignature = trackDefaults.signature;
+    }
+
+    setMapCenterInputsIfAuto({
+      originLat: trackDefaults.latitude,
+      originLon: trackDefaults.longitude
+    });
+
+    return shouldApplyOffsets || !mapCenterManuallyAdjusted;
+  }
+
   function buildCenterInfoSuffix(origin) {
     if (!origin || !Number.isFinite(origin.originLat) || !Number.isFinite(origin.originLon)) return '';
     return ` | Center Lat/Lng ${origin.originLat.toFixed(6)}, ${origin.originLon.toFixed(6)}`;
@@ -1731,50 +1824,81 @@
   }
 
   function maybeAutoFitOffsets(selFiles, selectedLaps) {
-    const fit = computeAutoMapOffsetFit(selFiles, selectedLaps, AUTO_MAP_OFFSET_SAMPLE_STEP_M);
-    if (!fit) {
-      const aimOrigin = getFirstDerivedMapOrigin(selFiles);
-      const manualOrigin = getManualMapOrigin();
-      const fallbackOrigin = aimOrigin || manualOrigin;
-      if (fallbackOrigin) {
-        const addedCols = updateGpBikesDerivedLatLon(getMapOffsets(), fallbackOrigin);
-        if (addedCols) {
-          populateYSelect();
-          populateXCustomSelect();
-        }
-        if (aimOrigin) setMapCenterInputsIfAuto(aimOrigin);
-        const originSource = aimOrigin ? 'AiM origin' : 'manual center origin';
-        const centerSuffix = buildCenterInfoSuffix(fallbackOrigin);
-        updateMapFitInfo(`Auto fit waiting for both Lat/Lon-derived and PosX/PosY datasets. Using ${originSource} for GP Bikes Derived Latitude/Longitude.${centerSuffix}`);
-      } else {
-        updateMapFitInfo('Auto fit waiting for both Lat/Lon-derived and PosX/PosY datasets. Enter Center Lat/Lng to derive GP Bikes Latitude/Longitude without AiM data.');
+    const trackDefaults = getSelectedGpBikesTrackDefaults(selFiles);
+
+    // Apply JSON track defaults (center + offsets) when a venue match is found.
+    if (trackDefaults) {
+      applyTrackMapDefaults(trackDefaults);
+    }
+
+    // Auto-populate center from AiM-derived GPS origin when there are no JSON
+    // defaults and the user has not manually entered a center value.
+    const aimOrigin = getFirstDerivedMapOrigin(selFiles);
+    if (!trackDefaults && aimOrigin) {
+      setMapCenterInputsIfAuto(aimOrigin);
+    }
+
+    // Resolve the best available origin for deriving GPBikes lat/lon.
+    const presetOrigin = trackDefaults
+      ? { originLat: trackDefaults.latitude, originLon: trackDefaults.longitude }
+      : null;
+    const resolvedOrigin = getManualMapOrigin() || presetOrigin || aimOrigin;
+
+    if (resolvedOrigin) {
+      const addedCols = updateGpBikesDerivedLatLon(getMapOffsets(), resolvedOrigin);
+      if (addedCols) {
+        populateYSelect();
+        populateXCustomSelect();
       }
+    }
+
+    // Status line — never says "auto fit"; tells the user what is active.
+    const offsets = getMapOffsets();
+    const centerSuffix = resolvedOrigin ? buildCenterInfoSuffix(resolvedOrigin) : '';
+    if (trackDefaults) {
+      updateMapFitInfo(`Track defaults: "${trackDefaults.venue}"${centerSuffix} | Offset X=${offsets.x.toFixed(3)} m, Y=${offsets.y.toFixed(3)} m`);
+    } else if (resolvedOrigin) {
+      const originLabel = aimOrigin ? 'AiM GPS origin' : 'manual entry';
+      updateMapFitInfo(`Center from ${originLabel}${centerSuffix} | Offset X=${offsets.x.toFixed(3)} m, Y=${offsets.y.toFixed(3)} m — click "Fit X,Y to Lat/Lng" to auto-compute offsets.`);
+    } else {
+      updateMapFitInfo('Enter Center Lat/Lng (or load a file with GPS data), then click "Fit X,Y to Lat/Lng".');
+    }
+  }
+
+  function runManualFit() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const fit = computeAutoMapOffsetFit(selFiles, selectedLaps, AUTO_MAP_OFFSET_SAMPLE_STEP_M);
+
+    if (!fit) {
+      updateMapFitInfo('Fit failed: load both a GPS/Lat-Lng file and a GPBikes PosX/PosY file, then try again.');
       return;
     }
 
-    const signature = `${fit.posLog.id}|${fit.mapLog.id}|${fit.pairCount}|${fit.lapCount}`;
-    const shouldApply = !mapOffsetManuallyAdjusted || lastAutoOffsetSignature !== signature;
-    if (shouldApply) {
-      setMapOffsetInputs(fit.offsetX, fit.offsetY);
-      mapOffsetManuallyAdjusted = false;
-      lastAutoOffsetSignature = signature;
-    }
+    setMapOffsetInputs(fit.offsetX, fit.offsetY);
+    mapOffsetManuallyAdjusted = false;
+    lastAutoOffsetSignature = `manual:${fit.posLog.id}|${fit.mapLog.id}|${fit.pairCount}`;
+    lastTrackDefaultSignature = '';
 
-    const offsets = getMapOffsets();
     const fitOrigin = { originLat: fit.originLat, originLon: fit.originLon };
-    const addedCols = updateGpBikesDerivedLatLon(offsets, fitOrigin);
+    setMapCenterInputsIfAuto(fitOrigin);
+
+    const addedCols = updateGpBikesDerivedLatLon(getMapOffsets(), fitOrigin);
     if (addedCols) {
       populateYSelect();
       populateXCustomSelect();
     }
-    setMapCenterInputsIfAuto(fitOrigin);
+
+    applyOffsetsToDerivedMapXY(getMapOffsets());
 
     const fitErr = Number.isFinite(fit.meanAbsError) ? fit.meanAbsError.toFixed(3) : 'n/a';
     const centerSuffix = buildCenterInfoSuffix(fitOrigin);
     const fitDetail = fit.fitMode === 'distance' && Number.isFinite(fit.sampleStepMeters)
       ? `${fit.pairCount} samples @ ${fit.sampleStepMeters} m`
       : `${fit.pairCount} lap-aligned pairs`;
-    updateMapFitInfo(`Auto offset X=${fit.offsetX.toFixed(3)} m, Y=${fit.offsetY.toFixed(3)} m | Avg error ${fitErr} m (${fitDetail})${centerSuffix}`);
+    updateMapFitInfo(`Fit: X=${fit.offsetX.toFixed(3)} m, Y=${fit.offsetY.toFixed(3)} m | Avg error ${fitErr} m (${fitDetail})${centerSuffix}`);
+
+    updatePlot();
   }
 
   function findColumnIgnoreCase(cols, candidates) {
@@ -2971,6 +3095,7 @@
     if (!isApplyingAutoCenter) mapCenterManuallyAdjusted = true;
     updatePlot();
   });
+  if (mapFitBtn) mapFitBtn.addEventListener('click', () => runManualFit());
   if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorEnabledInput) {
     mapColorEnabledInput.addEventListener('change', () => {
@@ -3007,6 +3132,7 @@
         logs.splice(idx,1);
         mapOffsetManuallyAdjusted = false;
         lastAutoOffsetSignature = '';
+        lastTrackDefaultSignature = '';
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
@@ -3035,15 +3161,12 @@
     });
   }
 
-  plotBtn.addEventListener('click', ()=>{
-    updatePlot();
-  });
-
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
     mapOffsetManuallyAdjusted = false;
     mapCenterManuallyAdjusted = false;
     lastAutoOffsetSignature = '';
+    lastTrackDefaultSignature = '';
     if (mapCenterLatInput) mapCenterLatInput.value = '';
     if (mapCenterLonInput) mapCenterLonInput.value = '';
     updateMapFitInfo('');
@@ -3065,6 +3188,7 @@
   });
 
   loadChannelMapConfig();
+  loadTrackMapDefaultsConfig();
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
