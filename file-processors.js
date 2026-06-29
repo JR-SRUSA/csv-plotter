@@ -997,35 +997,52 @@
   function computeLapsFromBeacons(meta, beaconMarkers) {
     const t = meta._time || [];
     const d = meta._dist || [];
+
     const lapNum = [];
     const lapTime = [];
     const lapRelDist = [];
 
     let markerIdx = 0;
-    let currentLap = 0;
+    let lapStartDist = Number.isFinite(d[0]) ? d[0] : 0;
 
     for (let i = 0; i < t.length; i++) {
-      const tiRaw = t[i];
-      const ti = Number.isFinite(tiRaw) ? tiRaw : (i > 0 ? (Number.isFinite(t[i - 1]) ? t[i - 1] : 0) : 0);
+      const ti = Number.isFinite(t[i])
+        ? t[i]
+        : (i > 0 ? t[i - 1] : 0);
+      const di = Number.isFinite(d[i])
+        ? d[i]
+        : (i > 0 ? d[i - 1] : 0);
 
+      const prevMarkerIdx = markerIdx;
       while (markerIdx < beaconMarkers.length && ti >= beaconMarkers[markerIdx]) {
-        markerIdx += 1;
+        markerIdx++;
       }
-      currentLap = markerIdx;
+      if (markerIdx !== prevMarkerIdx) {
+        // A beacon was just crossed: the new lap's distance baseline starts here.
+        lapStartDist = di;
+      }
 
-      const lapStartTime = currentLap <= 0 ? 0 : beaconMarkers[currentLap - 1];
-      const lapStartDist = findLapStartDistanceByTime(meta, lapStartTime, i);
-      const di = d[i] != null ? d[i] : (i > 0 ? d[i - 1] : 0);
+      const lapStartTime = markerIdx > 0 ? beaconMarkers[markerIdx - 1] : 0;
 
-      lapNum.push(currentLap);
+      lapNum.push(markerIdx);
       lapTime.push(Math.max(0, ti - lapStartTime));
-      lapRelDist.push(Number.isFinite(di) && Number.isFinite(lapStartDist) ? (di - lapStartDist) : 0);
+      lapRelDist.push(di - lapStartDist);
     }
+
+    // Exact split/lap durations: the difference between consecutive beacon
+    // times themselves, not the nearest logged sample around the crossing.
+    // lapDurations[m] is the duration of the completed lap numbered m (i.e.
+    // the segment that ends when beaconMarkers[m] is crossed). The final,
+    // still-in-progress lap (lapNum === beaconMarkers.length) has no entry
+    // here since it has no closing beacon yet.
+    const lapDurations = beaconMarkers.map((bm, idx) => bm - (idx > 0 ? beaconMarkers[idx - 1] : 0));
 
     meta.lapNum = lapNum;
     meta.lapTime = lapTime;
     meta.lapRelDist = lapRelDist;
+    meta.lapDurations = lapDurations;
   }
+
 
   function findLapStartDistanceByTime(meta, lapStartTime, upToIndex) {
     const t = meta._time || [];
@@ -1066,10 +1083,13 @@
       }
 
       if (crossedSplitZone) {
-        const splitTime = interpCrossingTime(prevD, di, prevT, ti, LAP_SPLIT_DISTANCE_M) ?? ti;
+        // Use actual sample time (no interpolation)
+        const splitTime = ti;
+
         if (lapTime.length > 0) {
           lapTime[lapTime.length - 1] = splitTime - lapStartTime;
         }
+
         currentLap += 1;
         lapStartTime = splitTime;
         lapStartDist = 0;

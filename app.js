@@ -79,7 +79,7 @@
   let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
-  let lastLinkedHover = { key: null, source: null };
+  let lastLinkedHoverKey = null;
 
   function resizeVisualizations() {
     if (plotDiv && plotDiv.data) {
@@ -268,30 +268,52 @@
     if (typeof plotDiv.on !== 'function') return;
     plotDiv.__mapHoverSyncBound = true;
 
-    const isTimeSlipPoint = (point) => {
-      const trace = point && (point.fullData || point.data);
-      return !!(trace && (trace.xaxis === 'x2' || trace.yaxis === 'y2'));
-    };
-
-    const hoverLinkedSubplotByKey = (key, source) => {
+    // Shows the hover tooltip for a given row key on every subplot at once
+    // (main plot + time slip), not just the one the mouse is over. nativePoints
+    // is the point list Plotly already computed for the hovered subplot under
+    // hovermode='x' (one nearest point per trace there) — kept as-is so every
+    // trace on that subplot still appears, then extended with the exact-key
+    // match on every other subplot.
+    const hoverAllLinkedPointsByKey = (key, nativePoints) => {
       if (!plotDiv || !Array.isArray(plotDiv.data) || !key) return;
-      if (lastLinkedHover.key === key && lastLinkedHover.source === source) return;
+      if (lastLinkedHoverKey === key) return;
 
       const targetPoints = [];
+      const subplots = new Set();
+      const seen = new Set();
+
+      const addPoint = (curveNumber, pointNumber) => {
+        const seenKey = curveNumber + ':' + pointNumber;
+        if (seen.has(seenKey)) return;
+        seen.add(seenKey);
+        targetPoints.push({ curveNumber, pointNumber });
+        const trace = plotDiv.data[curveNumber];
+        if (trace) subplots.add((trace.xaxis || 'x') + (trace.yaxis || 'y'));
+      };
+
+      (nativePoints || []).forEach((p) => {
+        if (Number.isInteger(p.curveNumber) && Number.isInteger(p.pointNumber)) {
+          addPoint(p.curveNumber, p.pointNumber);
+        }
+      });
+
+      // Fx.hover defaults its subplot arg to 'xy' when omitted, which makes it
+      // look up points on the wrong axes (and crash on c2p) for any other
+      // subplot (e.g. the time slip's x2y2) — so every subplot we touch below
+      // must end up in `subplots`, passed explicitly to Fx.hover.
       plotDiv.data.forEach((trace, curveNumber) => {
         if (!trace || !Array.isArray(trace.customdata)) return;
-        const isTimeSlipTrace = (trace.xaxis === 'x2' || trace.yaxis === 'y2');
-        if ((source === 'main' && !isTimeSlipTrace) || (source === 'timeslip' && isTimeSlipTrace)) return;
-
+        const subplot = (trace.xaxis || 'x') + (trace.yaxis || 'y');
+        if (subplots.has(subplot)) return; // already covered by nativePoints above
         const pointNumber = trace.customdata.indexOf(key);
-        if (pointNumber >= 0) targetPoints.push({ curveNumber, pointNumber });
+        if (pointNumber >= 0) addPoint(curveNumber, pointNumber);
       });
 
       if (targetPoints.length === 0) return;
 
       isSyncingPlotHover = true;
-      Plotly.Fx.hover(plotDiv, targetPoints);
-      lastLinkedHover = { key, source };
+      Plotly.Fx.hover(plotDiv, targetPoints, Array.from(subplots));
+      lastLinkedHoverKey = key;
       requestAnimationFrame(() => { isSyncingPlotHover = false; });
     };
 
@@ -329,8 +351,7 @@
       showLeafletHoverMarker(key);
 
       if (isSyncingPlotHover) return;
-      const source = isTimeSlipPoint(point) ? 'timeslip' : 'main';
-      hoverLinkedSubplotByKey(key, source);
+      hoverAllLinkedPointsByKey(key, points);
     };
 
     plotDiv.on('plotly_hover', (eventData) => {
@@ -346,13 +367,13 @@
       if (isSyncingPlotHover) return;
       clearMapHoverMarker();
       clearLeafletHoverMarker();
-      lastLinkedHover = { key: null, source: null };
+      lastLinkedHoverKey = null;
     });
 
     plotDiv.on('plotly_doubleclick', () => {
       clearMapHoverMarker();
       clearLeafletHoverMarker();
-      lastLinkedHover = { key: null, source: null };
+      lastLinkedHoverKey = null;
       Plotly.Fx.unhover(plotDiv);
     });
   }
@@ -874,6 +895,27 @@
     }
   }
 
+  // Returns the duration of a given lap number for a log. For AiM/GP Bikes
+  // logs with beacon markers, this is the exact difference between the
+  // relevant beacon times (meta.lapDurations), not an approximation based on
+  // the nearest logged sample. Falls back to the largest observed per-row
+  // "Lap Time" value, which is the best available estimate for logs without
+  // beacon markers (laps inferred from distance).
+  function getLapDuration(meta, lapNum) {
+    if (!meta) return null;
+    if (Array.isArray(meta.lapDurations) && Number.isFinite(meta.lapDurations[lapNum])) {
+      return meta.lapDurations[lapNum];
+    }
+    let max = null;
+    (meta.lapNum || []).forEach((n, i) => {
+      if (n !== lapNum) return;
+      const lt = meta.lapTime && meta.lapTime[i];
+      if (lt == null || isNaN(lt)) return;
+      if (max == null || lt > max) max = lt;
+    });
+    return max;
+  }
+
   function renderLapsList() {
     const container = document.getElementById('lapsList');
     if (!container) return;
@@ -884,13 +926,9 @@
     sel.forEach(l => {
       if (l.meta && l.meta.lapNum) {
         l.meta.lapNum.forEach(n => lapSet.add(n));
-        const perLapMax = new Map();
-        l.meta.lapNum.forEach((n, i) => {
-          const lt = l.meta.lapTime && l.meta.lapTime[i];
-          if (lt == null || isNaN(lt)) return;
-          perLapMax.set(n, Math.max(perLapMax.get(n) || 0, lt));
-        });
-        perLapMax.forEach((duration, lap) => {
+        Array.from(new Set(l.meta.lapNum)).forEach(lap => {
+          const duration = getLapDuration(l.meta, lap);
+          if (duration == null || isNaN(duration)) return;
           // If multiple files are selected, show the best observed lap time for each lap number.
           if (!lapDurations.has(lap) || duration < lapDurations.get(lap)) {
             lapDurations.set(lap, duration);
@@ -916,18 +954,11 @@
     sel2.forEach(log => {
       const fileLaps = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       if (fileLaps.length === 0) return;
-      // compute per-file lap durations
-      const filelapDurations = new Map();
-      (log.meta.lapNum || []).forEach((n, i) => {
-        const lt = log.meta.lapTime && log.meta.lapTime[i];
-        if (lt == null || isNaN(lt)) return;
-        filelapDurations.set(n, Math.max(filelapDurations.get(n) || 0, lt));
-      });
       html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
       const totalFileLaps = fileLaps.length;
       fileLaps.forEach((n, idx) => {
         const color = colorForLap(n);
-        const dur = filelapDurations.get(n);
+        const dur = getLapDuration(log.meta, n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
         // Uncheck first and last lap (in/out laps) when there are 3 or more laps
         const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
@@ -1191,6 +1222,7 @@
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        if (!Array.isArray(log.meta.lapRelDist)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
         const tArr = maskIdx.map(i => log.meta.lapTime[i]);
