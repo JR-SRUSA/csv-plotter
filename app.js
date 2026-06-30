@@ -20,6 +20,16 @@
   const mapCenterLonInput = document.getElementById('mapCenterLon');
   const mapFitInfo = document.getElementById('mapFitInfo');
   const mapFitBtn = document.getElementById('mapFitBtn');
+  const addMathChannelBtn = document.getElementById('addMathChannelBtn');
+  const mathChannelsList = document.getElementById('mathChannelsList');
+  const mathChannelForm = document.getElementById('mathChannelForm');
+  const mathChName = document.getElementById('mathChName');
+  const mathChExpr = document.getElementById('mathChExpr');
+  const mathChUnit = document.getElementById('mathChUnit');
+  const mathChError = document.getElementById('mathChError');
+  const mathChSave = document.getElementById('mathChSave');
+  const mathChCancel = document.getElementById('mathChCancel');
+  const mathChSuggestions = document.getElementById('mathChSuggestions');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
@@ -53,6 +63,20 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
+  const mathChannels = []; // { name, expression, unit }
+
+  // Shorthand math names available in expressions (e.g. sin, cos, PI instead of Math.sin etc.)
+  const MATH_SCOPE = {
+    sin: Math.sin, cos: Math.cos, tan: Math.tan,
+    asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2,
+    sqrt: Math.sqrt, abs: Math.abs, pow: Math.pow,
+    log: Math.log, log2: Math.log2, log10: Math.log10, exp: Math.exp,
+    floor: Math.floor, ceil: Math.ceil, round: Math.round,
+    min: Math.min, max: Math.max, sign: Math.sign, hypot: Math.hypot,
+    PI: Math.PI, E: Math.E,
+  };
+  const MATH_SCOPE_KEYS = Object.keys(MATH_SCOPE);
+  const MATH_SCOPE_VALS = Object.values(MATH_SCOPE);
 
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
@@ -515,6 +539,7 @@
 
         addCalculatedCommonChannels(data, cols, meta);
         deriveAndExposeMapXY(data, cols, meta);
+        applyAllMathChannelsToLog({ data, cols, meta });
 
         // expose lap columns in data rows and cols list
         if (!cols.includes('Lap Time')) cols.push('Lap Time');
@@ -572,6 +597,80 @@
   }
 
   function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+  function applyMathChannelToLog(mc, log) {
+    const { name, expression, unit } = mc;
+    const refs = [];
+    const safe = expression.replace(/\{([^}]+)\}/g, (_, chName) => {
+      let idx = refs.indexOf(chName);
+      if (idx < 0) { idx = refs.length; refs.push(chName); }
+      return `__v${idx}__`;
+    });
+    let fn;
+    try {
+      fn = new Function(...refs.map((_, i) => `__v${i}__`), ...MATH_SCOPE_KEYS, `"use strict"; return (${safe});`);
+    } catch { return; }
+    // Resolve display names (e.g. "Speed") to the format-specific column name for this log
+    const resolvedRefs = refs.map(ch => resolveChannelForLog(ch, log));
+    if (!log.cols.includes(name)) log.cols.push(name);
+    log.data.forEach(row => {
+      const vals = resolvedRefs.map(col => { const v = Number(row[col]); return Number.isFinite(v) ? v : NaN; });
+      try {
+        const result = fn(...vals, ...MATH_SCOPE_VALS);
+        row[name] = Number.isFinite(result) ? result : null;
+      } catch { row[name] = null; }
+    });
+    if (!log.meta.units) log.meta.units = {};
+    log.meta.units[name] = unit || '';
+  }
+
+  function applyAllMathChannelsToLog(log) {
+    mathChannels.forEach(mc => applyMathChannelToLog(mc, log));
+  }
+
+  function renderMathChannelsList() {
+    if (!mathChannelsList) return;
+    mathChannelsList.innerHTML = mathChannels.map((mc, i) =>
+      `<div class="math-ch-item">` +
+      `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
+      `<span class="math-ch-expr">${escapeHtml(mc.expression)}</span>` +
+      `<button type="button" class="math-ch-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(mc.name)}">✕</button>` +
+      `</div>`
+    ).join('');
+  }
+
+  let mathChActiveSuggIdx = -1;
+
+  function getMathChAvailableChannels() {
+    const names = new Set();
+    getChannelMap().forEach(m => names.add(m.displayName));
+    logs.forEach(log => {
+      log.cols.forEach(col => {
+        const sample = log.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) { const v = sample[col]; if (typeof v === 'number' || !isNaN(Number(v))) names.add(col); }
+      });
+    });
+    mathChannels.forEach(mc => names.add(mc.name));
+    return Array.from(names).sort();
+  }
+
+  function hideMathChSuggestions() {
+    if (mathChSuggestions) mathChSuggestions.hidden = true;
+    mathChActiveSuggIdx = -1;
+  }
+
+  function applyMathChSuggestion(channelName) {
+    if (!mathChExpr || !mathChSuggestions) return;
+    const openBrace = Number(mathChSuggestions.dataset.openBrace);
+    const cursorPos = Number(mathChSuggestions.dataset.cursor);
+    const val = mathChExpr.value;
+    const newVal = val.slice(0, openBrace) + '{' + channelName + '}' + val.slice(cursorPos);
+    mathChExpr.value = newVal;
+    const newPos = openBrace + channelName.length + 2;
+    mathChExpr.setSelectionRange(newPos, newPos);
+    hideMathChSuggestions();
+    mathChExpr.focus();
+  }
 
   function getChannelMap() {
     return Array.isArray(channelMap) ? channelMap : [];
@@ -723,7 +822,9 @@
     const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
       let unit = '';
       for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
-      const label = unit ? `${c} [${unit}]` : c;
+      const isMathCh = mathChannels.some(mc => mc.name === c);
+      const suffix = isMathCh ? ' (math)' : '';
+      const label = unit ? `${c} [${unit}]${suffix}` : `${c}${suffix}`;
       return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
     });
     ySelect.innerHTML = mappedOptions.concat(rawOptions).join('');
@@ -3227,6 +3328,23 @@
   loadChannelMapConfig();
   loadTrackMapDefaultsConfig();
 
+  function saveMathChannels() {
+    try { localStorage.setItem('mathChannels', JSON.stringify(mathChannels)); } catch {}
+  }
+
+  (function loadMathChannels() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('mathChannels') || '[]');
+      if (!Array.isArray(saved)) return;
+      saved.forEach(mc => {
+        if (mc && typeof mc.name === 'string' && typeof mc.expression === 'string') {
+          mathChannels.push({ name: mc.name, expression: mc.expression, unit: mc.unit || '' });
+        }
+      });
+      if (mathChannels.length > 0) renderMathChannelsList();
+    } catch {}
+  })();
+
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
     xCustomSelect.disabled = !checkedMode || checkedMode.value !== 'custom';
@@ -3239,5 +3357,141 @@
   }
 
   setMapDisplayMode('none');
+
+  // Math channel UI handlers
+  function showMathChError(msg) {
+    if (mathChError) { mathChError.textContent = msg; mathChError.hidden = false; }
+  }
+
+  function resetMathChForm() {
+    if (mathChannelForm) mathChannelForm.hidden = true;
+    if (mathChName) mathChName.value = '';
+    if (mathChExpr) mathChExpr.value = '';
+    if (mathChUnit) mathChUnit.value = '';
+    if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
+    if (addMathChannelBtn) addMathChannelBtn.disabled = false;
+  }
+
+  if (addMathChannelBtn) {
+    addMathChannelBtn.addEventListener('click', () => {
+      if (mathChannelForm) mathChannelForm.hidden = false;
+      if (mathChName) mathChName.focus();
+      addMathChannelBtn.disabled = true;
+    });
+  }
+
+  if (mathChCancel) {
+    mathChCancel.addEventListener('click', resetMathChForm);
+  }
+
+  if (mathChSave) {
+    mathChSave.addEventListener('click', () => {
+      const name = mathChName ? mathChName.value.trim() : '';
+      const expression = mathChExpr ? mathChExpr.value.trim() : '';
+      const unit = mathChUnit ? mathChUnit.value.trim() : '';
+
+      if (!name) return showMathChError('Name is required.');
+      if (!expression) return showMathChError('Expression is required.');
+      if (mathChannels.some(mc => mc.name === name)) return showMathChError(`"${name}" already exists.`);
+      const existingCols = new Set();
+      logs.forEach(l => l.cols.forEach(c => existingCols.add(c)));
+      if (existingCols.has(name)) return showMathChError(`"${name}" conflicts with an existing column.`);
+
+      // Validate expression syntax with dummy values
+      try {
+        const testExpr = expression.replace(/\{[^}]+\}/g, '1');
+        new Function(...MATH_SCOPE_KEYS, `"use strict"; return (${testExpr});`)(...MATH_SCOPE_VALS);
+      } catch (e) {
+        return showMathChError(`Invalid expression: ${e.message}`);
+      }
+
+      const mc = { name, expression, unit };
+      mathChannels.push(mc);
+      saveMathChannels();
+      logs.forEach(log => applyMathChannelToLog(mc, log));
+      renderMathChannelsList();
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect();
+      updatePlot();
+      resetMathChForm();
+    });
+  }
+
+  if (mathChannelsList) {
+    mathChannelsList.addEventListener('click', ev => {
+      const btn = ev.target.closest('.math-ch-delete');
+      if (!btn) return;
+      const idx = Number(btn.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= mathChannels.length) return;
+      const removed = mathChannels.splice(idx, 1)[0];
+      saveMathChannels();
+      logs.forEach(log => {
+        const ci = log.cols.indexOf(removed.name);
+        if (ci >= 0) log.cols.splice(ci, 1);
+        log.data.forEach(row => { delete row[removed.name]; });
+        if (log.meta.units) delete log.meta.units[removed.name];
+      });
+      renderMathChannelsList();
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect();
+      updatePlot();
+    });
+  }
+
+  // Expression autocomplete
+  if (mathChExpr && mathChSuggestions) {
+    mathChExpr.addEventListener('input', () => {
+      const val = mathChExpr.value;
+      const pos = mathChExpr.selectionStart;
+      const before = val.slice(0, pos);
+      const openBrace = before.lastIndexOf('{');
+      if (openBrace < 0 || before.slice(openBrace).includes('}')) {
+        hideMathChSuggestions(); return;
+      }
+      const partial = before.slice(openBrace + 1).toLowerCase();
+      const matches = getMathChAvailableChannels().filter(c => c.toLowerCase().includes(partial));
+      if (matches.length === 0) { hideMathChSuggestions(); return; }
+      mathChSuggestions.dataset.openBrace = openBrace;
+      mathChSuggestions.dataset.cursor = pos;
+      mathChActiveSuggIdx = -1;
+      mathChSuggestions.innerHTML = matches
+        .map(m => `<div class="math-ch-suggestion" data-name="${escapeHtml(m)}">${escapeHtml(m)}</div>`)
+        .join('');
+      mathChSuggestions.hidden = false;
+    });
+
+    mathChExpr.addEventListener('keydown', ev => {
+      if (!mathChSuggestions || mathChSuggestions.hidden) return;
+      const items = mathChSuggestions.querySelectorAll('.math-ch-suggestion');
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        mathChActiveSuggIdx = Math.min(mathChActiveSuggIdx + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle('active', i === mathChActiveSuggIdx));
+        if (items[mathChActiveSuggIdx]) items[mathChActiveSuggIdx].scrollIntoView({ block: 'nearest' });
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        mathChActiveSuggIdx = Math.max(mathChActiveSuggIdx - 1, 0);
+        items.forEach((el, i) => el.classList.toggle('active', i === mathChActiveSuggIdx));
+        if (items[mathChActiveSuggIdx]) items[mathChActiveSuggIdx].scrollIntoView({ block: 'nearest' });
+      } else if (ev.key === 'Enter' && mathChActiveSuggIdx >= 0) {
+        ev.preventDefault();
+        const active = items[mathChActiveSuggIdx];
+        if (active) applyMathChSuggestion(active.dataset.name);
+      } else if (ev.key === 'Escape') {
+        hideMathChSuggestions();
+      }
+    });
+
+    mathChExpr.addEventListener('blur', () => setTimeout(hideMathChSuggestions, 150));
+
+    mathChSuggestions.addEventListener('mousedown', ev => {
+      const item = ev.target.closest('.math-ch-suggestion');
+      if (!item) return;
+      ev.preventDefault();
+      applyMathChSuggestion(item.dataset.name);
+    });
+  }
 
 })();

@@ -61,6 +61,34 @@
           <div id="selectedYColors" class="selected-y-colors"></div>
         </div>
 
+        <div class="math-channels-controls">
+          <div class="math-channels-header">
+            <strong>Math Channels:</strong>
+            <button id="addMathChannelBtn" type="button" class="math-ch-add-btn">+ Add</button>
+          </div>
+          <div id="mathChannelsList"></div>
+          <div id="mathChannelForm" hidden>
+            <div class="math-ch-field">
+              <label>Name</label>
+              <input id="mathChName" type="text" placeholder="e.g. Speed km/h" />
+            </div>
+            <div class="math-ch-field math-ch-expr-field">
+              <label>Expression (use {Channel Name})</label>
+              <input id="mathChExpr" type="text" placeholder="e.g. {Speed} * 3.6" autocomplete="off" />
+              <div id="mathChSuggestions" class="math-ch-suggestions" hidden></div>
+            </div>
+            <div class="math-ch-field">
+              <label>Unit (optional)</label>
+              <input id="mathChUnit" type="text" placeholder="e.g. km/h" style="width:50%" />
+            </div>
+            <div id="mathChError" class="math-ch-error" hidden></div>
+            <div class="math-ch-btns">
+              <button id="mathChSave" type="button">Add Channel</button>
+              <button id="mathChCancel" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+
         <div class="map-color-controls">
           <label><input type="checkbox" id="mapColorEnabled" checked /> Map Color</label>
           <select id="mapColorSelect" checked></select>
