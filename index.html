@@ -43,7 +43,7 @@
       <div id="lapsList" class="files-list" style="margin-top:8px"></div>
 
       <div style="margin-top:6px">
-        <label><input type="checkbox" id="shadeLaps" checked /> Shaded area between all laps</label>
+        <label><input type="checkbox" id="shadeLaps" /> Shaded area between all laps</label>
       </div>
 
       <div class="axis-controls">
@@ -62,10 +62,10 @@
         </div>
 
         <div class="map-color-controls">
-          <label><input type="checkbox" id="mapColorEnabled" /> Map Color</label>
-          <select id="mapColorSelect" disabled></select>
+          <label><input type="checkbox" id="mapColorEnabled" checked /> Map Color</label>
+          <select id="mapColorSelect" checked></select>
           <label>Colormap
-            <select id="mapColorMode" disabled>
+            <select id="mapColorMode">
               <option value="continuous">Continuous (Viridis)</option>
               <option value="divergent" selected>Divergent</option>
             </select>
@@ -91,7 +91,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-06-29b</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-06-30a</div>
     </section>
 
     <section class="plot">
@@ -110,5 +110,6 @@
   <script src="file-processors.js"></script>
   <script src="map-coordinate-utils.js"></script>
   <script src="app.js"></script>
+  <script src="resize-panels.js"></script>
 </body>
 </html>
