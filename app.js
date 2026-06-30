@@ -30,6 +30,7 @@
   const mathChSave = document.getElementById('mathChSave');
   const mathChCancel = document.getElementById('mathChCancel');
   const mathChSuggestions = document.getElementById('mathChSuggestions');
+  const mathChPreview = document.getElementById('mathChPreview');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
@@ -628,12 +629,15 @@
     mathChannels.forEach(mc => applyMathChannelToLog(mc, log));
   }
 
+  let mathChEditIdx = -1; // -1 = add mode, >=0 = editing existing channel
+
   function renderMathChannelsList() {
     if (!mathChannelsList) return;
     mathChannelsList.innerHTML = mathChannels.map((mc, i) =>
       `<div class="math-ch-item">` +
       `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
       `<span class="math-ch-expr">${escapeHtml(mc.expression)}</span>` +
+      `<button type="button" class="math-ch-edit" data-idx="${i}" aria-label="Edit ${escapeHtml(mc.name)}">✎</button>` +
       `<button type="button" class="math-ch-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(mc.name)}">✕</button>` +
       `</div>`
     ).join('');
@@ -670,6 +674,34 @@
     mathChExpr.setSelectionRange(newPos, newPos);
     hideMathChSuggestions();
     mathChExpr.focus();
+  }
+
+  // Returns { valid, sampleValue, error }
+  function testMathChannelExpression(expression) {
+    const refs = [];
+    const safe = expression.replace(/\{([^}]+)\}/g, (_, chName) => {
+      let idx = refs.indexOf(chName);
+      if (idx < 0) { idx = refs.length; refs.push(chName); }
+      return `__v${idx}__`;
+    });
+    let fn;
+    try {
+      fn = new Function(...refs.map((_, i) => `__v${i}__`), ...MATH_SCOPE_KEYS, `"use strict"; return (${safe});`);
+    } catch (e) {
+      return { valid: false, sampleValue: null, error: `Syntax error: ${e.message}` };
+    }
+    if (logs.length === 0) return { valid: true, sampleValue: null, error: null };
+    for (const log of logs) {
+      const resolvedRefs = refs.map(ch => resolveChannelForLog(ch, log));
+      for (const row of log.data) {
+        const vals = resolvedRefs.map(col => { const v = Number(row[col]); return Number.isFinite(v) ? v : NaN; });
+        try {
+          const result = fn(...vals, ...MATH_SCOPE_VALS);
+          if (Number.isFinite(result)) return { valid: true, sampleValue: result, error: null };
+        } catch {}
+      }
+    }
+    return { valid: false, sampleValue: null, error: 'No valid values — check that channel names match loaded data' };
   }
 
   function getChannelMap() {
@@ -3364,11 +3396,15 @@
   }
 
   function resetMathChForm() {
+    mathChEditIdx = -1;
     if (mathChannelForm) mathChannelForm.hidden = true;
     if (mathChName) mathChName.value = '';
     if (mathChExpr) mathChExpr.value = '';
     if (mathChUnit) mathChUnit.value = '';
     if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
+    if (mathChPreview) mathChPreview.hidden = true;
+    if (mathChSave) mathChSave.textContent = 'Add Channel';
+    if (mathChName) mathChName.disabled = false;
     if (addMathChannelBtn) addMathChannelBtn.disabled = false;
   }
 
@@ -3392,21 +3428,36 @@
 
       if (!name) return showMathChError('Name is required.');
       if (!expression) return showMathChError('Expression is required.');
-      if (mathChannels.some(mc => mc.name === name)) return showMathChError(`"${name}" already exists.`);
+
+      const isEditing = mathChEditIdx >= 0 && mathChEditIdx < mathChannels.length;
+      const editingOldName = isEditing ? mathChannels[mathChEditIdx].name : null;
+
+      if (mathChannels.some((mc, i) => mc.name === name && i !== mathChEditIdx))
+        return showMathChError(`"${name}" already exists.`);
       const existingCols = new Set();
       logs.forEach(l => l.cols.forEach(c => existingCols.add(c)));
-      if (existingCols.has(name)) return showMathChError(`"${name}" conflicts with an existing column.`);
+      if (existingCols.has(name) && name !== editingOldName)
+        return showMathChError(`"${name}" conflicts with an existing column.`);
 
-      // Validate expression syntax with dummy values
-      try {
-        const testExpr = expression.replace(/\{[^}]+\}/g, '1');
-        new Function(...MATH_SCOPE_KEYS, `"use strict"; return (${testExpr});`)(...MATH_SCOPE_VALS);
-      } catch (e) {
-        return showMathChError(`Invalid expression: ${e.message}`);
-      }
+      const testResult = testMathChannelExpression(expression);
+      if (!testResult.valid) return showMathChError(testResult.error);
 
       const mc = { name, expression, unit };
-      mathChannels.push(mc);
+
+      if (isEditing) {
+        // Remove old column data from all logs before re-applying with new definition
+        if (editingOldName && editingOldName !== name) {
+          logs.forEach(log => {
+            const ci = log.cols.indexOf(editingOldName);
+            if (ci >= 0) log.cols.splice(ci, 1);
+            log.data.forEach(row => { delete row[editingOldName]; });
+            if (log.meta.units) delete log.meta.units[editingOldName];
+          });
+        }
+        mathChannels[mathChEditIdx] = mc;
+      } else {
+        mathChannels.push(mc);
+      }
       saveMathChannels();
       logs.forEach(log => applyMathChannelToLog(mc, log));
       renderMathChannelsList();
@@ -3420,6 +3471,24 @@
 
   if (mathChannelsList) {
     mathChannelsList.addEventListener('click', ev => {
+      const editBtn = ev.target.closest('.math-ch-edit');
+      if (editBtn) {
+        const idx = Number(editBtn.dataset.idx);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= mathChannels.length) return;
+        const mc = mathChannels[idx];
+        mathChEditIdx = idx;
+        if (mathChName) { mathChName.value = mc.name; mathChName.disabled = true; }
+        if (mathChExpr) mathChExpr.value = mc.expression;
+        if (mathChUnit) mathChUnit.value = mc.unit || '';
+        if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
+        if (mathChPreview) mathChPreview.hidden = true;
+        if (mathChSave) mathChSave.textContent = 'Save Changes';
+        if (mathChannelForm) mathChannelForm.hidden = false;
+        if (addMathChannelBtn) addMathChannelBtn.disabled = true;
+        if (mathChExpr) mathChExpr.focus();
+        return;
+      }
+
       const btn = ev.target.closest('.math-ch-delete');
       if (!btn) return;
       const idx = Number(btn.dataset.idx);
@@ -3460,6 +3529,28 @@
         .map(m => `<div class="math-ch-suggestion" data-name="${escapeHtml(m)}">${escapeHtml(m)}</div>`)
         .join('');
       mathChSuggestions.hidden = false;
+    });
+
+    let mathChPreviewTimer = null;
+    mathChExpr.addEventListener('input', () => {
+      clearTimeout(mathChPreviewTimer);
+      if (!mathChPreview) return;
+      const expr = mathChExpr.value.trim();
+      if (!expr) { mathChPreview.hidden = true; return; }
+      mathChPreviewTimer = setTimeout(() => {
+        const result = testMathChannelExpression(expr);
+        if (result.error) {
+          mathChPreview.textContent = result.error;
+          mathChPreview.className = 'math-ch-preview math-ch-preview-error';
+        } else if (result.sampleValue !== null) {
+          mathChPreview.textContent = `✓ Sample value: ${+result.sampleValue.toPrecision(5)}`;
+          mathChPreview.className = 'math-ch-preview math-ch-preview-ok';
+        } else {
+          mathChPreview.textContent = 'Syntax OK — load a file to validate values';
+          mathChPreview.className = 'math-ch-preview math-ch-preview-neutral';
+        }
+        mathChPreview.hidden = false;
+      }, 300);
     });
 
     mathChExpr.addEventListener('keydown', ev => {
