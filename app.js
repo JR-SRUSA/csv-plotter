@@ -2251,11 +2251,12 @@
         crs: L.CRS.Simple,
         zoomSnap: 0,
         zoomDelta: 0.5,
-        minZoom: -6
+        minZoom: -6,
+        zoomControl: false
       }).setView([0, 0], 0);
     } else {
       // Geo mode with map tiles.
-      leafletMap = L.map(leafletMapDiv).setView([40.0, -75.0], 10);
+      leafletMap = L.map(leafletMapDiv, { zoomControl: false }).setView([40.0, -75.0], 10);
 
       const satelliteLayer = L.tileLayer(
         'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
@@ -2284,6 +2285,8 @@
         { position: 'topright' }
       ).addTo(leafletMap);
     }
+
+    L.control.zoom({ position: 'bottomleft' }).addTo(leafletMap);
 
     leafletMap.on('moveend zoomend', () => {
       if (isApplyingLeafletProgrammaticView) return;
@@ -2495,7 +2498,7 @@
       sampleColors.push(getLeafletColorForValue(value, scaleConfig) || '#888888');
     }
 
-    const control = L.control({ position: 'topright' });
+    const control = L.control({ position: 'topleft' });
     control.onAdd = () => {
       const div = L.DomUtil.create('div', 'leaflet-map-color-legend');
       const gradient = `linear-gradient(to right, ${sampleColors.join(',')})`;
