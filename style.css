@@ -31,6 +31,8 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .math-ch-item{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px dashed #eee;font-size:0.85em}
 .math-ch-name{font-weight:600;flex:0 0 auto;max-width:40%;overflow-wrap:anywhere}
 .math-ch-expr{flex:1;color:#5a6b82;overflow-wrap:anywhere;font-family:monospace;font-size:0.92em}
+.math-ch-edit{padding:2px 6px;font-size:0.8em;flex:0 0 auto;color:#1a4b8c;border-color:#c8d8f8;background:#f0f5ff}
+.math-ch-edit:hover{background:#deeaff}
 .math-ch-delete{padding:2px 6px;font-size:0.8em;flex:0 0 auto;color:#c00;border-color:#f8c8c8;background:#fff5f5}
 .math-ch-delete:hover{background:#ffe0e0}
 #mathChannelForm{border:1px solid #e0e8f0;border-radius:4px;padding:8px;background:#f7f9fb;margin-top:6px}
@@ -39,6 +41,10 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .math-ch-field input{width:100%}
 .math-ch-error{color:#c00;font-size:0.83em;margin-bottom:6px}
 .math-ch-btns{display:flex;gap:8px}
+.math-ch-preview{font-size:0.83em;padding:4px 6px;border-radius:3px;margin-bottom:6px}
+.math-ch-preview-ok{color:#1a6b2a;background:#edfbf0;border:1px solid #b3e8c0}
+.math-ch-preview-error{color:#8b1a1a;background:#fff5f5;border:1px solid #f8c8c8}
+.math-ch-preview-neutral{color:#5a6b82;background:#f1f5fb;border:1px solid #dde6f0}
 .math-ch-expr-field{position:relative}
 .math-ch-suggestions{position:absolute;z-index:200;left:0;top:100%;width:100%;background:#fff;border:1px solid #cbd6e2;border-radius:4px;box-shadow:0 2px 8px rgba(10,20,40,0.12);max-height:160px;overflow-y:auto}
 .math-ch-suggestion{padding:5px 10px;cursor:pointer;font-size:0.88em;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
