@@ -3102,8 +3102,10 @@
   // event handlers
   fileInput.addEventListener('change', (ev)=>{
     const files = Array.from(ev.target.files || []);
+    const wasEmpty = logs.length === 0;
     files.forEach(f => parseFile(f));
     fileInput.value = '';
+    if (files.length > 0 && wasEmpty && window.innerWidth <= 980) setControlsOpen(false);
   });
 
   // replot when X axis mode changes
