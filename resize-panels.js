@@ -4,6 +4,7 @@
 (function () {
   'use strict';
 
+  var STORAGE_KEY = 'csv-plotter-panel-sizes';
   var mq = window.matchMedia('(min-width: 981px)');
   var ready = false;
 
@@ -21,7 +22,7 @@
     document.head.appendChild(s);
   }
 
-  function makeDrag(el, cursor, onStart, onMove) {
+  function makeDrag(el, cursor, onStart, onMove, onEnd) {
     el.addEventListener('mousedown', function (e) {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -37,6 +38,7 @@
         el.classList.remove('rs-dragging');
         document.body.style.cursor = '';
         window.dispatchEvent(new Event('resize'));
+        if (onEnd) onEnd();
       }
       document.addEventListener('mousemove', mv);
       document.addEventListener('mouseup', up);
@@ -55,6 +57,16 @@
     ready = true;
     injectStyles();
 
+    function saveSizes() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          sidebarWidth: parseInt(controls.style.width) || null,
+          mapsWidth: Math.round(mapsEl.getBoundingClientRect().width) || null,
+          plotHeight: parseInt(plotDiv.style.height) || null
+        }));
+      } catch (e) {}
+    }
+
     // 1. Sidebar width — drag right edge of .controls
     controls.style.position = 'relative';
     var sw = document.createElement('div');
@@ -62,7 +74,8 @@
     controls.appendChild(sw);
     makeDrag(sw, 'col-resize',
       function () { return controls.getBoundingClientRect().width; },
-      function (dx, _, w0) { controls.style.width = clamp(w0 + dx, 200, 600) + 'px'; }
+      function (dx, _, w0) { controls.style.width = clamp(w0 + dx, 200, 600) + 'px'; },
+      saveSizes
     );
 
     // 2. Plot/Maps column split — insert a drag handle between the two grid cells
@@ -80,7 +93,8 @@
 
     makeDrag(gapDiv, 'col-resize',
       function () { return Math.round(mapsEl.getBoundingClientRect().width); },
-      function (dx, _, w0) { setMapsCols(clamp(w0 - dx, 180, 700)); }
+      function (dx, _, w0) { setMapsCols(clamp(w0 - dx, 180, 700)); },
+      saveSizes
     );
 
     // 3. Plot height — drag bottom edge of #plotDiv
@@ -90,8 +104,20 @@
     plotDiv.appendChild(ph);
     makeDrag(ph, 'row-resize',
       function () { return plotDiv.getBoundingClientRect().height; },
-      function (_, dy, h0) { plotDiv.style.height = Math.max(200, h0 + dy) + 'px'; }
+      function (_, dy, h0) { plotDiv.style.height = Math.max(200, h0 + dy) + 'px'; },
+      saveSizes
     );
+
+    // Restore saved sizes
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        var sizes = JSON.parse(raw);
+        if (sizes.sidebarWidth) controls.style.width = sizes.sidebarWidth + 'px';
+        if (sizes.mapsWidth) setMapsCols(sizes.mapsWidth);
+        if (sizes.plotHeight) plotDiv.style.height = sizes.plotHeight + 'px';
+      }
+    } catch (e) {}
   }
 
   function teardown() {
