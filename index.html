@@ -46,6 +46,15 @@
         <label><input type="checkbox" id="shadeLaps" /> Shaded area between all laps</label>
       </div>
 
+      <div class="corner-detect-controls">
+        <label><input type="checkbox" id="showCorners" checked /> Show Corners</label>
+        <!-- <label>Shading opacity (%)
+          <input id="cornerShadeOpacity" type="number" min="0" max="100" step="1" value="5" />
+        </label>
+        <label><input type="checkbox" id="cornerSwapLR" /> Swap left/right</label> -->
+        <div id="cornerTrackInfo" class="corner-track-info" aria-live="polite"></div>
+      </div>
+
       <div class="axis-controls">
         <div>
           <strong>X Axis:</strong>
