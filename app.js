@@ -7,6 +7,10 @@
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
   const mapColorModeSelect = document.getElementById('mapColorMode');
+  const showCornersInput = document.getElementById('showCorners');
+  const cornerShadeOpacityInput = document.getElementById('cornerShadeOpacity');
+  const cornerSwapLRInput = document.getElementById('cornerSwapLR');
+  const cornerTrackInfoDiv = document.getElementById('cornerTrackInfo');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -47,6 +51,7 @@
   const TURN_CLASSIFICATION_THRESHOLD_G = 0.25;
   const TURN_CLASSIFICATION_CENTER_WINDOW_SEC = 0.6;
   const TURN_FILTER_FALLBACK_RADIUS_SAMPLES = 3;
+  const TURN_MIN_SUSTAINED_SEC = 0.35;
   const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
   const DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS = [];
@@ -81,6 +86,11 @@
 
   const COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
   const DASHES = ['solid','dash','dot','dashdot','longdash','longdashdot'];
+  const CORNER_STRAIGHT_COLOR = COLORS[2]; // green
+  const CORNER_RIGHT_COLOR = COLORS[1]; // orange
+  const CORNER_LEFT_COLOR = COLORS[4]; // purple
+  const CORNER_STRIP_DOMAIN = [0.96, 1];
+  const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
   let isApplyingAutoOffset = false;
@@ -1284,12 +1294,58 @@
       return weightTotal > 0 ? (weightedSum / weightTotal) : centerLat;
     };
 
+    // Debounces the raw on/off turn signal so a state change only "sticks" once it has held
+    // continuously for at least minSustainedSec; a flip that reverts before then is ignored,
+    // which both drops brief blips and bridges brief dropouts within an ongoing turn.
+    const applyMinSustainedTurnState = (rawStates, canUseTime, minSustainedSec) => {
+      const n = rawStates.length;
+      const result = new Array(n);
+      if (n === 0) return result;
+      if (!canUseTime || !(minSustainedSec > 0)) {
+        for (let i = 0; i < n; i++) result[i] = rawStates[i];
+        return result;
+      }
+
+      let stableState = rawStates[0];
+      let i = 0;
+      while (i < n) {
+        const segValue = rawStates[i];
+        let j = i;
+        while (j + 1 < n && rawStates[j + 1] === segValue) j++;
+
+        if (segValue !== stableState) {
+          const segStartTime = timeValues[i];
+          const segEndTime = (j + 1 < n) ? timeValues[j + 1] : timeValues[j];
+          const duration = (Number.isFinite(segStartTime) && Number.isFinite(segEndTime))
+            ? (segEndTime - segStartTime)
+            : 0;
+          if (duration >= minSustainedSec) stableState = segValue;
+        }
+        for (let k = i; k <= j; k++) result[k] = stableState;
+
+        i = j + 1;
+      }
+
+      return result;
+    };
+
     if (!cols.includes(TURN_LATACC_CENTER_AVG_CALC_CHANNEL)) cols.push(TURN_LATACC_CENTER_AVG_CALC_CHANNEL);
     if (!cols.includes(TURN_STATE_CALC_CHANNEL)) cols.push(TURN_STATE_CALC_CHANNEL);
     if (!cols.includes(TURN_DIRECTION_SIGNED_CALC_CHANNEL)) cols.push(TURN_DIRECTION_SIGNED_CALC_CHANNEL);
 
+    const minSustainedSec = Math.max(0, Number(TURN_MIN_SUSTAINED_SEC));
+    const filteredLatAccValues = data.map((row, index) => getFilteredLatAcc(index));
+    const rawTurnStates = filteredLatAccValues.map((filteredLatAcc) => (
+      Number.isFinite(filteredLatAcc) && Math.abs(filteredLatAcc) >= thresholdG
+    ));
+    const stableTurnStates = applyMinSustainedTurnState(
+      rawTurnStates,
+      hasFiniteTime && isMonotonicTime,
+      minSustainedSec
+    );
+
     data.forEach((row, index) => {
-      const filteredLatAcc = getFilteredLatAcc(index);
+      const filteredLatAcc = filteredLatAccValues[index];
       row[TURN_LATACC_CENTER_AVG_CALC_CHANNEL] = Number.isFinite(filteredLatAcc) ? filteredLatAcc : null;
       if (!Number.isFinite(filteredLatAcc)) {
         row[TURN_STATE_CALC_CHANNEL] = 0;
@@ -1297,7 +1353,7 @@
         return;
       }
 
-      const isTurning = Math.abs(filteredLatAcc) >= thresholdG;
+      const isTurning = stableTurnStates[index];
       row[TURN_STATE_CALC_CHANNEL] = isTurning ? 1 : 0;
       row[TURN_DIRECTION_SIGNED_CALC_CHANNEL] = isTurning ? (filteredLatAcc >= 0 ? 1 : -1) : 0;
     });
@@ -1306,6 +1362,56 @@
     meta.units[TURN_LATACC_CENTER_AVG_CALC_CHANNEL] = 'g';
     meta.units[TURN_STATE_CALC_CHANNEL] = '';
     meta.units[TURN_DIRECTION_SIGNED_CALC_CHANNEL] = '';
+  }
+
+  // Walks one lap's Turn State/Direction (calc) channels in distance order and collapses
+  // consecutive rows into straight/left/right segments. Corners are treated as a track
+  // property, so this runs once against a single reference lap rather than per displayed lap.
+  function computeCornerSegments(log, lap, swapLeftRight) {
+    if (!log || !log.meta || !Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist)) return null;
+    if (!Array.isArray(log.cols) || !log.cols.includes(TURN_STATE_CALC_CHANNEL) || !log.cols.includes(TURN_DIRECTION_SIGNED_CALC_CHANNEL)) return null;
+
+    const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+    if (maskIdx.length < 2) return null;
+
+    const rows = maskIdx
+      .map(i => ({
+        dist: Number(log.meta.lapRelDist[i]),
+        isTurning: Number(log.data[i][TURN_STATE_CALC_CHANNEL]) === 1,
+        dirSign: Number(log.data[i][TURN_DIRECTION_SIGNED_CALC_CHANNEL]) || 0
+      }))
+      .filter(r => Number.isFinite(r.dist))
+      .sort((a, b) => a.dist - b.dist);
+    if (rows.length < 2) return null;
+
+    const typeForRow = (r) => {
+      if (!r.isTurning || r.dirSign === 0) return 'straight';
+      const isRight = swapLeftRight ? r.dirSign < 0 : r.dirSign > 0;
+      return isRight ? 'right' : 'left';
+    };
+
+    const segments = [];
+    let segType = typeForRow(rows[0]);
+    let segStart = rows[0].dist;
+    for (let i = 1; i < rows.length; i++) {
+      const t = typeForRow(rows[i]);
+      if (t !== segType) {
+        segments.push({ startDist: segStart, endDist: rows[i].dist, type: segType });
+        segType = t;
+        segStart = rows[i].dist;
+      }
+    }
+    segments.push({ startDist: segStart, endDist: rows[rows.length - 1].dist, type: segType });
+
+    let cornerNum = 0;
+    segments.forEach(seg => {
+      if (seg.type === 'left' || seg.type === 'right') {
+        cornerNum += 1;
+        seg.number = cornerNum;
+      }
+    });
+
+    return { segments, trackLength: rows[rows.length - 1].dist };
   }
 
   // Linear interpolation over a sorted X array.
@@ -3009,9 +3115,10 @@
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
 
-  function buildLayout(mainXTitle, ycols, includeTimeSlip) {
+  function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip) {
     const mobile = window.innerWidth <= 980;
-    const mainDomain = includeTimeSlip ? (mobile ? [0.48,1] : [0.23,1]) : [0,1];
+    const mainDomainTop = showCornerStrip ? (CORNER_STRIP_DOMAIN[0] - CORNER_STRIP_GAP) : 1;
+    const mainDomain = includeTimeSlip ? (mobile ? [0.48,mainDomainTop] : [0.23,mainDomainTop]) : [0,mainDomainTop];
     const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
 
@@ -3025,7 +3132,7 @@
       layout.margin.l = axisCfg.marginLeft;
       layout.margin.r = axisCfg.marginRight;
       Object.assign(layout, axisCfg.axisLayout);
-      return {layout, channelToRef: axisCfg.channelToRef};
+      return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop};
     }
 
     const layout = {
@@ -3039,7 +3146,7 @@
     layout.margin.l = axisCfg.marginLeft;
     layout.margin.r = axisCfg.marginRight;
     Object.assign(layout, axisCfg.axisLayout);
-    return {layout, channelToRef: axisCfg.channelToRef};
+    return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop};
   }
 
   function getXSeriesForMode(log, maskIdx, xMode, customXCol) {
@@ -3083,6 +3190,137 @@
     };
   }
 
+  // Picks the reference (log, lap) used to auto-detect corners: among all currently
+  // selected laps, the one that covers the greatest lap distance. Corners are a track
+  // property, so we deliberately compute from a single lap rather than per displayed lap;
+  // using the longest-distance lap (rather than just the lowest lap number) keeps a short
+  // partial out/in lap from being picked when in/out-lap exclusion doesn't apply (e.g. logs
+  // with fewer than 3 laps, where nothing gets auto-unchecked).
+  function getReferenceLapForCorners(selFiles, selectedLaps) {
+    let best = null;
+    let bestSpan = -Infinity;
+    selFiles.forEach(log => {
+      if (!Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist)) return;
+      const lapNums = Array.from(new Set(log.meta.lapNum));
+      lapNums.forEach(lap => {
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        const dists = log.meta.lapNum
+          .map((n, i) => n === lap ? Number(log.meta.lapRelDist[i]) : NaN)
+          .filter(Number.isFinite);
+        if (dists.length < 2) return;
+        const span = Math.max(...dists) - Math.min(...dists);
+        if (span > bestSpan) {
+          bestSpan = span;
+          best = { log, lap };
+        }
+      });
+    });
+    return best;
+  }
+
+  function buildCornerShapesAndAnnotations(cornerData, mainDomainTop, shadeOpacityPct) {
+    const shapes = [];
+    const annotations = [];
+    if (!cornerData || !Array.isArray(cornerData.segments)) return { shapes, annotations };
+
+    const colorForType = (type) => {
+      if (type === 'right') return CORNER_RIGHT_COLOR;
+      if (type === 'left') return CORNER_LEFT_COLOR;
+      return CORNER_STRAIGHT_COLOR;
+    };
+    const shadeOpacity = Math.max(0, Math.min(100, Number(shadeOpacityPct))) / 100;
+
+    cornerData.segments.forEach(seg => {
+      const color = colorForType(seg.type);
+
+      // Strip block (always drawn, straights included).
+      shapes.push({
+        type: 'rect', xref: 'x', yref: 'paper',
+        x0: seg.startDist, x1: seg.endDist,
+        y0: CORNER_STRIP_DOMAIN[0], y1: CORNER_STRIP_DOMAIN[1],
+        fillcolor: color, opacity: 1, line: { width: 0.5, color: '#fff' }, layer: 'above'
+      });
+
+      // Faint full-height shading over corner zones only.
+      if (seg.type === 'left' || seg.type === 'right') {
+        shapes.push({
+          type: 'rect', xref: 'x', yref: 'paper',
+          x0: seg.startDist, x1: seg.endDist,
+          y0: 0, y1: mainDomainTop,
+          fillcolor: color, opacity: shadeOpacity, line: { width: 0 }, layer: 'below'
+        });
+
+        annotations.push({
+          x: (seg.startDist + seg.endDist) / 2, xref: 'x',
+          y: (CORNER_STRIP_DOMAIN[0] + CORNER_STRIP_DOMAIN[1]) / 2, yref: 'paper',
+          text: String(seg.number), showarrow: false,
+          font: { color: '#fff', size: 11 }
+        });
+      }
+    });
+
+    return { shapes, annotations };
+  }
+
+  function computeCornerTotals(cornerData) {
+    const totals = { straightLength: 0, leftLength: 0, rightLength: 0, cornerLength: 0, cornerCount: 0 };
+    if (!cornerData || !Array.isArray(cornerData.segments)) return totals;
+    cornerData.segments.forEach(seg => {
+      const len = Math.max(0, seg.endDist - seg.startDist);
+      if (seg.type === 'left') { totals.leftLength += len; totals.cornerCount += 1; }
+      else if (seg.type === 'right') { totals.rightLength += len; totals.cornerCount += 1; }
+      else totals.straightLength += len;
+    });
+    totals.cornerLength = totals.leftLength + totals.rightLength;
+    return totals;
+  }
+
+  function formatCornerSummary(venue, cornerData, totals) {
+    const trackLength = cornerData.trackLength;
+    const pct = (v) => trackLength > 0 ? Math.round((v / trackLength) * 100) : 0;
+    const venueLabel = venue || 'Track';
+    return `${venueLabel} — ${trackLength.toFixed(0)/1000} km total | `
+      + `Straights ${totals.straightLength.toFixed(0)} m (${pct(totals.straightLength)}%) | `
+      + `Left ${totals.leftLength.toFixed(0)} m (${pct(totals.leftLength)}%) | `
+      + `Right ${totals.rightLength.toFixed(0)} m (${pct(totals.rightLength)}%) | `
+      + `Corners ${totals.cornerLength.toFixed(0)} m (${pct(totals.cornerLength)}%), ${totals.cornerCount} total`;
+  }
+
+  const TRACK_CORNER_METADATA_STORAGE_KEY = 'trackCornerMetadata';
+  let lastSavedCornerMetadataSignature = '';
+
+  function loadTrackCornerMetadataStore() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(TRACK_CORNER_METADATA_STORAGE_KEY) || '{}');
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  // Persists the auto-detected corner marks + summary totals for a venue to localStorage,
+  // keyed by normalized venue name, so per-track corner data accumulates across sessions.
+  function saveCornerMetadataForVenue(venue, cornerData, totals) {
+    const venueKey = normalizeVenueKey(venue);
+    if (!venueKey || !cornerData) return;
+
+    const entry = {
+      venue,
+      trackLength: cornerData.trackLength,
+      segments: cornerData.segments.map(s => ({ number: s.number || null, type: s.type, startDist: s.startDist, endDist: s.endDist })),
+      totals,
+      savedAt: new Date().toISOString()
+    };
+
+    const signature = venueKey + '|' + JSON.stringify(entry.segments);
+    if (signature === lastSavedCornerMetadataSignature) return;
+    lastSavedCornerMetadataSignature = signature;
+
+    const store = loadTrackCornerMetadataStore();
+    store[venueKey] = entry;
+    try { localStorage.setItem(TRACK_CORNER_METADATA_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const ycols = getSelectedY();
@@ -3099,13 +3337,42 @@
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
-    const built = buildLayout(mainXTitle, ycols, includeTimeSlip);
+
+    const cornersEnabled = !!(showCornersInput && showCornersInput.checked);
+    let cornerData = null;
+    let cornerRef = null;
+    if (cornersEnabled && xMode === 'distance') {
+      cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
+      if (cornerRef) {
+        const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
+        cornerData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+      }
+    }
+    const showCornerStrip = !!(cornerData && cornerData.segments.length > 0);
+
+    const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip);
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
     layout.hovermode = 'x';
     layout.hoverlabel = { namelength: -1 };
     layout.hoverdistance = 40;
+
+    if (showCornerStrip) {
+      const shadeOpacityPct = cornerShadeOpacityInput ? Number(cornerShadeOpacityInput.value) : 10;
+      const cornerVis = buildCornerShapesAndAnnotations(cornerData, built.mainDomainTop, shadeOpacityPct);
+      layout.shapes = cornerVis.shapes;
+      layout.annotations = cornerVis.annotations;
+
+      const cornerTotals = computeCornerTotals(cornerData);
+      const cornerVenue = getLogVenue(cornerRef.log);
+      saveCornerMetadataForVenue(cornerVenue, cornerData, cornerTotals);
+      if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = formatCornerSummary(cornerVenue, cornerData, cornerTotals);
+    } else {
+      layout.shapes = [];
+      layout.annotations = [];
+      if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
+    }
 
     if (plotDiv && Number.isFinite(layout.height)) {
       plotDiv.style.height = `${layout.height}px`;
@@ -3249,6 +3516,9 @@
   }));
   const shadeBox = document.getElementById('shadeLaps');
   if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
+  if (showCornersInput) showCornersInput.addEventListener('change', ()=> updatePlot());
+  if (cornerShadeOpacityInput) cornerShadeOpacityInput.addEventListener('input', ()=> updatePlot());
+  if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();
