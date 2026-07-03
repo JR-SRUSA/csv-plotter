@@ -49,6 +49,9 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .math-ch-suggestions{position:absolute;z-index:200;left:0;top:100%;width:100%;background:#fff;border:1px solid #cbd6e2;border-radius:4px;box-shadow:0 2px 8px rgba(10,20,40,0.12);max-height:160px;overflow-y:auto}
 .math-ch-suggestion{padding:5px 10px;cursor:pointer;font-size:0.88em;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .math-ch-suggestion:hover,.math-ch-suggestion.active{background:#e6f0fb}
+.corner-detect-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
+.corner-detect-controls input[type=number]{width:70px;margin-left:6px}
+.corner-track-info{font-size:12px;color:#5a6b82;min-height:16px}
 .map-color-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .map-color-controls select{width:100%}
 .map-align-controls{padding-top:6px;border-top:1px dashed #e7edf5}
