@@ -66,3 +66,86 @@ test('calculates Total Acceleration (calc) for AiM rows', () => {
   assert.equal(processed.data[2][total], null);
   assert.equal(processed.units[total], 'g');
 });
+
+test('AVAILABLE_DECODERS is exported and contains expected decoders', () => {
+  const processors = loadLogFileProcessors();
+  assert.ok(processors, 'LogFileProcessors should be defined');
+  assert.ok(Array.isArray(processors.AVAILABLE_DECODERS), 'AVAILABLE_DECODERS should be an array');
+
+  const names = processors.AVAILABLE_DECODERS.map(d => d.name);
+  for (const expected of ['GP Bikes', 'AiM', 'MoTeC', 'VIGrade', 'ScanMyTesla', 'Standard', 'Generic']) {
+    assert.ok(names.includes(expected), `AVAILABLE_DECODERS should include "${expected}"`);
+  }
+
+  processors.AVAILABLE_DECODERS.forEach(d => {
+    assert.ok(typeof d.name === 'string' && d.name.length > 0, 'Each decoder entry should have a non-empty name');
+    assert.ok(typeof d.label === 'string' && d.label.length > 0, 'Each decoder entry should have a non-empty label');
+  });
+});
+
+test('processCsvRowsWithDecoder is exported', () => {
+  const processors = loadLogFileProcessors();
+  assert.ok(processors, 'LogFileProcessors should be defined');
+  assert.ok(typeof processors.processCsvRowsWithDecoder === 'function', 'processCsvRowsWithDecoder should be a function');
+});
+
+test('processCsvRowsWithDecoder forces GP Bikes decoder on a standard CSV', () => {
+  const processors = loadLogFileProcessors();
+
+  // Standard CSV rows (no format metadata header)
+  const rows = [
+    ['Time', 'Speed', 'RPM'],
+    [0, 50, 3000],
+    [1, 60, 3500],
+    [2, 70, 4000]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'GP Bikes');
+  assert.ok(processed, 'processCsvRowsWithDecoder should return a processed payload');
+  assert.ok(Array.isArray(processed.data), 'should have data array');
+  assert.ok(Array.isArray(processed.cols), 'should have cols array');
+  assert.equal(processed.meta.source, 'GP Bikes', 'source should be GP Bikes');
+});
+
+test('processCsvRowsWithDecoder forces AiM decoder', () => {
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Time', 'GPS Speed', 'GPS LatAcc'],
+    ['s', 'km/h', 'g'],
+    [0, 100, 0.5],
+    [1, 110, 0.3]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'AiM');
+  assert.ok(processed, 'processCsvRowsWithDecoder should return a payload for AiM decoder');
+  assert.equal(processed.meta.source, 'AiM', 'source should be AiM');
+});
+
+test('processCsvRowsWithDecoder forces Standard decoder', () => {
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Time', 'Speed', 'RPM'],
+    [0, 50, 3000],
+    [1, 60, 3500]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'Standard');
+  assert.ok(processed, 'processCsvRowsWithDecoder should return a payload for Standard decoder');
+  assert.equal(processed.meta.source, 'Standard CSV', 'source should be Standard CSV');
+});
+
+test('processCsvRowsWithDecoder falls back to auto-detect for unknown decoder name', () => {
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Time', 'Speed'],
+    [0, 50],
+    [1, 60]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'NotARealDecoder');
+  assert.ok(processed, 'processCsvRowsWithDecoder should return a payload even for unknown decoder');
+  assert.ok(Array.isArray(processed.data), 'should have data array');
+});
