@@ -513,6 +513,133 @@
     return name.replace(/[^a-z0-9]+/ig, '_') + '_' + Math.random().toString(36).slice(2,8);
   }
 
+  function resolveDecoderName(meta, forcedDecoderName = '') {
+    if (forcedDecoderName) return forcedDecoderName;
+    const decoderValue = (meta && typeof meta.decoder === 'string') ? meta.decoder.trim() : '';
+    if (decoderValue) return decoderValue;
+
+    const sourceValue = (meta && typeof meta.source === 'string') ? meta.source.trim() : '';
+    if (!sourceValue) return '';
+
+    const availableDecoders = (window.LogFileProcessors && window.LogFileProcessors.AVAILABLE_DECODERS)
+      ? window.LogFileProcessors.AVAILABLE_DECODERS
+      : [];
+    const sourceLower = sourceValue.toLowerCase();
+    const matched = availableDecoders.find((decoder) => {
+      const name = decoder && typeof decoder.name === 'string' ? decoder.name.toLowerCase() : '';
+      const label = decoder && typeof decoder.label === 'string' ? decoder.label.toLowerCase() : '';
+      return name === sourceLower || label === sourceLower;
+    });
+    return matched ? matched.name : '';
+  }
+
+  function buildLogRecord(id, name, processed, rawRows, forcedDecoderName = '') {
+    const data = processed.data;
+    const cols = [...processed.cols];
+    const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
+    const meta = processed.meta || {};
+    meta.units = meta.units && typeof meta.units === 'object' ? meta.units : units;
+
+    const decoderName = resolveDecoderName(meta, forcedDecoderName);
+    if (decoderName) {
+      meta.decoder = decoderName;
+      // Use the selected decoder as source so mapped channel names resolve correctly.
+      meta.source = decoderName;
+    }
+
+    const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
+      ? meta.lapNum
+      : data.map(() => 1);
+    const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
+      ? meta.lapTime
+      : data.map((_, i) => i);
+
+    meta.lapNum = lapNum;
+    meta.lapTime = lapTime;
+
+    addCalculatedCommonChannels(data, cols, meta);
+    deriveAndExposeMapXY(data, cols, meta);
+    applyAllMathChannelsToLog({ data, cols, meta });
+
+    // expose lap columns in data rows and cols list
+    if (!cols.includes('Lap Time')) cols.push('Lap Time');
+    if (!cols.includes('Lap Number')) cols.push('Lap Number');
+    data.forEach((r, i) => { r['Lap Time'] = lapTime[i]; r['Lap Number'] = lapNum[i]; });
+
+    // record units for new columns
+    meta.units['Lap Time'] = 's';
+    meta.units['Lap Number'] = '';
+
+    return { id, name, data, cols, meta, rawRows };
+  }
+
+  function setDecoderError(fileItem, message) {
+    if (!fileItem) return;
+    let errorEl = fileItem.querySelector('.file-decoder-error');
+    if (!errorEl) {
+      errorEl = document.createElement('div');
+      errorEl.className = 'file-decoder-error';
+      errorEl.style.color = '#9b1c1c';
+      errorEl.style.fontSize = '0.8em';
+      errorEl.style.marginTop = '4px';
+      fileItem.appendChild(errorEl);
+    }
+    const text = String(message || '').trim();
+    errorEl.textContent = text;
+    errorEl.hidden = !text;
+  }
+
+  function reprocessLogWithDecoder(logId, decoderName) {
+    const logIdx = logs.findIndex(l => l.id === logId);
+    if (logIdx < 0) return false;
+
+    const log = logs[logIdx];
+    if (!log.rawRows || !window.LogFileProcessors || typeof window.LogFileProcessors.processCsvRowsWithDecoder !== 'function') {
+      console.error('Decoder reprocess unavailable for log:', log && log.name ? log.name : logId);
+      return false;
+    }
+
+    try {
+      const processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
+      if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
+        console.error('Decoder reprocess returned invalid data for log:', log.name, 'decoder:', decoderName);
+        return false;
+      }
+
+      logs[logIdx] = buildLogRecord(log.id, log.name, processed, log.rawRows, decoderName);
+
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect();
+      renderLapsList();
+      updatePlot();
+      return true;
+    } catch (err) {
+      console.error('Decoder reprocess threw an error for log:', log.name, 'decoder:', decoderName, err);
+      return false;
+    }
+  }
+
+  function handleDecoderSelectionChange(selectEl, fileId, decoderName) {
+    if (!selectEl || !fileId || !decoderName) return;
+    const fileItem = selectEl.closest('.file-item');
+    const log = logs.find((entry) => entry.id === fileId);
+    const previousDecoder = resolveDecoderName(log && log.meta) || '';
+
+    setDecoderError(fileItem, '');
+    const ok = reprocessLogWithDecoder(fileId, decoderName);
+    if (ok) {
+      setDecoderError(fileItem, '');
+      return;
+    }
+
+    // Revert UI selection when decode fails so the dropdown reflects active data.
+    if (previousDecoder) {
+      selectEl.value = previousDecoder;
+    }
+    setDecoderError(fileItem, 'Could not reprocess this CSV with the selected decoder. See console for details.');
+  }
+
   function parseFile(file) {
     Papa.parse(file, {
       header: false,
@@ -531,37 +658,8 @@
           return;
         }
 
-        const data = processed.data;
-        const cols = [...processed.cols];
-        const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
         const id = idForName(file.name);
-        const meta = processed.meta || {};
-        meta.units = meta.units && typeof meta.units === 'object' ? meta.units : units;
-
-        const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
-          ? meta.lapNum
-          : data.map(() => 1);
-        const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
-          ? meta.lapTime
-          : data.map((_, i) => i);
-
-        meta.lapNum = lapNum;
-        meta.lapTime = lapTime;
-
-        addCalculatedCommonChannels(data, cols, meta);
-        deriveAndExposeMapXY(data, cols, meta);
-        applyAllMathChannelsToLog({ data, cols, meta });
-
-        // expose lap columns in data rows and cols list
-        if (!cols.includes('Lap Time')) cols.push('Lap Time');
-        if (!cols.includes('Lap Number')) cols.push('Lap Number');
-        data.forEach((r,i)=>{ r['Lap Time'] = lapTime[i]; r['Lap Number'] = lapNum[i]; });
-
-        // record units for new columns
-        meta.units['Lap Time'] = 's';
-        meta.units['Lap Number'] = '';
-
-        logs.push({id, name: file.name, data, cols, meta, rawRows: rows});
+        logs.push(buildLogRecord(id, file.name, processed, rows));
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
@@ -599,29 +697,20 @@
       label.appendChild(checkbox);
       label.appendChild(nameWrap);
 
-      const decoderName = (log.meta && log.meta.source) ? log.meta.source : 'Unknown';
+      const decoderName = resolveDecoderName(log.meta) || ((log.meta && log.meta.source) ? log.meta.source : 'Unknown');
       const decoderRow = document.createElement('div');
       decoderRow.className = 'file-decoder-row';
 
-      const decoderBadge = document.createElement('span');
-      decoderBadge.className = 'file-decoder-badge';
-      decoderBadge.textContent = decoderName;
-
-      const decoderEditBtn = document.createElement('button');
-      decoderEditBtn.className = 'file-decoder-edit';
-      decoderEditBtn.setAttribute('data-decoder-edit', log.id);
-      decoderEditBtn.setAttribute('aria-label', `Change decoder for ${log.name}`);
-      decoderEditBtn.textContent = '✎';
-
       const decoderSelector = document.createElement('div');
       decoderSelector.className = 'file-decoder-selector';
-      decoderSelector.hidden = true;
+      decoderSelector.hidden = false;
 
       const availableDecoders = (window.LogFileProcessors && window.LogFileProcessors.AVAILABLE_DECODERS)
         ? window.LogFileProcessors.AVAILABLE_DECODERS
         : [];
       const decoderSelect = document.createElement('select');
       decoderSelect.className = 'file-decoder-select';
+      decoderSelect.dataset.id = log.id;
       availableDecoders.forEach(d => {
         const opt = document.createElement('option');
         opt.value = d.name;
@@ -629,26 +718,12 @@
         if (d.name === decoderName || d.label === decoderName) opt.selected = true;
         decoderSelect.appendChild(opt);
       });
-      const decoderConfirmBtn = document.createElement('button');
-      decoderConfirmBtn.setAttribute('data-decoder-confirm', log.id);
-      decoderConfirmBtn.textContent = 'Apply';
-      const decoderCancelBtn = document.createElement('button');
-      decoderCancelBtn.setAttribute('data-decoder-cancel', log.id);
-      decoderCancelBtn.textContent = 'Cancel';
-      decoderSelector.appendChild(decoderSelect);
-      decoderSelector.appendChild(decoderConfirmBtn);
-      decoderSelector.appendChild(decoderCancelBtn);
 
-      decoderRow.appendChild(decoderBadge);
-      decoderRow.appendChild(decoderEditBtn);
+      decoderSelector.appendChild(decoderSelect);
       decoderRow.appendChild(decoderSelector);
 
-      const removeBtn = document.createElement('button');
-      removeBtn.textContent = 'Remove';
-      removeBtn.setAttribute('data-remove', log.id);
       el.appendChild(label);
       el.appendChild(decoderRow);
-      el.appendChild(removeBtn);
       filesList.appendChild(el);
     });
   }
@@ -3656,57 +3731,24 @@
       const id = ev.target.getAttribute('data-decoder-confirm');
       const fileItem = ev.target.closest('.file-item');
       if (!fileItem) return;
-      const select = fileItem.querySelector('.file-decoder-select');
+      const select = fileItem.querySelector('.file-decoder-select, #file-decoder-select');
       const decoderName = select ? select.value : null;
       if (!decoderName) return;
-      const logIdx = logs.findIndex(l => l.id === id);
-      if (logIdx < 0) return;
-      const log = logs[logIdx];
-      if (!log.rawRows || !window.LogFileProcessors || typeof window.LogFileProcessors.processCsvRowsWithDecoder !== 'function') return;
-
-      const processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
-      if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return;
-
-      const data = processed.data;
-      const cols = [...processed.cols];
-      const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
-      const meta = processed.meta || {};
-      meta.units = meta.units && typeof meta.units === 'object' ? meta.units : units;
-
-      const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
-        ? meta.lapNum
-        : data.map(() => 1);
-      const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
-        ? meta.lapTime
-        : data.map((_, i) => i);
-
-      meta.lapNum = lapNum;
-      meta.lapTime = lapTime;
-
-      addCalculatedCommonChannels(data, cols, meta);
-      deriveAndExposeMapXY(data, cols, meta);
-      applyAllMathChannelsToLog({ data, cols, meta });
-
-      if (!cols.includes('Lap Time')) cols.push('Lap Time');
-      if (!cols.includes('Lap Number')) cols.push('Lap Number');
-      data.forEach((r, i) => { r['Lap Time'] = lapTime[i]; r['Lap Number'] = lapNum[i]; });
-
-      meta.units['Lap Time'] = 's';
-      meta.units['Lap Number'] = '';
-
-      logs[logIdx] = { id: log.id, name: log.name, data, cols, meta, rawRows: log.rawRows };
-
+      handleDecoderSelectionChange(select, id, decoderName);
       renderFilesList();
-      populateYSelect();
-      populateXCustomSelect();
-      populateMapColorSelect();
-      renderLapsList();
-      updatePlot();
     }
   });
 
   // update lap list when file selection changes
   filesList.addEventListener('change', (ev)=>{
+    if (ev.target.matches('.file-decoder-select, #file-decoder-select')) {
+      const fileItem = ev.target.closest('.file-item');
+      const id = (fileItem && fileItem.dataset) ? fileItem.dataset.id : ev.target.getAttribute('data-id');
+      if (!id) return;
+      handleDecoderSelectionChange(ev.target, id, ev.target.value);
+      return;
+    }
+
     if (ev.target.matches('input[type=checkbox]')) {
       renderLapsList();
       updatePlot();
