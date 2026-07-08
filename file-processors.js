@@ -1158,8 +1158,53 @@
     return R * c;
   }
 
+  const AVAILABLE_DECODERS = [
+    { name: 'GP Bikes', label: 'GP Bikes (PiBoSo)' },
+    { name: 'AiM', label: 'AiM' },
+    { name: 'MoTeC', label: 'MoTeC' },
+    { name: 'VIGrade', label: 'VIGrade' },
+    { name: 'ScanMyTesla', label: 'ScanMyTesla' },
+    { name: 'Standard', label: 'Standard CSV' },
+    { name: 'Generic', label: 'Generic (fallback)' }
+  ];
+
+  function processCsvRowsWithDecoder(rows, decoderName, options = {}) {
+    const parsedOptions = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+    const useMotecHeader = decoderName === 'MoTeC';
+    const formatHint = getMetadataValueFromRows(rows, 'format');
+    const headerRowIndex = (useMotecHeader || isMoTeCFormat(formatHint))
+      ? findMoTeCHeaderRowIndex(rows)
+      : findHeaderRowIndex(rows);
+    const metadata = extractMetadata(rows, headerRowIndex);
+    const source = getMetadataValue(metadata, 'data source') || getMetadataValue(metadata, 'source');
+    const format = getMetadataValue(metadata, 'format');
+
+    switch (decoderName) {
+      case 'GP Bikes':
+        return processGPBikesRows(rows, headerRowIndex, { source, format, metadata });
+      case 'AiM':
+        return processAiMRows(rows, headerRowIndex, { source, format, metadata });
+      case 'MoTeC':
+        return processMoTeCRows(rows, headerRowIndex, { source, format, metadata });
+      case 'VIGrade':
+        return processVIGradeRows(rows, headerRowIndex, { source, format, metadata });
+      case 'ScanMyTesla':
+        return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata }, {
+          resampleHz: parsedOptions.scanMyTeslaHz
+        });
+      case 'Standard':
+        return processStandardRows(rows, headerRowIndex, { source, format, metadata });
+      case 'Generic':
+        return processGenericRows(rows, headerRowIndex, { source, format, metadata });
+      default:
+        return processCsvRows(rows, options);
+    }
+  }
+
   window.LogFileProcessors = {
     processCsvRows,
+    processCsvRowsWithDecoder,
+    AVAILABLE_DECODERS,
     isGPBikesFormat,
     isAiMFormat,
     isMoTeCFormat,

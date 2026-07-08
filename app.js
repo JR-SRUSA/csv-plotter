@@ -561,7 +561,7 @@
         meta.units['Lap Time'] = 's';
         meta.units['Lap Number'] = '';
 
-        logs.push({id, name: file.name, data, cols, meta});
+        logs.push({id, name: file.name, data, cols, meta, rawRows: rows});
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
@@ -598,10 +598,56 @@
       nameWrap.appendChild(linePreview);
       label.appendChild(checkbox);
       label.appendChild(nameWrap);
+
+      const decoderName = (log.meta && log.meta.source) ? log.meta.source : 'Unknown';
+      const decoderRow = document.createElement('div');
+      decoderRow.className = 'file-decoder-row';
+
+      const decoderBadge = document.createElement('span');
+      decoderBadge.className = 'file-decoder-badge';
+      decoderBadge.textContent = decoderName;
+
+      const decoderEditBtn = document.createElement('button');
+      decoderEditBtn.className = 'file-decoder-edit';
+      decoderEditBtn.setAttribute('data-decoder-edit', log.id);
+      decoderEditBtn.setAttribute('aria-label', `Change decoder for ${log.name}`);
+      decoderEditBtn.textContent = '✎';
+
+      const decoderSelector = document.createElement('div');
+      decoderSelector.className = 'file-decoder-selector';
+      decoderSelector.hidden = true;
+
+      const availableDecoders = (window.LogFileProcessors && window.LogFileProcessors.AVAILABLE_DECODERS)
+        ? window.LogFileProcessors.AVAILABLE_DECODERS
+        : [];
+      const decoderSelect = document.createElement('select');
+      decoderSelect.className = 'file-decoder-select';
+      availableDecoders.forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.name;
+        opt.textContent = d.label;
+        if (d.name === decoderName || d.label === decoderName) opt.selected = true;
+        decoderSelect.appendChild(opt);
+      });
+      const decoderConfirmBtn = document.createElement('button');
+      decoderConfirmBtn.setAttribute('data-decoder-confirm', log.id);
+      decoderConfirmBtn.textContent = 'Apply';
+      const decoderCancelBtn = document.createElement('button');
+      decoderCancelBtn.setAttribute('data-decoder-cancel', log.id);
+      decoderCancelBtn.textContent = 'Cancel';
+      decoderSelector.appendChild(decoderSelect);
+      decoderSelector.appendChild(decoderConfirmBtn);
+      decoderSelector.appendChild(decoderCancelBtn);
+
+      decoderRow.appendChild(decoderBadge);
+      decoderRow.appendChild(decoderEditBtn);
+      decoderRow.appendChild(decoderSelector);
+
       const removeBtn = document.createElement('button');
       removeBtn.textContent = 'Remove';
       removeBtn.setAttribute('data-remove', log.id);
       el.appendChild(label);
+      el.appendChild(decoderRow);
       el.appendChild(removeBtn);
       filesList.appendChild(el);
     });
@@ -3582,6 +3628,80 @@
         clearXYMapPlot();
         clearLeafletMapPlot();
       }
+    }
+
+    if (ev.target.matches('button[data-decoder-edit]')) {
+      const id = ev.target.getAttribute('data-decoder-edit');
+      const fileItem = ev.target.closest('.file-item');
+      if (!fileItem) return;
+      const selector = fileItem.querySelector('.file-decoder-selector');
+      const badge = fileItem.querySelector('.file-decoder-badge');
+      if (selector) selector.hidden = false;
+      if (badge) badge.hidden = true;
+      ev.target.hidden = true;
+    }
+
+    if (ev.target.matches('button[data-decoder-cancel]')) {
+      const fileItem = ev.target.closest('.file-item');
+      if (!fileItem) return;
+      const selector = fileItem.querySelector('.file-decoder-selector');
+      const badge = fileItem.querySelector('.file-decoder-badge');
+      const editBtn = fileItem.querySelector('button[data-decoder-edit]');
+      if (selector) selector.hidden = true;
+      if (badge) badge.hidden = false;
+      if (editBtn) editBtn.hidden = false;
+    }
+
+    if (ev.target.matches('button[data-decoder-confirm]')) {
+      const id = ev.target.getAttribute('data-decoder-confirm');
+      const fileItem = ev.target.closest('.file-item');
+      if (!fileItem) return;
+      const select = fileItem.querySelector('.file-decoder-select');
+      const decoderName = select ? select.value : null;
+      if (!decoderName) return;
+      const logIdx = logs.findIndex(l => l.id === id);
+      if (logIdx < 0) return;
+      const log = logs[logIdx];
+      if (!log.rawRows || !window.LogFileProcessors || typeof window.LogFileProcessors.processCsvRowsWithDecoder !== 'function') return;
+
+      const processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
+      if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) return;
+
+      const data = processed.data;
+      const cols = [...processed.cols];
+      const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
+      const meta = processed.meta || {};
+      meta.units = meta.units && typeof meta.units === 'object' ? meta.units : units;
+
+      const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
+        ? meta.lapNum
+        : data.map(() => 1);
+      const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
+        ? meta.lapTime
+        : data.map((_, i) => i);
+
+      meta.lapNum = lapNum;
+      meta.lapTime = lapTime;
+
+      addCalculatedCommonChannels(data, cols, meta);
+      deriveAndExposeMapXY(data, cols, meta);
+      applyAllMathChannelsToLog({ data, cols, meta });
+
+      if (!cols.includes('Lap Time')) cols.push('Lap Time');
+      if (!cols.includes('Lap Number')) cols.push('Lap Number');
+      data.forEach((r, i) => { r['Lap Time'] = lapTime[i]; r['Lap Number'] = lapNum[i]; });
+
+      meta.units['Lap Time'] = 's';
+      meta.units['Lap Number'] = '';
+
+      logs[logIdx] = { id: log.id, name: log.name, data, cols, meta, rawRows: log.rawRows };
+
+      renderFilesList();
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect();
+      renderLapsList();
+      updatePlot();
     }
   });
 
