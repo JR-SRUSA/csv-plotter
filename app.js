@@ -36,7 +36,7 @@
   const mathChSuggestions = document.getElementById('mathChSuggestions');
   const mathChPreview = document.getElementById('mathChPreview');
   const quickModSection = document.getElementById('quickModSection');
-  const quickModChannelSelect = document.getElementById('quickModChannel');
+  const quickModChannelName = document.getElementById('quickModChannelName');
   const quickModNegate = document.getElementById('quickModNegate');
   const quickModReciprocal = document.getElementById('quickModReciprocal');
   const quickModFilter = document.getElementById('quickModFilter');
@@ -91,6 +91,8 @@
     filterWindow: 0.5,
     filterMode: 'time'   // 'time' | 'distance'
   };
+  let quickModEditorOpen = false;
+  let quickModOriginalVisible = true;
 
   // Shorthand math names available in expressions (e.g. sin, cos, PI instead of Math.sin etc.)
   const MATH_SCOPE = {
@@ -889,6 +891,38 @@
     return { window: halfWindow, mode: mode || 'time' };
   }
 
+  function resetQuickModToggles() {
+    quickModState.negate = false;
+    quickModState.reciprocal = false;
+    quickModState.filter = false;
+    quickModOriginalVisible = true;
+    if (quickModNegate) quickModNegate.checked = false;
+    if (quickModReciprocal) quickModReciprocal.checked = false;
+    if (quickModFilter) quickModFilter.checked = false;
+    if (quickModFilterControls) quickModFilterControls.hidden = true;
+    if (quickModCreateBtn) quickModCreateBtn.disabled = true;
+  }
+
+  function clearQuickModSelectionState() {
+    const oldPreviewName = quickModPreviewName;
+    removeQuickModPreviewFromLogs();
+    quickModState.channel = null;
+    quickModEditorOpen = false;
+    resetQuickModToggles();
+    if (oldPreviewName && ySelect) {
+      const selections = new Set(Array.from(ySelect.selectedOptions).map(o => o.value));
+      selections.delete(oldPreviewName);
+      populateYSelectWithSelections(selections);
+    }
+  }
+
+  function shouldHideOriginalQuickModChannel(channel, selectedChannels) {
+    if (!channel || channel !== quickModState.channel) return false;
+    if (quickModOriginalVisible) return false;
+    if (!quickModPreviewName || !hasQuickModActive()) return false;
+    return Array.isArray(selectedChannels) && selectedChannels.includes(quickModPreviewName);
+  }
+
   // Remove the current quick mod preview channel from all logs.
   function removeQuickModPreviewFromLogs() {
     if (!quickModPreviewName) return;
@@ -924,6 +958,8 @@
 
     if (quickModState.channel && hasQuickModActive()) {
       applyQuickModPreviewToLogs();
+    } else {
+      quickModOriginalVisible = true;
     }
 
     // Repopulate Y select; preserve existing selections and manage preview channel
@@ -993,74 +1029,33 @@
 
   // Show/hide and populate the quick modify section.
   function renderQuickModSection() {
-    if (!quickModSection || !quickModChannelSelect) return;
+    if (!quickModSection) return;
     const selectedChannels = getSelectedY();
-    // Hide preview channel from the base channel selector
     const baseChannels = selectedChannels.filter(c => c !== quickModPreviewName);
     if (baseChannels.length === 0) {
       quickModSection.hidden = true;
-      // Clean up preview if base channel was deselected
-      if (quickModPreviewName) {
-        const name = quickModPreviewName;
-        // Remove data from logs
-        logs.forEach(log => {
-          const ci = log.cols.indexOf(name);
-          if (ci >= 0) log.cols.splice(ci, 1);
-          log.data.forEach(row => { delete row[name]; });
-          if (log.meta && log.meta.units) delete log.meta.units[name];
-        });
-        // Deselect from ySelect
-        Array.from(ySelect.options).forEach(o => { if (o.value === name) o.selected = false; });
-        quickModPreviewName = null;
-        quickModState.channel = null;
-        quickModState.negate = false;
-        quickModState.reciprocal = false;
-        quickModState.filter = false;
-        if (quickModNegate) quickModNegate.checked = false;
-        if (quickModReciprocal) quickModReciprocal.checked = false;
-        if (quickModFilter) quickModFilter.checked = false;
-        if (quickModFilterControls) quickModFilterControls.hidden = true;
-        if (quickModCreateBtn) quickModCreateBtn.disabled = true;
-      }
+      clearQuickModSelectionState();
       return;
     }
-    quickModSection.hidden = false;
 
-    // Preserve current channel selection or default to first
-    const prev = quickModState.channel;
-    const validPrev = prev && baseChannels.includes(prev) ? prev : null;
-    const newChannel = validPrev || baseChannels[0];
-
-    quickModChannelSelect.innerHTML = baseChannels.map(c =>
-      `<option value="${escapeHtml(c)}"${c === newChannel ? ' selected' : ''}>${escapeHtml(getChannelLabel(c))}</option>`
-    ).join('');
-
-    if (newChannel !== quickModState.channel) {
-      // Channel changed — remove old preview data, reset mods
-      if (quickModPreviewName) {
-        const name = quickModPreviewName;
-        logs.forEach(log => {
-          const ci = log.cols.indexOf(name);
-          if (ci >= 0) log.cols.splice(ci, 1);
-          log.data.forEach(row => { delete row[name]; });
-          if (log.meta && log.meta.units) delete log.meta.units[name];
-        });
-        Array.from(ySelect.options).forEach(o => { if (o.value === name) o.selected = false; });
-        quickModPreviewName = null;
+    if (!quickModState.channel || !baseChannels.includes(quickModState.channel)) {
+      const fallbackChannel = baseChannels[0];
+      if (quickModState.channel !== fallbackChannel) {
+        clearQuickModSelectionState();
       }
-      quickModState.channel = newChannel;
-      if (quickModNegate) quickModNegate.checked = false;
-      if (quickModReciprocal) quickModReciprocal.checked = false;
-      if (quickModFilter) quickModFilter.checked = false;
-      quickModState.negate = false;
-      quickModState.reciprocal = false;
-      quickModState.filter = false;
-      if (quickModFilterControls) quickModFilterControls.hidden = true;
-      if (quickModCreateBtn) quickModCreateBtn.disabled = true;
-    } else {
-      quickModState.channel = newChannel;
+      quickModState.channel = fallbackChannel;
     }
 
+    quickModSection.hidden = !quickModEditorOpen;
+    if (quickModSection.hidden) return;
+
+    if (quickModChannelName) {
+      quickModChannelName.textContent = quickModState.channel ? getChannelLabel(quickModState.channel) : 'None';
+    }
+    if (quickModNegate) quickModNegate.checked = !!quickModState.negate;
+    if (quickModReciprocal) quickModReciprocal.checked = !!quickModState.reciprocal;
+    if (quickModFilter) quickModFilter.checked = !!quickModState.filter;
+    if (quickModFilterControls) quickModFilterControls.hidden = !quickModState.filter;
     if (quickModCreateBtn) {
       quickModCreateBtn.disabled = !hasQuickModActive();
     }
@@ -1588,7 +1583,7 @@
     selectedYColors.innerHTML = '';
     selectedChannels.forEach((channel) => {
       const color = getChannelColor(channel);
-      const item = document.createElement('label');
+      const item = document.createElement('div');
       item.className = 'selected-y-color-item';
       const input = document.createElement('input');
       input.type = 'color';
@@ -1598,8 +1593,36 @@
       const text = document.createElement('span');
       text.textContent = getChannelLabel(channel);
       text.style.color = color;
+      const actions = document.createElement('div');
+      actions.className = 'selected-y-channel-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'selected-y-action-btn quick-mod-edit-btn';
+      editBtn.textContent = '✎';
+      editBtn.setAttribute('data-quick-mod-edit', channel);
+      editBtn.setAttribute('aria-label', `Quick modify ${getChannelLabel(channel)}`);
+      editBtn.setAttribute('title', `Quick modify ${getChannelLabel(channel)}`);
+      const editActive = quickModEditorOpen && quickModState.channel === channel;
+      editBtn.setAttribute('aria-pressed', editActive ? 'true' : 'false');
+      if (editActive) editBtn.classList.add('is-active');
+
+      const originalVisible = !shouldHideOriginalQuickModChannel(channel, selectedChannels);
+      const previewActive = quickModState.channel === channel && !!quickModPreviewName && hasQuickModActive();
+      const visibilityBtn = document.createElement('button');
+      visibilityBtn.type = 'button';
+      visibilityBtn.className = 'selected-y-action-btn quick-mod-visibility-btn';
+      visibilityBtn.textContent = originalVisible ? '👁' : '🚫';
+      visibilityBtn.setAttribute('data-quick-mod-visibility', channel);
+      visibilityBtn.setAttribute('aria-label', originalVisible ? `Hide original ${getChannelLabel(channel)}` : `Show original ${getChannelLabel(channel)}`);
+      visibilityBtn.setAttribute('title', originalVisible ? `Hide original ${getChannelLabel(channel)}` : `Show original ${getChannelLabel(channel)}`);
+      visibilityBtn.disabled = !previewActive;
+
       item.appendChild(input);
       item.appendChild(text);
+      actions.appendChild(editBtn);
+      actions.appendChild(visibilityBtn);
+      item.appendChild(actions);
       selectedYColors.appendChild(item);
     });
   }
@@ -3755,7 +3778,8 @@
 
   function updatePlot() {
     const selFiles = getSelectedFiles();
-    const ycols = getSelectedY();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const plotByLap = true;
@@ -3983,6 +4007,42 @@
     updatePlot();
   });
   if (selectedYColors) {
+    selectedYColors.addEventListener('click', (ev) => {
+      const target = ev.target instanceof Element ? ev.target : null;
+      if (!target) return;
+
+      const editBtn = target.closest('button[data-quick-mod-edit]');
+      if (editBtn) {
+        const channel = editBtn.getAttribute('data-quick-mod-edit');
+        const selectedChannels = getSelectedY();
+        if (!channel || !selectedChannels.includes(channel)) return;
+
+        if (quickModState.channel !== channel) {
+          clearQuickModSelectionState();
+          quickModState.channel = channel;
+          quickModEditorOpen = true;
+        } else {
+          quickModEditorOpen = !quickModEditorOpen;
+        }
+
+        renderSelectedChannelColorControls();
+        updatePlot();
+        return;
+      }
+
+      const visibilityBtn = target.closest('button[data-quick-mod-visibility]');
+      if (visibilityBtn) {
+        const channel = visibilityBtn.getAttribute('data-quick-mod-visibility');
+        const selectedChannels = getSelectedY();
+        if (!channel || !selectedChannels.includes(channel)) return;
+        if (!(quickModState.channel === channel && quickModPreviewName && hasQuickModActive())) return;
+
+        quickModOriginalVisible = !quickModOriginalVisible;
+        renderSelectedChannelColorControls();
+        updatePlot();
+      }
+    });
+
     selectedYColors.addEventListener('input', (ev) => {
       const target = ev.target;
       if (!(target instanceof HTMLInputElement) || target.type !== 'color') return;
@@ -4344,24 +4404,6 @@
   }
 
   // Quick Modify event handlers
-  if (quickModChannelSelect) {
-    quickModChannelSelect.addEventListener('change', () => {
-      const newChannel = quickModChannelSelect.value;
-      if (newChannel === quickModState.channel) return;
-      removeQuickModPreviewFromLogs();
-      quickModState.channel = newChannel;
-      quickModState.negate = false;
-      quickModState.reciprocal = false;
-      quickModState.filter = false;
-      if (quickModNegate) quickModNegate.checked = false;
-      if (quickModReciprocal) quickModReciprocal.checked = false;
-      if (quickModFilter) quickModFilter.checked = false;
-      if (quickModFilterControls) quickModFilterControls.hidden = true;
-      if (quickModCreateBtn) quickModCreateBtn.disabled = true;
-      populateYSelect();
-      updatePlot();
-    });
-  }
 
   if (quickModNegate) {
     quickModNegate.addEventListener('change', () => {
@@ -4434,14 +4476,7 @@
       logs.forEach(log => applyMathChannelToLog(mc, log));
 
       // Reset quick mod state
-      quickModState.negate = false;
-      quickModState.reciprocal = false;
-      quickModState.filter = false;
-      if (quickModNegate) quickModNegate.checked = false;
-      if (quickModReciprocal) quickModReciprocal.checked = false;
-      if (quickModFilter) quickModFilter.checked = false;
-      if (quickModFilterControls) quickModFilterControls.hidden = true;
-      if (quickModCreateBtn) quickModCreateBtn.disabled = true;
+      resetQuickModToggles();
 
       renderMathChannelsList();
       populateYSelect();
