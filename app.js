@@ -35,6 +35,15 @@
   const mathChCancel = document.getElementById('mathChCancel');
   const mathChSuggestions = document.getElementById('mathChSuggestions');
   const mathChPreview = document.getElementById('mathChPreview');
+  const quickModSection = document.getElementById('quickModSection');
+  const quickModChannelName = document.getElementById('quickModChannelName');
+  const quickModNegate = document.getElementById('quickModNegate');
+  const quickModReciprocal = document.getElementById('quickModReciprocal');
+  const quickModFilter = document.getElementById('quickModFilter');
+  const quickModFilterControls = document.getElementById('quickModFilterControls');
+  const quickModFilterWindow = document.getElementById('quickModFilterWindow');
+  const quickModFilterMode = document.getElementById('quickModFilterMode');
+  const quickModCreateBtn = document.getElementById('quickModCreateBtn');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
@@ -69,7 +78,21 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
-  const mathChannels = []; // { name, expression, unit }
+  const mathChannels = []; // { name, expression, unit, smoothing? }
+
+  // Quick modify state
+  const QUICK_MOD_PREVIEW_PREFIX = 'Quick Mod: ';
+  let quickModPreviewName = null; // name of the current preview channel (or null)
+  let quickModState = {
+    channel: null,       // base channel being modified
+    negate: false,
+    reciprocal: false,
+    filter: false,
+    filterWindow: 0.5,
+    filterMode: 'time'   // 'time' | 'distance'
+  };
+  let quickModEditorOpen = false;
+  let quickModOriginalVisible = true;
 
   // Shorthand math names available in expressions (e.g. sin, cos, PI instead of Math.sin etc.)
   const MATH_SCOPE = {
@@ -730,8 +753,69 @@
 
   function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
+  // Computes a forward/backward windowed average for an array of values.
+  // values: array of numeric values (NaN/null treated as missing)
+  // axisValues: array of time or distance values (same length)
+  // halfWindow: half-window size in axis units
+  // Returns an array of smoothed values (same length as values).
+  function computeWindowedAverage(values, axisValues, halfWindow) {
+    const n = values.length;
+    const result = new Array(n).fill(null);
+    if (n === 0 || !(halfWindow > 0)) return result;
+
+    // Check if axisValues is usable and monotonically increasing
+    const hasAxis = Array.isArray(axisValues) && axisValues.length === n &&
+      axisValues.some(v => Number.isFinite(v));
+    let isMonotonic = true;
+    if (hasAxis) {
+      for (let i = 1; i < n; i++) {
+        if (!Number.isFinite(axisValues[i - 1]) || !Number.isFinite(axisValues[i])) continue;
+        if (axisValues[i] < axisValues[i - 1]) { isMonotonic = false; break; }
+      }
+    }
+
+    for (let i = 0; i < n; i++) {
+      const raw = values[i];
+      if (raw === null || raw === undefined) { result[i] = null; continue; }
+      const center = Number(raw);
+      if (!Number.isFinite(center)) { result[i] = null; continue; }
+      if (!hasAxis) { result[i] = center; continue; }
+      const cx = axisValues[i];
+      if (!Number.isFinite(cx)) { result[i] = center; continue; }
+
+      let weightedSum = 0;
+      let weightTotal = 0;
+
+      const accumulate = (j) => {
+        const rv = values[j];
+        if (rv === null || rv === undefined) return false;
+        const v = Number(rv);
+        const xj = axisValues[j];
+        if (!Number.isFinite(v) || !Number.isFinite(xj)) return false;
+        const dt = Math.abs(xj - cx);
+        if (dt > halfWindow) return true; // outside window — stop searching in this direction
+        const w = 1 - (dt / halfWindow);
+        if (w <= 0) return false;
+        weightedSum += v * w;
+        weightTotal += w;
+        return false;
+      };
+
+      if (isMonotonic) {
+        accumulate(i);
+        for (let j = i - 1; j >= 0; j--) { if (accumulate(j)) break; }
+        for (let j = i + 1; j < n; j++) { if (accumulate(j)) break; }
+      } else {
+        for (let j = 0; j < n; j++) accumulate(j);
+      }
+
+      result[i] = weightTotal > 0 ? (weightedSum / weightTotal) : center;
+    }
+    return result;
+  }
+
   function applyMathChannelToLog(mc, log) {
-    const { name, expression, unit } = mc;
+    const { name, expression, unit, smoothing } = mc;
     const refs = [];
     const safe = expression.replace(/\{([^}]+)\}/g, (_, chName) => {
       let idx = refs.indexOf(chName);
@@ -744,9 +828,32 @@
     } catch { return; }
     // Resolve display names (e.g. "Speed") to the format-specific column name for this log
     const resolvedRefs = refs.map(ch => resolveChannelForLog(ch, log));
+
+    // If smoothing is requested, pre-compute windowed averages for all referenced channels
+    let smoothedArrays = null;
+    if (smoothing && smoothing.window > 0) {
+      const axisCol = smoothing.mode === 'distance'
+        ? (log.meta && log.meta.distCol)
+        : (log.meta && log.meta.timeCol);
+      const axisValues = axisCol ? log.data.map(row => Number(row[axisCol])) : null;
+      const halfWindow = smoothing.window;
+      smoothedArrays = resolvedRefs.map(col => {
+        const vals = log.data.map(row => { const v = Number(row[col]); return Number.isFinite(v) ? v : NaN; });
+        return computeWindowedAverage(vals, axisValues, halfWindow);
+      });
+    }
+
     if (!log.cols.includes(name)) log.cols.push(name);
-    log.data.forEach(row => {
-      const vals = resolvedRefs.map(col => { const v = Number(row[col]); return Number.isFinite(v) ? v : NaN; });
+    log.data.forEach((row, rowIdx) => {
+      let vals;
+      if (smoothedArrays) {
+        vals = smoothedArrays.map((arr, i) => {
+          const v = arr[rowIdx];
+          return (v !== null && Number.isFinite(v)) ? v : NaN;
+        });
+      } else {
+        vals = resolvedRefs.map(col => { const v = Number(row[col]); return Number.isFinite(v) ? v : NaN; });
+      }
       try {
         const result = fn(...vals, ...MATH_SCOPE_VALS);
         row[name] = Number.isFinite(result) ? result : null;
@@ -760,18 +867,215 @@
     mathChannels.forEach(mc => applyMathChannelToLog(mc, log));
   }
 
+  // --- Quick Modify helpers ---
+
+  function hasQuickModActive() {
+    return quickModState.negate || quickModState.reciprocal || quickModState.filter;
+  }
+
+  // Build the math expression (algebraic part) for the current quick mod state.
+  function buildQuickModExpression(channel) {
+    const ref = `{${channel}}`;
+    if (quickModState.negate && quickModState.reciprocal) return `-1 / ${ref}`;
+    if (quickModState.negate) return `${ref} * -1`;
+    if (quickModState.reciprocal) return `1 / ${ref}`;
+    return ref;
+  }
+
+  // Build a smoothing descriptor from the current quick mod state (or null).
+  function buildQuickModSmoothing() {
+    if (!quickModState.filter) return null;
+    const w = parseFloat(quickModFilterWindow ? quickModFilterWindow.value : quickModState.filterWindow);
+    const mode = quickModFilterMode ? quickModFilterMode.value : quickModState.filterMode;
+    const halfWindow = Number.isFinite(w) && w > 0 ? w : 0.5;
+    return { window: halfWindow, mode: mode || 'time' };
+  }
+
+  function resetQuickModToggles() {
+    quickModState.negate = false;
+    quickModState.reciprocal = false;
+    quickModState.filter = false;
+    quickModOriginalVisible = true;
+    if (quickModNegate) quickModNegate.checked = false;
+    if (quickModReciprocal) quickModReciprocal.checked = false;
+    if (quickModFilter) quickModFilter.checked = false;
+    if (quickModFilterControls) quickModFilterControls.hidden = true;
+    if (quickModCreateBtn) quickModCreateBtn.disabled = true;
+  }
+
+  function clearQuickModSelectionState() {
+    const oldPreviewName = quickModPreviewName;
+    removeQuickModPreviewFromLogs();
+    quickModState.channel = null;
+    quickModEditorOpen = false;
+    resetQuickModToggles();
+    if (oldPreviewName && ySelect) {
+      const selections = new Set(Array.from(ySelect.selectedOptions).map(o => o.value));
+      selections.delete(oldPreviewName);
+      populateYSelectWithSelections(selections);
+    }
+  }
+
+  function shouldHideOriginalQuickModChannel(channel, selectedChannels) {
+    if (!channel || channel !== quickModState.channel) return false;
+    if (quickModOriginalVisible) return false;
+    if (!quickModPreviewName || !hasQuickModActive()) return false;
+    return Array.isArray(selectedChannels) && selectedChannels.includes(quickModPreviewName);
+  }
+
+  // Remove the current quick mod preview channel from all logs.
+  function removeQuickModPreviewFromLogs() {
+    if (!quickModPreviewName) return;
+    const name = quickModPreviewName;
+    logs.forEach(log => {
+      const ci = log.cols.indexOf(name);
+      if (ci >= 0) log.cols.splice(ci, 1);
+      log.data.forEach(row => { delete row[name]; });
+      if (log.meta && log.meta.units) delete log.meta.units[name];
+    });
+    quickModPreviewName = null;
+  }
+
+  // Apply the current quick mod state as a preview channel to all logs.
+  function applyQuickModPreviewToLogs() {
+    const channel = quickModState.channel;
+    if (!channel || !hasQuickModActive()) return;
+    const previewName = QUICK_MOD_PREVIEW_PREFIX + channel;
+    const mc = {
+      name: previewName,
+      expression: buildQuickModExpression(channel),
+      unit: getUnitForChannel(channel),
+      smoothing: buildQuickModSmoothing()
+    };
+    logs.forEach(log => applyMathChannelToLog(mc, log));
+    quickModPreviewName = previewName;
+  }
+
+  // Refresh the quick mod preview: remove old, apply new, update Y selection, replot.
+  function updateQuickModPreview() {
+    const oldPreviewName = quickModPreviewName;
+    removeQuickModPreviewFromLogs();
+
+    if (quickModState.channel && hasQuickModActive()) {
+      applyQuickModPreviewToLogs();
+    } else {
+      quickModOriginalVisible = true;
+    }
+
+    // Repopulate Y select; preserve existing selections and manage preview channel
+    const currentSelections = new Set(Array.from(ySelect.selectedOptions).map(o => o.value));
+    // Remove old preview from selection set
+    if (oldPreviewName) currentSelections.delete(oldPreviewName);
+    // Add new preview to selection set
+    if (quickModPreviewName) currentSelections.add(quickModPreviewName);
+
+    populateYSelectWithSelections(currentSelections);
+    renderSelectedChannelColorControls();
+    updatePlot();
+  }
+
+  // Like populateYSelect but restores a given set of selections instead of previous state.
+  function populateYSelectWithSelections(targetSelections) {
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) { coveredRawCols.add(col); hasMatch = true; }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const isMathCh = mathChannels.some(mc => mc.name === c);
+      const isPreview = c === quickModPreviewName;
+      const suffix = isPreview ? ' (preview)' : (isMathCh ? ' (math)' : '');
+      const label = unit ? `${c} [${unit}]${suffix}` : `${c}${suffix}`;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    ySelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    const opts = Array.from(ySelect.options);
+    const valid = new Set(Array.from(targetSelections).filter(v => opts.some(o => o.value === v)));
+    if (valid.size > 0) {
+      opts.forEach(o => { o.selected = valid.has(o.value); });
+    } else {
+      const defaultOpt = opts.find(o => o.value === DEFAULT_Y_CHANNEL)
+        || opts.find(o => o.value.toLowerCase() === DEFAULT_Y_CHANNEL.toLowerCase());
+      if (defaultOpt) defaultOpt.selected = true;
+      else if (opts.length > 0) opts[0].selected = true;
+    }
+  }
+
+  // Show/hide and populate the quick modify section.
+  function renderQuickModSection() {
+    if (!quickModSection) return;
+    const selectedChannels = getSelectedY();
+    const baseChannels = selectedChannels.filter(c => c !== quickModPreviewName);
+    if (baseChannels.length === 0) {
+      quickModSection.hidden = true;
+      clearQuickModSelectionState();
+      return;
+    }
+
+    if (!quickModState.channel || !baseChannels.includes(quickModState.channel)) {
+      const fallbackChannel = baseChannels[0];
+      if (quickModState.channel !== fallbackChannel) {
+        clearQuickModSelectionState();
+      }
+      quickModState.channel = fallbackChannel;
+    }
+
+    quickModSection.hidden = !quickModEditorOpen;
+    if (quickModSection.hidden) return;
+
+    if (quickModChannelName) {
+      quickModChannelName.textContent = quickModState.channel ? getChannelLabel(quickModState.channel) : 'None';
+    }
+    if (quickModNegate) quickModNegate.checked = !!quickModState.negate;
+    if (quickModReciprocal) quickModReciprocal.checked = !!quickModState.reciprocal;
+    if (quickModFilter) quickModFilter.checked = !!quickModState.filter;
+    if (quickModFilterControls) quickModFilterControls.hidden = !quickModState.filter;
+    if (quickModCreateBtn) {
+      quickModCreateBtn.disabled = !hasQuickModActive();
+    }
+  }
+
   let mathChEditIdx = -1; // -1 = add mode, >=0 = editing existing channel
 
   function renderMathChannelsList() {
     if (!mathChannelsList) return;
-    mathChannelsList.innerHTML = mathChannels.map((mc, i) =>
-      `<div class="math-ch-item">` +
-      `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
-      `<span class="math-ch-expr">${escapeHtml(mc.expression)}</span>` +
-      `<button type="button" class="math-ch-edit" data-idx="${i}" aria-label="Edit ${escapeHtml(mc.name)}">✎</button>` +
-      `<button type="button" class="math-ch-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(mc.name)}">✕</button>` +
-      `</div>`
-    ).join('');
+    mathChannelsList.innerHTML = mathChannels.map((mc, i) => {
+      const smoothLabel = mc.smoothing && mc.smoothing.window > 0
+        ? ` <span class="math-ch-smooth-info">[smooth ±${mc.smoothing.window}${mc.smoothing.mode === 'distance' ? 'm' : 's'}]</span>`
+        : '';
+      return `<div class="math-ch-item">` +
+        `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
+        `<span class="math-ch-expr">${escapeHtml(mc.expression)}${smoothLabel}</span>` +
+        `<button type="button" class="math-ch-edit" data-idx="${i}" aria-label="Edit ${escapeHtml(mc.name)}">✎</button>` +
+        `<button type="button" class="math-ch-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(mc.name)}">✕</button>` +
+        `</div>`;
+    }).join('');
   }
 
   let mathChActiveSuggIdx = -1;
@@ -986,7 +1290,8 @@
       let unit = '';
       for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
       const isMathCh = mathChannels.some(mc => mc.name === c);
-      const suffix = isMathCh ? ' (math)' : '';
+      const isPreview = c === quickModPreviewName;
+      const suffix = isPreview ? ' (preview)' : (isMathCh ? ' (math)' : '');
       const label = unit ? `${c} [${unit}]${suffix}` : `${c}${suffix}`;
       return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
     });
@@ -1272,12 +1577,13 @@
 
   function renderSelectedChannelColorControls() {
     if (!selectedYColors) return;
+    renderQuickModSection();
     const selectedChannels = getSelectedY();
     syncSelectedChannelColors(selectedChannels);
     selectedYColors.innerHTML = '';
     selectedChannels.forEach((channel) => {
       const color = getChannelColor(channel);
-      const item = document.createElement('label');
+      const item = document.createElement('div');
       item.className = 'selected-y-color-item';
       const input = document.createElement('input');
       input.type = 'color';
@@ -1287,8 +1593,36 @@
       const text = document.createElement('span');
       text.textContent = getChannelLabel(channel);
       text.style.color = color;
+      const actions = document.createElement('div');
+      actions.className = 'selected-y-channel-actions';
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'selected-y-action-btn quick-mod-edit-btn';
+      editBtn.textContent = '✎';
+      editBtn.setAttribute('data-quick-mod-edit', channel);
+      editBtn.setAttribute('aria-label', `Quick modify ${getChannelLabel(channel)}`);
+      editBtn.setAttribute('title', `Quick modify ${getChannelLabel(channel)}`);
+      const editActive = quickModEditorOpen && quickModState.channel === channel;
+      editBtn.setAttribute('aria-pressed', editActive ? 'true' : 'false');
+      if (editActive) editBtn.classList.add('is-active');
+
+      const originalVisible = !shouldHideOriginalQuickModChannel(channel, selectedChannels);
+      const previewActive = quickModState.channel === channel && !!quickModPreviewName && hasQuickModActive();
+      const visibilityBtn = document.createElement('button');
+      visibilityBtn.type = 'button';
+      visibilityBtn.className = 'selected-y-action-btn quick-mod-visibility-btn';
+      visibilityBtn.textContent = originalVisible ? '👁' : '🚫';
+      visibilityBtn.setAttribute('data-quick-mod-visibility', channel);
+      visibilityBtn.setAttribute('aria-label', originalVisible ? `Hide original ${getChannelLabel(channel)}` : `Show original ${getChannelLabel(channel)}`);
+      visibilityBtn.setAttribute('title', originalVisible ? `Hide original ${getChannelLabel(channel)}` : `Show original ${getChannelLabel(channel)}`);
+      visibilityBtn.disabled = !previewActive;
+
       item.appendChild(input);
       item.appendChild(text);
+      actions.appendChild(editBtn);
+      actions.appendChild(visibilityBtn);
+      item.appendChild(actions);
       selectedYColors.appendChild(item);
     });
   }
@@ -3444,7 +3778,8 @@
 
   function updatePlot() {
     const selFiles = getSelectedFiles();
-    const ycols = getSelectedY();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const plotByLap = true;
@@ -3672,6 +4007,42 @@
     updatePlot();
   });
   if (selectedYColors) {
+    selectedYColors.addEventListener('click', (ev) => {
+      const target = ev.target instanceof Element ? ev.target : null;
+      if (!target) return;
+
+      const editBtn = target.closest('button[data-quick-mod-edit]');
+      if (editBtn) {
+        const channel = editBtn.getAttribute('data-quick-mod-edit');
+        const selectedChannels = getSelectedY();
+        if (!channel || !selectedChannels.includes(channel)) return;
+
+        if (quickModState.channel !== channel) {
+          clearQuickModSelectionState();
+          quickModState.channel = channel;
+          quickModEditorOpen = true;
+        } else {
+          quickModEditorOpen = !quickModEditorOpen;
+        }
+
+        renderSelectedChannelColorControls();
+        updatePlot();
+        return;
+      }
+
+      const visibilityBtn = target.closest('button[data-quick-mod-visibility]');
+      if (visibilityBtn) {
+        const channel = visibilityBtn.getAttribute('data-quick-mod-visibility');
+        const selectedChannels = getSelectedY();
+        if (!channel || !selectedChannels.includes(channel)) return;
+        if (!(quickModState.channel === channel && quickModPreviewName && hasQuickModActive())) return;
+
+        quickModOriginalVisible = !quickModOriginalVisible;
+        renderSelectedChannelColorControls();
+        updatePlot();
+      }
+    });
+
     selectedYColors.addEventListener('input', (ev) => {
       const target = ev.target;
       if (!(target instanceof HTMLInputElement) || target.type !== 'color') return;
@@ -3772,6 +4143,17 @@
     if (mapCenterLatInput) mapCenterLatInput.value = '';
     if (mapCenterLonInput) mapCenterLonInput.value = '';
     updateMapFitInfo('');
+    // Reset quick mod state
+    quickModPreviewName = null;
+    quickModState.channel = null;
+    quickModState.negate = false;
+    quickModState.reciprocal = false;
+    quickModState.filter = false;
+    if (quickModNegate) quickModNegate.checked = false;
+    if (quickModReciprocal) quickModReciprocal.checked = false;
+    if (quickModFilter) quickModFilter.checked = false;
+    if (quickModFilterControls) quickModFilterControls.hidden = true;
+    if (quickModCreateBtn) quickModCreateBtn.disabled = true;
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
@@ -3802,7 +4184,11 @@
       if (!Array.isArray(saved)) return;
       saved.forEach(mc => {
         if (mc && typeof mc.name === 'string' && typeof mc.expression === 'string') {
-          mathChannels.push({ name: mc.name, expression: mc.expression, unit: mc.unit || '' });
+          const entry = { name: mc.name, expression: mc.expression, unit: mc.unit || '' };
+          if (mc.smoothing && typeof mc.smoothing === 'object' && mc.smoothing.window > 0) {
+            entry.smoothing = { window: mc.smoothing.window, mode: mc.smoothing.mode || 'time' };
+          }
+          mathChannels.push(entry);
         }
       });
       if (mathChannels.length > 0) renderMathChannelsList();
@@ -4014,6 +4400,89 @@
       if (!item) return;
       ev.preventDefault();
       applyMathChSuggestion(item.dataset.name);
+    });
+  }
+
+  // Quick Modify event handlers
+
+  if (quickModNegate) {
+    quickModNegate.addEventListener('change', () => {
+      quickModState.negate = quickModNegate.checked;
+      if (quickModCreateBtn) quickModCreateBtn.disabled = !hasQuickModActive();
+      updateQuickModPreview();
+    });
+  }
+
+  if (quickModReciprocal) {
+    quickModReciprocal.addEventListener('change', () => {
+      quickModState.reciprocal = quickModReciprocal.checked;
+      if (quickModCreateBtn) quickModCreateBtn.disabled = !hasQuickModActive();
+      updateQuickModPreview();
+    });
+  }
+
+  if (quickModFilter) {
+    quickModFilter.addEventListener('change', () => {
+      quickModState.filter = quickModFilter.checked;
+      if (quickModFilterControls) quickModFilterControls.hidden = !quickModFilter.checked;
+      if (quickModCreateBtn) quickModCreateBtn.disabled = !hasQuickModActive();
+      updateQuickModPreview();
+    });
+  }
+
+  if (quickModFilterWindow) {
+    quickModFilterWindow.addEventListener('input', () => {
+      const v = parseFloat(quickModFilterWindow.value);
+      quickModState.filterWindow = Number.isFinite(v) && v > 0 ? v : 0.5;
+      if (quickModState.filter) updateQuickModPreview();
+    });
+  }
+
+  if (quickModFilterMode) {
+    quickModFilterMode.addEventListener('change', () => {
+      quickModState.filterMode = quickModFilterMode.value || 'time';
+      if (quickModState.filter) updateQuickModPreview();
+    });
+  }
+
+  if (quickModCreateBtn) {
+    quickModCreateBtn.addEventListener('click', () => {
+      const channel = quickModState.channel;
+      if (!channel || !hasQuickModActive()) return;
+
+      const expression = buildQuickModExpression(channel);
+      const smoothing = buildQuickModSmoothing();
+      const unit = getUnitForChannel(channel);
+
+      // Generate a unique name
+      const baseName = `${channel} modified`;
+      let finalName = baseName;
+      let suffix = 1;
+      const existingNames = new Set(mathChannels.map(mc => mc.name));
+      logs.forEach(l => l.cols.forEach(c => existingNames.add(c)));
+      while (existingNames.has(finalName) && finalName !== quickModPreviewName) {
+        suffix++;
+        finalName = `${baseName} ${suffix}`;
+      }
+
+      const mc = { name: finalName, expression, unit };
+      if (smoothing) mc.smoothing = smoothing;
+
+      // Remove the preview channel before adding permanent one
+      removeQuickModPreviewFromLogs();
+
+      mathChannels.push(mc);
+      saveMathChannels();
+      logs.forEach(log => applyMathChannelToLog(mc, log));
+
+      // Reset quick mod state
+      resetQuickModToggles();
+
+      renderMathChannelsList();
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect();
+      updatePlot();
     });
   }
 
