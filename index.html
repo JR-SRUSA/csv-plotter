@@ -68,6 +68,26 @@
           <strong>Y Channels:</strong>
           <select id="ySelect" multiple size="6"></select>
           <div id="selectedYColors" class="selected-y-colors"></div>
+
+          <div id="quickModSection" class="quick-modify-section" hidden>
+            <div class="quick-mod-header">
+              <strong>Quick Modify:</strong>
+              <select id="quickModChannel" aria-label="Channel to modify"></select>
+            </div>
+            <div class="quick-mod-options">
+              <label><input type="checkbox" id="quickModNegate" /> ×(−1) Negate</label>
+              <label><input type="checkbox" id="quickModReciprocal" /> 1/x Reciprocal</label>
+              <label><input type="checkbox" id="quickModFilter" /> Forward/Back Filter</label>
+              <div id="quickModFilterControls" class="quick-mod-filter-controls" hidden>
+                <label>Window: <input id="quickModFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
+                <select id="quickModFilterMode">
+                  <option value="time">seconds (time)</option>
+                  <option value="distance">meters (dist)</option>
+                </select>
+              </div>
+            </div>
+            <button id="quickModCreateBtn" type="button" class="quick-mod-create-btn" disabled>Create Math Channel from Mods</button>
+          </div>
         </div>
 
         <div class="math-channels-controls">
@@ -129,7 +149,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-07-08a</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-07-09a</div>
     </section>
 
     <section class="plot">
