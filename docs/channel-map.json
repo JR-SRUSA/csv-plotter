@@ -6,6 +6,12 @@
     "motec": "Ground Speed"
   },
   {
+    "displayName": "Radius",
+    "piboso": "Radius",
+    "aim": "GPS Radius",
+    "motec": "Radius"
+  },
+  {
     "displayName": "LatAcc",
     "piboso": "LatAcc",
     "aim": "GPS LatAcc",

@@ -12,6 +12,23 @@
   const cornerShadeOpacityInput = document.getElementById('cornerShadeOpacity');
   const cornerSwapLRInput = document.getElementById('cornerSwapLR');
   const cornerTrackInfoDiv = document.getElementById('cornerTrackInfo');
+  const fitRacingLineBtn = document.getElementById('fitRacingLineBtn');
+  const racingLineWizard = document.getElementById('racingLineWizard');
+  const racingLineStatus = document.getElementById('racingLineStatus');
+  const racingLineAcceptBtn = document.getElementById('racingLineAcceptBtn');
+  const racingLineRejectBtn = document.getElementById('racingLineRejectBtn');
+  const racingLinePrevBtn = document.getElementById('racingLinePrevBtn');
+  const racingLineDownloadBtn = document.getElementById('racingLineDownloadBtn');
+  const racingLineSpeedWeightInput = document.getElementById('racingLineSpeedWeight');
+  const racingLinePositionWeightInput = document.getElementById('racingLinePositionWeight');
+  const racingLineTangentStartWeightInput = document.getElementById('racingLineTangentStartWeight');
+  const racingLineTangentEndWeightInput = document.getElementById('racingLineTangentEndWeight');
+  const racingLineRadiusWeightInput = document.getElementById('racingLineRadiusWeight');
+  const racingLineSpeedWeightValue = document.getElementById('racingLineSpeedWeightValue');
+  const racingLinePositionWeightValue = document.getElementById('racingLinePositionWeightValue');
+  const racingLineTangentStartWeightValue = document.getElementById('racingLineTangentStartWeightValue');
+  const racingLineTangentEndWeightValue = document.getElementById('racingLineTangentEndWeightValue');
+  const racingLineRadiusWeightValue = document.getElementById('racingLineRadiusWeightValue');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -73,6 +90,7 @@
   // Each entry: { displayName, piboso, aim, motec }
   const DEFAULT_CHANNEL_MAP = [
     { displayName: 'Speed', piboso: 'Speed', aim: 'GPS Speed', motec: 'Ground Speed' },
+    { displayName: 'Radius', piboso: 'Radius', aim: 'GPS Radius', motec: 'Radius' },
     { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc', motec: 'G Force Lat' },
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc', motec: 'G Force Long' },
     { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)', motec: 'Total Acceleration (calc)' },
@@ -116,6 +134,16 @@
   const CORNER_LEFT_COLOR = COLORS[4]; // purple
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
+  const RACING_LINE_CURVE_COLOR = '#2b6de9';
+  const RACING_LINE_ACCEPTED_COLOR = '#7ea7f4';
+  const RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC = 0.25;
+  const RACING_LINE_DEFAULT_WEIGHTS = {
+    speedAnchor: 3.5,
+    position: 1.0,
+    tangentStart: 1.5,
+    tangentEnd: 1.5,
+    radiusFit: 2.0
+  };
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
   let isApplyingAutoOffset = false;
@@ -141,6 +169,20 @@
   let isSyncingPlotHover = false;
   let lastLinkedHoverKey = null;
   let activeCornerHeadingSegments = []; // clickable corner/straight strip segments for current plot
+  let activeCornerDataForFitting = null;
+  let activeCornerReferenceForFitting = null;
+  let racingLineLeafletLayers = [];
+  let racingLineState = {
+    active: false,
+    complete: false,
+    referenceLogId: '',
+    referenceLap: null,
+    cornerSegments: [],
+    currentIndex: 0,
+    decisions: new Map(),
+    preview: null,
+    fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS }
+  };
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
 
@@ -2086,6 +2128,1152 @@
     return { segments, trackLength: rows[rows.length - 1].dist };
   }
 
+  function resetRacingLineState() {
+    racingLineState = {
+      active: false,
+      complete: false,
+      referenceLogId: '',
+      referenceLap: null,
+      cornerSegments: [],
+      currentIndex: 0,
+      decisions: new Map(),
+      preview: null,
+      fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS }
+    };
+    updateRacingLineWizardUI();
+    renderRacingLineOverlay();
+  }
+
+  function normalizeFitWeight(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  }
+
+  function getRacingLineFitWeights() {
+    const fromState = racingLineState && racingLineState.fitWeights ? racingLineState.fitWeights : RACING_LINE_DEFAULT_WEIGHTS;
+    const speedAnchor = normalizeFitWeight(
+      racingLineSpeedWeightInput ? racingLineSpeedWeightInput.value : fromState.speedAnchor,
+      fromState.speedAnchor
+    );
+    const position = normalizeFitWeight(
+      racingLinePositionWeightInput ? racingLinePositionWeightInput.value : fromState.position,
+      fromState.position
+    );
+    const tangentStart = normalizeFitWeight(
+      racingLineTangentStartWeightInput ? racingLineTangentStartWeightInput.value : fromState.tangentStart,
+      fromState.tangentStart
+    );
+    const tangentEnd = normalizeFitWeight(
+      racingLineTangentEndWeightInput ? racingLineTangentEndWeightInput.value : fromState.tangentEnd,
+      fromState.tangentEnd
+    );
+    const radiusFit = normalizeFitWeight(
+      racingLineRadiusWeightInput ? racingLineRadiusWeightInput.value : fromState.radiusFit,
+      fromState.radiusFit
+    );
+    return { speedAnchor, position, tangentStart, tangentEnd, radiusFit };
+  }
+
+  function updateRacingLineWeightLabels() {
+    const w = getRacingLineFitWeights();
+    if (racingLineSpeedWeightValue) racingLineSpeedWeightValue.textContent = w.speedAnchor.toFixed(1);
+    if (racingLinePositionWeightValue) racingLinePositionWeightValue.textContent = w.position.toFixed(1);
+    if (racingLineTangentStartWeightValue) racingLineTangentStartWeightValue.textContent = w.tangentStart.toFixed(1);
+    if (racingLineTangentEndWeightValue) racingLineTangentEndWeightValue.textContent = w.tangentEnd.toFixed(1);
+    if (racingLineRadiusWeightValue) racingLineRadiusWeightValue.textContent = w.radiusFit.toFixed(1);
+    if (racingLineState) racingLineState.fitWeights = w;
+  }
+
+  function getRacingLineSegmentKey(seg) {
+    if (!seg) return '';
+    const numberPart = Number.isFinite(Number(seg.number)) ? Number(seg.number) : 0;
+    const startPart = Number.isFinite(Number(seg.startDist)) ? Number(seg.startDist).toFixed(3) : '0';
+    const endPart = Number.isFinite(Number(seg.endDist)) ? Number(seg.endDist).toFixed(3) : '0';
+    return `${numberPart}|${startPart}|${endPart}`;
+  }
+
+  function getCurrentRacingLineSegment() {
+    if (!racingLineState.active) return null;
+    if (!Array.isArray(racingLineState.cornerSegments) || racingLineState.cornerSegments.length === 0) return null;
+    const idx = Math.max(0, Math.min(racingLineState.currentIndex, racingLineState.cornerSegments.length - 1));
+    return racingLineState.cornerSegments[idx] || null;
+  }
+
+  function collectCornerMapPoints(log, lap, segment) {
+    if (!log || !log.meta || !Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist) || !segment) return [];
+    const mapSource = getMapSourceForLog(log);
+    if (!mapSource) return [];
+
+    const startDist = Number(segment.startDist);
+    const endDist = Number(segment.endDist);
+    if (!Number.isFinite(startDist) || !Number.isFinite(endDist) || endDist <= startDist) return [];
+
+    const points = [];
+    for (let i = 0; i < log.meta.lapNum.length; i++) {
+      if (log.meta.lapNum[i] !== lap) continue;
+      const dist = Number(log.meta.lapRelDist[i]);
+      if (!Number.isFinite(dist) || dist < startDist || dist > endDist) continue;
+      const x = Number(mapSource.xAt(i));
+      const y = Number(mapSource.yAt(i));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      points.push({ x, y, dist, rowIndex: i });
+    }
+
+    if (points.length < 3) return [];
+    points.sort((a, b) => a.dist - b.dist);
+
+    const deduped = [points[0]];
+    for (let i = 1; i < points.length; i++) {
+      const prev = deduped[deduped.length - 1];
+      const curr = points[i];
+      if (Math.hypot(curr.x - prev.x, curr.y - prev.y) <= 1e-6) continue;
+      deduped.push(curr);
+    }
+
+    return deduped;
+  }
+
+  function getSpeedColumnForLog(log) {
+    const resolved = resolveChannelForLog('Speed', log);
+    if (resolved && Array.isArray(log.cols) && log.cols.includes(resolved)) return resolved;
+    const fallbacks = ['Speed', 'GPS Speed', 'Ground Speed'];
+    for (const name of fallbacks) {
+      if (Array.isArray(log.cols) && log.cols.includes(name)) return name;
+    }
+    return '';
+  }
+
+  function getRadiusColumnForLog(log) {
+    const resolved = resolveChannelForLog('Radius', log);
+    if (resolved && Array.isArray(log.cols) && log.cols.includes(resolved)) return resolved;
+    const fallbacks = ['GPS Radius', 'Radius', 'Track Radius'];
+    for (const name of fallbacks) {
+      if (Array.isArray(log.cols) && log.cols.includes(name)) return name;
+    }
+    return '';
+  }
+
+  function buildSmoothedSpeedByRow(log) {
+    if (!log || !Array.isArray(log.data) || !log.meta) return null;
+    const speedCol = getSpeedColumnForLog(log);
+    if (!speedCol) return null;
+    const timeCol = log.meta.timeCol;
+    if (!timeCol) return null;
+
+    const speedValues = log.data.map((row) => {
+      const v = Number(row[speedCol]);
+      return Number.isFinite(v) ? v : null;
+    });
+    const timeValues = log.data.map((row) => {
+      const t = Number(row[timeCol]);
+      return Number.isFinite(t) ? t : null;
+    });
+
+    return computeWindowedAverage(speedValues, timeValues, RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC);
+  }
+
+  function getCornerMinSpeedAnchor(log, lap, segment, pointsByRowIndex) {
+    if (!log || !segment || !(pointsByRowIndex instanceof Map)) return null;
+    const smoothedSpeed = buildSmoothedSpeedByRow(log);
+    if (!Array.isArray(smoothedSpeed)) return null;
+
+    let best = null;
+    for (let i = 0; i < log.meta.lapNum.length; i++) {
+      if (log.meta.lapNum[i] !== lap) continue;
+      const dist = Number(log.meta.lapRelDist[i]);
+      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
+      if (!pointsByRowIndex.has(i)) continue;
+      const speed = Number(smoothedSpeed[i]);
+      if (!Number.isFinite(speed)) continue;
+      const pt = pointsByRowIndex.get(i);
+      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+      if (!best || speed < best.speed) {
+        best = { x: pt.x, y: pt.y, speed, rowIndex: i };
+      }
+    }
+
+    return best;
+  }
+
+  function buildCornerRadiusSamples(log, lap, segment, tByRowIndex) {
+    if (!log || !segment || !(tByRowIndex instanceof Map)) return [];
+    const radiusCol = getRadiusColumnForLog(log);
+    if (!radiusCol) return [];
+
+    const samples = [];
+    for (let i = 0; i < log.meta.lapNum.length; i++) {
+      if (log.meta.lapNum[i] !== lap) continue;
+      const dist = Number(log.meta.lapRelDist[i]);
+      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
+      if (!tByRowIndex.has(i)) continue;
+      const t = Number(tByRowIndex.get(i));
+      const radius = Number(log.data[i][radiusCol]);
+      if (!Number.isFinite(t) || !Number.isFinite(radius) || radius <= 0) continue;
+      samples.push({ t, radius });
+    }
+    return samples;
+  }
+
+  function normalizeVec(x, y) {
+    const nx = Number(x);
+    const ny = Number(y);
+    const mag = Math.hypot(nx, ny);
+    if (!(mag > 1e-9)) return null;
+    return { x: nx / mag, y: ny / mag };
+  }
+
+  function getDefaultStartDirection(points) {
+    if (!Array.isArray(points) || points.length < 2) return { x: 1, y: 0 };
+    for (let i = 1; i < points.length; i++) {
+      const d = normalizeVec(points[i].x - points[0].x, points[i].y - points[0].y);
+      if (d) return d;
+    }
+    return { x: 1, y: 0 };
+  }
+
+  function getDefaultEndDirection(points) {
+    if (!Array.isArray(points) || points.length < 2) return { x: 1, y: 0 };
+    const end = points.length - 1;
+    for (let i = end - 1; i >= 0; i--) {
+      const d = normalizeVec(points[end].x - points[i].x, points[end].y - points[i].y);
+      if (d) return d;
+    }
+    return { x: 1, y: 0 };
+  }
+
+  function fitQuarticBezierWithEndpointTangents(points, tangentGuide, speedAnchor, fitWeights, speedTargetT) {
+    if (!Array.isArray(points) || points.length < 4) return null;
+    const p0 = points[0];
+    const p4 = points[points.length - 1];
+    const chord = [0];
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+      chord.push(total);
+    }
+
+    const denomDist = total > 1e-9 ? total : (points.length - 1);
+    const startDir = normalizeVec(
+      tangentGuide && tangentGuide.startDir ? tangentGuide.startDir.x : NaN,
+      tangentGuide && tangentGuide.startDir ? tangentGuide.startDir.y : NaN
+    ) || getDefaultStartDirection(points);
+    const endDir = normalizeVec(
+      tangentGuide && tangentGuide.endDir ? tangentGuide.endDir.x : NaN,
+      tangentGuide && tangentGuide.endDir ? tangentGuide.endDir.y : NaN
+    ) || getDefaultEndDirection(points);
+
+    const chordLen = Math.max(1e-6, Math.hypot(p4.x - p0.x, p4.y - p0.y));
+    const startNeighborDist = tangentGuide && Number.isFinite(Number(tangentGuide.startNeighborDist))
+      ? Math.max(1e-6, Number(tangentGuide.startNeighborDist))
+      : chordLen;
+    const endNeighborDist = tangentGuide && Number.isFinite(Number(tangentGuide.endNeighborDist))
+      ? Math.max(1e-6, Number(tangentGuide.endNeighborDist))
+      : chordLen;
+    const weights = fitWeights || RACING_LINE_DEFAULT_WEIGHTS;
+    const positionWeight = normalizeFitWeight(weights.position, RACING_LINE_DEFAULT_WEIGHTS.position);
+    const speedWeight = normalizeFitWeight(weights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor);
+    const startTangencyWeight = normalizeFitWeight(weights.tangentStart, RACING_LINE_DEFAULT_WEIGHTS.tangentStart);
+    const endTangencyWeight = normalizeFitWeight(weights.tangentEnd, RACING_LINE_DEFAULT_WEIGHTS.tangentEnd);
+    const effectivePositionWeight = positionWeight > 0 ? positionWeight : 1e-6;
+
+    const startTangencyScale = Math.max(0.2, Math.min(3.0, startTangencyWeight / effectivePositionWeight));
+    const endTangencyScale = Math.max(0.2, Math.min(3.0, endTangencyWeight / effectivePositionWeight));
+
+    const tanStartLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * startNeighborDist));
+    const tanEndLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * endNeighborDist));
+    const tanStartLen = tanStartLenBase * startTangencyScale;
+    const tanEndLen = tanEndLenBase * endTangencyScale;
+
+    const p1 = {
+      x: p0.x + startDir.x * tanStartLen,
+      y: p0.y + startDir.y * tanStartLen
+    };
+    const p3 = {
+      x: p4.x - endDir.x * tanEndLen,
+      y: p4.y - endDir.y * tanEndLen
+    };
+
+    let sumB2 = 0;
+    let sumBx = 0;
+    let sumBy = 0;
+
+    for (let i = 0; i < points.length; i++) {
+      const t = total > 1e-9 ? (chord[i] / denomDist) : (i / denomDist);
+      const omt = 1 - t;
+      const b0 = omt * omt * omt * omt;
+      const b1 = 4 * omt * omt * omt * t;
+      const b2 = 6 * omt * omt * t * t;
+      const b3 = 4 * omt * t * t * t;
+      const b4 = t * t * t * t;
+      if (Math.abs(b2) < 1e-9) continue;
+
+      const rhsX = points[i].x - (b0 * p0.x + b1 * p1.x + b3 * p3.x + b4 * p4.x);
+      const rhsY = points[i].y - (b0 * p0.y + b1 * p1.y + b3 * p3.y + b4 * p4.y);
+      const w = effectivePositionWeight;
+      sumB2 += w * b2 * b2;
+      sumBx += w * b2 * rhsX;
+      sumBy += w * b2 * rhsY;
+    }
+
+    if (speedAnchor && Number.isFinite(speedAnchor.x) && Number.isFinite(speedAnchor.y) && speedWeight > 0) {
+      const targetT = Number.isFinite(speedTargetT) ? Math.max(0, Math.min(1, speedTargetT)) : 0.5;
+      const omt = 1 - targetT;
+      const b0 = omt * omt * omt * omt;
+      const b1 = 4 * omt * omt * omt * targetT;
+      const b2 = 6 * omt * omt * targetT * targetT;
+      const b3 = 4 * omt * targetT * targetT * targetT;
+      const b4 = targetT * targetT * targetT * targetT;
+
+      const rhsX = speedAnchor.x - (b0 * p0.x + b1 * p1.x + b3 * p3.x + b4 * p4.x);
+      const rhsY = speedAnchor.y - (b0 * p0.y + b1 * p1.y + b3 * p3.y + b4 * p4.y);
+      sumB2 += speedWeight * b2 * b2;
+      sumBx += speedWeight * b2 * rhsX;
+      sumBy += speedWeight * b2 * rhsY;
+    }
+
+    let p2;
+    if (sumB2 > 1e-12) {
+      p2 = { x: sumBx / sumB2, y: sumBy / sumB2 };
+    } else {
+      p2 = { x: (p0.x + p4.x) * 0.5, y: (p0.y + p4.y) * 0.5 };
+    }
+
+    return {
+      p0: { x: p0.x, y: p0.y },
+      p1,
+      p2,
+      p3,
+      p4: { x: p4.x, y: p4.y },
+      tangentLengths: {
+        start: tanStartLen,
+        end: tanEndLen
+      }
+    };
+  }
+
+  function evalQuarticBezier(control, t) {
+    const omt = 1 - t;
+    const b0 = omt * omt * omt * omt;
+    const b1 = 4 * omt * omt * omt * t;
+    const b2 = 6 * omt * omt * t * t;
+    const b3 = 4 * omt * t * t * t;
+    const b4 = t * t * t * t;
+    return {
+      x: b0 * control.p0.x + b1 * control.p1.x + b2 * control.p2.x + b3 * control.p3.x + b4 * control.p4.x,
+      y: b0 * control.p0.y + b1 * control.p1.y + b2 * control.p2.y + b3 * control.p3.y + b4 * control.p4.y
+    };
+  }
+
+  function sampleQuarticBezier(control, sampleCount) {
+    const count = Math.max(2, Number(sampleCount) || 60);
+    const pts = [];
+    for (let i = 0; i < count; i++) {
+      const t = count === 1 ? 0 : (i / (count - 1));
+      pts.push({ ...evalQuarticBezier(control, t), t });
+    }
+    return pts;
+  }
+
+  function evalQuarticDerivatives(control, t) {
+    const omt = 1 - t;
+    const d10 = { x: control.p1.x - control.p0.x, y: control.p1.y - control.p0.y };
+    const d21 = { x: control.p2.x - control.p1.x, y: control.p2.y - control.p1.y };
+    const d32 = { x: control.p3.x - control.p2.x, y: control.p3.y - control.p2.y };
+    const d43 = { x: control.p4.x - control.p3.x, y: control.p4.y - control.p3.y };
+    const dd20 = { x: control.p2.x - 2 * control.p1.x + control.p0.x, y: control.p2.y - 2 * control.p1.y + control.p0.y };
+    const dd31 = { x: control.p3.x - 2 * control.p2.x + control.p1.x, y: control.p3.y - 2 * control.p2.y + control.p1.y };
+    const dd42 = { x: control.p4.x - 2 * control.p3.x + control.p2.x, y: control.p4.y - 2 * control.p3.y + control.p2.y };
+
+    const first = {
+      x: 4 * (
+        omt * omt * omt * d10.x
+        + 3 * omt * omt * t * d21.x
+        + 3 * omt * t * t * d32.x
+        + t * t * t * d43.x
+      ),
+      y: 4 * (
+        omt * omt * omt * d10.y
+        + 3 * omt * omt * t * d21.y
+        + 3 * omt * t * t * d32.y
+        + t * t * t * d43.y
+      )
+    };
+    const second = {
+      x: 12 * (
+        omt * omt * dd20.x
+        + 2 * omt * t * dd31.x
+        + t * t * dd42.x
+      ),
+      y: 12 * (
+        omt * omt * dd20.y
+        + 2 * omt * t * dd31.y
+        + t * t * dd42.y
+      )
+    };
+
+    return { first, second };
+  }
+
+  function computeCurvatureAtT(control, t) {
+    const d = evalQuarticDerivatives(control, t);
+    const speedSq = d.first.x * d.first.x + d.first.y * d.first.y;
+    if (!(speedSq > 1e-12)) return null;
+    const cross = Math.abs(d.first.x * d.second.y - d.first.y * d.second.x);
+    const curvature = cross / Math.pow(speedSq, 1.5);
+    return Number.isFinite(curvature) ? curvature : null;
+  }
+
+  function computeRadiusAtT(control, t) {
+    const curvature = computeCurvatureAtT(control, t);
+    if (!(Number.isFinite(curvature) && curvature > 1e-9)) return null;
+    const radius = 1 / curvature;
+    return Number.isFinite(radius) ? radius : null;
+  }
+
+  function computeLeastCurvaturePoint(control, sampleCount = 161) {
+    if (!control || !control.p0 || !control.p1 || !control.p2 || !control.p3 || !control.p4) return null;
+
+    let best = null;
+    const steps = Math.max(5, Number(sampleCount) || 161);
+    for (let i = 0; i < steps; i++) {
+      const t = i / (steps - 1);
+      const curvature = computeCurvatureAtT(control, t);
+      if (!Number.isFinite(curvature)) continue;
+
+      if (!best || curvature < best.curvature) {
+        const pt = evalQuarticBezier(control, t);
+        best = { x: pt.x, y: pt.y, t, curvature };
+      }
+    }
+
+    return best;
+  }
+
+  function optimizeQuarticP2(controlSeed, optimizationContext) {
+    if (!controlSeed || !optimizationContext) return controlSeed;
+    const {
+      points,
+      pointTs,
+      speedAnchor,
+      speedTargetT,
+      radiusSamples,
+      fitWeights,
+      chordLen
+    } = optimizationContext;
+
+    const weights = fitWeights || RACING_LINE_DEFAULT_WEIGHTS;
+    const wPos = normalizeFitWeight(weights.position, RACING_LINE_DEFAULT_WEIGHTS.position);
+    const wSpeed = normalizeFitWeight(weights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor);
+    const wRadius = normalizeFitWeight(weights.radiusFit, RACING_LINE_DEFAULT_WEIGHTS.radiusFit);
+    const normLenSq = Math.max(1e-6, chordLen * chordLen);
+
+    const evaluateCost = (control) => {
+      let posCost = 0;
+      let posCount = 0;
+      if (Array.isArray(points) && Array.isArray(pointTs)) {
+        const n = Math.min(points.length, pointTs.length);
+        for (let i = 0; i < n; i++) {
+          const t = pointTs[i];
+          if (!Number.isFinite(t)) continue;
+          const p = evalQuarticBezier(control, t);
+          const dx = p.x - points[i].x;
+          const dy = p.y - points[i].y;
+          posCost += (dx * dx + dy * dy) / normLenSq;
+          posCount += 1;
+        }
+      }
+      if (posCount > 0) posCost /= posCount;
+
+      const least = computeLeastCurvaturePoint(control, 241);
+      let speedAlignCost = 0;
+      let speedPointCost = 0;
+      if (Number.isFinite(speedTargetT) && least && Number.isFinite(least.t)) {
+        const dt = least.t - speedTargetT;
+        speedAlignCost = dt * dt;
+      }
+      if (speedAnchor && Number.isFinite(speedTargetT)) {
+        const anchorFit = evalQuarticBezier(control, speedTargetT);
+        const dx = anchorFit.x - speedAnchor.x;
+        const dy = anchorFit.y - speedAnchor.y;
+        speedPointCost = (dx * dx + dy * dy) / normLenSq;
+      }
+
+      let radiusCost = 0;
+      let radiusCount = 0;
+      if (Array.isArray(radiusSamples)) {
+        radiusSamples.forEach((sample) => {
+          const radiusCurve = computeRadiusAtT(control, sample.t);
+          if (!Number.isFinite(radiusCurve) || !Number.isFinite(sample.radius) || sample.radius <= 0) return;
+          const denom = Math.max(5, Math.abs(sample.radius));
+          const err = (radiusCurve - sample.radius) / denom;
+          radiusCost += err * err;
+          radiusCount += 1;
+        });
+      }
+      if (radiusCount > 0) radiusCost /= radiusCount;
+
+      return (wPos * posCost) + (wSpeed * (8 * speedAlignCost + speedPointCost)) + (wRadius * radiusCost);
+    };
+
+    const control = {
+      ...controlSeed,
+      p2: { x: controlSeed.p2.x, y: controlSeed.p2.y }
+    };
+    let bestCost = evaluateCost(control);
+    let step = Math.max(0.2, chordLen * 0.12);
+
+    for (let iter = 0; iter < 28; iter++) {
+      let improved = false;
+      const candidates = [
+        { x: control.p2.x + step, y: control.p2.y },
+        { x: control.p2.x - step, y: control.p2.y },
+        { x: control.p2.x, y: control.p2.y + step },
+        { x: control.p2.x, y: control.p2.y - step },
+        { x: control.p2.x + step * 0.7, y: control.p2.y + step * 0.7 },
+        { x: control.p2.x - step * 0.7, y: control.p2.y - step * 0.7 },
+        { x: control.p2.x + step * 0.7, y: control.p2.y - step * 0.7 },
+        { x: control.p2.x - step * 0.7, y: control.p2.y + step * 0.7 }
+      ];
+
+      for (const candidate of candidates) {
+        const candidateControl = {
+          ...control,
+          p2: candidate
+        };
+        const cost = evaluateCost(candidateControl);
+        if (cost + 1e-10 < bestCost) {
+          bestCost = cost;
+          control.p2 = candidate;
+          improved = true;
+        }
+      }
+
+      if (!improved) step *= 0.55;
+      if (step < Math.max(0.01, chordLen * 0.0008)) break;
+    }
+
+    return control;
+  }
+
+  function getCornerNeighborTangentGuide(log, lap, cornerSegments, segmentIndex, points) {
+    if (!Array.isArray(cornerSegments) || cornerSegments.length === 0 || !Array.isArray(points) || points.length < 2) return null;
+
+    const total = cornerSegments.length;
+    const prevIndex = (segmentIndex - 1 + total) % total;
+    const nextIndex = (segmentIndex + 1) % total;
+    const prevSeg = cornerSegments[prevIndex];
+    const nextSeg = cornerSegments[nextIndex];
+
+    const start = points[0];
+    const end = points[points.length - 1];
+
+    let startDir = null;
+    let endDir = null;
+    let startNeighborDist = null;
+    let endNeighborDist = null;
+
+    if (prevSeg && prevIndex !== segmentIndex) {
+      const prevPts = collectCornerMapPoints(log, lap, prevSeg);
+      if (prevPts.length > 0) {
+        const prevEnd = prevPts[prevPts.length - 1];
+        const d = normalizeVec(start.x - prevEnd.x, start.y - prevEnd.y);
+        if (d) {
+          startDir = d;
+          startNeighborDist = Math.hypot(start.x - prevEnd.x, start.y - prevEnd.y);
+        }
+      }
+    }
+
+    if (nextSeg && nextIndex !== segmentIndex) {
+      const nextPts = collectCornerMapPoints(log, lap, nextSeg);
+      if (nextPts.length > 0) {
+        const nextStart = nextPts[0];
+        const d = normalizeVec(nextStart.x - end.x, nextStart.y - end.y);
+        if (d) {
+          endDir = d;
+          endNeighborDist = Math.hypot(nextStart.x - end.x, nextStart.y - end.y);
+        }
+      }
+    }
+
+    return {
+      startDir,
+      endDir,
+      startNeighborDist,
+      endNeighborDist
+    };
+  }
+
+  function buildCornerBezierFit(log, lap, segment, cornerSegments, segmentIndex, fitWeights) {
+    const pointsByRowIndex = new Map();
+    const points = collectCornerMapPoints(log, lap, segment);
+    if (points.length < 4) return null;
+
+    if (log && log.meta && Array.isArray(log.meta.lapNum) && Array.isArray(log.meta.lapRelDist)) {
+      const mapSource = getMapSourceForLog(log);
+      if (mapSource) {
+        for (let i = 0; i < log.meta.lapNum.length; i++) {
+          if (log.meta.lapNum[i] !== lap) continue;
+          const dist = Number(log.meta.lapRelDist[i]);
+          if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
+          const x = Number(mapSource.xAt(i));
+          const y = Number(mapSource.yAt(i));
+          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+          pointsByRowIndex.set(i, { x, y, dist });
+        }
+      }
+    }
+
+    const tangentGuide = getCornerNeighborTangentGuide(log, lap, cornerSegments, segmentIndex, points);
+    const speedAnchor = getCornerMinSpeedAnchor(log, lap, segment, pointsByRowIndex);
+    const fitWeightsResolved = {
+      speedAnchor: normalizeFitWeight(fitWeights && fitWeights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor),
+      position: normalizeFitWeight(fitWeights && fitWeights.position, RACING_LINE_DEFAULT_WEIGHTS.position),
+      tangentStart: normalizeFitWeight(fitWeights && fitWeights.tangentStart, RACING_LINE_DEFAULT_WEIGHTS.tangentStart),
+      tangentEnd: normalizeFitWeight(fitWeights && fitWeights.tangentEnd, RACING_LINE_DEFAULT_WEIGHTS.tangentEnd),
+      radiusFit: normalizeFitWeight(fitWeights && fitWeights.radiusFit, RACING_LINE_DEFAULT_WEIGHTS.radiusFit)
+    };
+
+    const chord = [0];
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+      chord.push(total);
+    }
+    const denomDist = total > 1e-9 ? total : (points.length - 1);
+    const pointTs = points.map((_, i) => (total > 1e-9 ? (chord[i] / denomDist) : (i / denomDist)));
+    const tByRowIndex = new Map();
+    points.forEach((point, i) => {
+      if (Number.isFinite(point.rowIndex)) tByRowIndex.set(point.rowIndex, pointTs[i]);
+    });
+
+    const speedTargetT = (speedAnchor && Number.isFinite(speedAnchor.rowIndex) && tByRowIndex.has(speedAnchor.rowIndex))
+      ? Number(tByRowIndex.get(speedAnchor.rowIndex))
+      : null;
+    const radiusSamples = buildCornerRadiusSamples(log, lap, segment, tByRowIndex);
+
+    let control = fitQuarticBezierWithEndpointTangents(points, tangentGuide, speedAnchor, fitWeightsResolved, speedTargetT);
+    if (!control) return null;
+
+    control = optimizeQuarticP2(control, {
+      points,
+      pointTs,
+      speedAnchor,
+      speedTargetT,
+      radiusSamples,
+      fitWeights: fitWeightsResolved,
+      chordLen: Math.max(1, Math.hypot(control.p4.x - control.p0.x, control.p4.y - control.p0.y))
+    });
+
+    const sampled = sampleQuarticBezier(control, Math.max(60, Math.min(280, points.length * 4)));
+    const leastCurvature = computeLeastCurvaturePoint(control, 181);
+
+    let radiusFitRmse = null;
+    if (radiusSamples.length > 0) {
+      let sumSq = 0;
+      let count = 0;
+      radiusSamples.forEach((sample) => {
+        const rCurve = computeRadiusAtT(control, sample.t);
+        if (!Number.isFinite(rCurve) || !Number.isFinite(sample.radius)) return;
+        const diff = rCurve - sample.radius;
+        sumSq += diff * diff;
+        count += 1;
+      });
+      if (count > 0) radiusFitRmse = Math.sqrt(sumSq / count);
+    }
+
+    const speedCurvatureTError = (leastCurvature && Number.isFinite(leastCurvature.t) && Number.isFinite(speedTargetT))
+      ? Math.abs(leastCurvature.t - speedTargetT)
+      : null;
+
+    const tangentStartDir = normalizeVec(control.p1.x - control.p0.x, control.p1.y - control.p0.y);
+    const tangentEndDir = normalizeVec(control.p4.x - control.p3.x, control.p4.y - control.p3.y);
+    const tangentRayScale = 1.8;
+    const tangentLines = {
+      start: tangentStartDir
+        ? {
+          from: { x: control.p0.x, y: control.p0.y },
+          to: {
+            x: control.p0.x + tangentStartDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0),
+            y: control.p0.y + tangentStartDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0)
+          }
+        }
+        : null,
+      end: tangentEndDir
+        ? {
+          from: { x: control.p4.x, y: control.p4.y },
+          to: {
+            x: control.p4.x + tangentEndDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.end) ? control.tangentLengths.end * tangentRayScale : 0),
+            y: control.p4.y + tangentEndDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.end) ? control.tangentLengths.end * tangentRayScale : 0)
+          }
+        }
+        : null
+    };
+
+    return {
+      segment,
+      pointCount: points.length,
+      control,
+      sampled,
+      leastCurvature,
+      speedTargetT,
+      speedCurvatureTError,
+      speedAnchor,
+      fitWeights: fitWeightsResolved,
+      radiusSamples,
+      radiusFitRmse,
+      tangentLines,
+      startPoint: { x: control.p0.x, y: control.p0.y },
+      endPoint: { x: control.p4.x, y: control.p4.y }
+    };
+  }
+
+  function getReferenceLogFromRacingState() {
+    if (!racingLineState.referenceLogId) return null;
+    return logs.find(l => l.id === racingLineState.referenceLogId) || null;
+  }
+
+  function computeCurrentRacingLinePreview() {
+    const segment = getCurrentRacingLineSegment();
+    const log = getReferenceLogFromRacingState();
+    const lap = racingLineState.referenceLap;
+    if (!segment || !log || !Number.isFinite(Number(lap))) return null;
+    const weights = getRacingLineFitWeights();
+    return buildCornerBezierFit(
+      log,
+      lap,
+      segment,
+      racingLineState.cornerSegments,
+      racingLineState.currentIndex,
+      weights
+    );
+  }
+
+  function getAcceptedRacingLineFits() {
+    const fits = [];
+    if (!Array.isArray(racingLineState.cornerSegments)) return fits;
+    racingLineState.cornerSegments.forEach((segment) => {
+      const key = getRacingLineSegmentKey(segment);
+      const decision = racingLineState.decisions.get(key);
+      if (!decision || decision.status !== 'accepted' || !decision.fit) return;
+      fits.push(decision.fit);
+    });
+    return fits;
+  }
+
+  function racingLineProgressSummary() {
+    const total = Array.isArray(racingLineState.cornerSegments) ? racingLineState.cornerSegments.length : 0;
+    let accepted = 0;
+    let rejected = 0;
+    racingLineState.decisions.forEach((decision) => {
+      if (!decision || !decision.status) return;
+      if (decision.status === 'accepted') accepted += 1;
+      else if (decision.status === 'rejected') rejected += 1;
+    });
+    const pending = Math.max(0, total - accepted - rejected);
+    return { total, accepted, rejected, pending };
+  }
+
+  function updateRacingLineWizardUI() {
+    if (!racingLineWizard || !racingLineStatus || !fitRacingLineBtn) return;
+
+    if (!racingLineState.active && !racingLineState.complete) {
+      racingLineWizard.hidden = true;
+      fitRacingLineBtn.textContent = 'Fit Racing Line';
+      return;
+    }
+
+    racingLineWizard.hidden = false;
+    const progress = racingLineProgressSummary();
+    const current = getCurrentRacingLineSegment();
+
+    if (racingLineState.active && current) {
+      const cornerLabel = current.number ? `Corner ${current.number}` : `Corner ${racingLineState.currentIndex + 1}`;
+      if (racingLineState.preview && Number.isFinite(racingLineState.preview.pointCount)) {
+        const speedAnchorText = racingLineState.preview.speedAnchor && Number.isFinite(racingLineState.preview.speedAnchor.speed)
+          ? ` Min-speed ${racingLineState.preview.speedAnchor.speed.toFixed(2)}.`
+          : '';
+        const speedMatchText = Number.isFinite(racingLineState.preview.speedCurvatureTError)
+          ? ` Speed-curvature dT=${racingLineState.preview.speedCurvatureTError.toFixed(3)}.`
+          : '';
+        const radiusFitText = Number.isFinite(racingLineState.preview.radiusFitRmse)
+          ? ` Radius RMSE ${racingLineState.preview.radiusFitRmse.toFixed(2)} m.`
+          : '';
+        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) | ${racingLineState.preview.pointCount} source points.${speedAnchorText}${speedMatchText}${radiusFitText} Accept or reject to continue.`;
+      } else {
+        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) has too few valid Map X/Y points for a stable fit. Reject to continue.`;
+      }
+      fitRacingLineBtn.textContent = 'Restart Racing Line Fit';
+    } else {
+      racingLineStatus.textContent = `Racing line review complete. Accepted ${progress.accepted}, rejected ${progress.rejected}. Download JSON to export.`;
+      fitRacingLineBtn.textContent = 'Restart Racing Line Fit';
+    }
+
+    if (racingLineAcceptBtn) racingLineAcceptBtn.disabled = !(racingLineState.active && !!racingLineState.preview);
+    if (racingLineRejectBtn) racingLineRejectBtn.disabled = !racingLineState.active;
+    if (racingLinePrevBtn) racingLinePrevBtn.disabled = !racingLineState.active || racingLineState.currentIndex <= 0;
+    if (racingLineDownloadBtn) {
+      const hasReviewData = progress.accepted + progress.rejected > 0;
+      racingLineDownloadBtn.disabled = !hasReviewData;
+    }
+  }
+
+  function getRacingLineGeoContext(selFiles) {
+    const trackDefaults = getSelectedGpBikesTrackDefaults(selFiles);
+    const manualOrigin = getManualMapOrigin();
+    const origin = manualOrigin
+      || (trackDefaults ? { originLat: trackDefaults.latitude, originLon: trackDefaults.longitude } : null)
+      || getFirstDerivedMapOrigin(selFiles);
+    const offsets = getMapOffsets();
+    return { origin, offsets };
+  }
+
+  function racingLinePointToLeafletLatLng(point, mode, geoCtx) {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+    if (mode === 'xy') return [point.y, point.x];
+    if (mode !== 'geo') return null;
+
+    if (!window.MapCoordinateUtils || typeof window.MapCoordinateUtils.localXYToLatLonMeters !== 'function') return null;
+    if (!geoCtx || !geoCtx.origin || !Number.isFinite(geoCtx.origin.originLat) || !Number.isFinite(geoCtx.origin.originLon)) return null;
+
+    const offsets = geoCtx.offsets || { x: 0, y: 0 };
+    const localX = point.x - (Number.isFinite(offsets.x) ? offsets.x : 0);
+    const localY = point.y - (Number.isFinite(offsets.y) ? offsets.y : 0);
+    const ll = window.MapCoordinateUtils.localXYToLatLonMeters(localX, localY, geoCtx.origin.originLat, geoCtx.origin.originLon);
+    if (!ll || !Number.isFinite(ll.lat) || !Number.isFinite(ll.lon)) return null;
+    return [ll.lat, ll.lon];
+  }
+
+  function clearRacingLineOverlay() {
+    if (!leafletMap || !Array.isArray(racingLineLeafletLayers)) return;
+    racingLineLeafletLayers.forEach((layer) => {
+      if (leafletMap.hasLayer(layer)) leafletMap.removeLayer(layer);
+    });
+    racingLineLeafletLayers = [];
+  }
+
+  function renderRacingLineOverlay(mode = leafletMapMode) {
+    clearRacingLineOverlay();
+    if (!leafletMap || !mode || (mode !== 'geo' && mode !== 'xy')) return;
+
+    const hasActiveWorkflow = racingLineState.active || racingLineState.complete;
+    if (!hasActiveWorkflow) return;
+
+    const selFiles = getSelectedFiles();
+    const geoCtx = getRacingLineGeoContext(selFiles);
+    const acceptedFits = getAcceptedRacingLineFits();
+
+    acceptedFits.forEach((fit) => {
+      const latlngs = fit.sampled
+        .map(pt => racingLinePointToLeafletLatLng(pt, mode, geoCtx))
+        .filter(pt => Array.isArray(pt));
+      if (latlngs.length < 2) return;
+      const line = L.polyline(latlngs, {
+        color: RACING_LINE_ACCEPTED_COLOR,
+        weight: 3,
+        opacity: 0.8
+      }).addTo(leafletMap);
+      racingLineLeafletLayers.push(line);
+
+      if (fit.tangentLines && fit.tangentLines.start) {
+        const s0 = racingLinePointToLeafletLatLng(fit.tangentLines.start.from, mode, geoCtx);
+        const s1 = racingLinePointToLeafletLatLng(fit.tangentLines.start.to, mode, geoCtx);
+        if (Array.isArray(s0) && Array.isArray(s1)) {
+          const sLine = L.polyline([s0, s1], {
+            color: '#6f87b6',
+            weight: 2,
+            opacity: 0.75,
+            dashArray: '6 5'
+          }).addTo(leafletMap);
+          racingLineLeafletLayers.push(sLine);
+        }
+      }
+      if (fit.tangentLines && fit.tangentLines.end) {
+        const e0 = racingLinePointToLeafletLatLng(fit.tangentLines.end.from, mode, geoCtx);
+        const e1 = racingLinePointToLeafletLatLng(fit.tangentLines.end.to, mode, geoCtx);
+        if (Array.isArray(e0) && Array.isArray(e1)) {
+          const eLine = L.polyline([e0, e1], {
+            color: '#6f87b6',
+            weight: 2,
+            opacity: 0.75,
+            dashArray: '6 5'
+          }).addTo(leafletMap);
+          racingLineLeafletLayers.push(eLine);
+        }
+      }
+    });
+
+    if (!racingLineState.preview) return;
+    const previewLatLng = racingLineState.preview.sampled
+      .map(pt => racingLinePointToLeafletLatLng(pt, mode, geoCtx))
+      .filter(pt => Array.isArray(pt));
+    if (previewLatLng.length >= 2) {
+      const previewLine = L.polyline(previewLatLng, {
+        color: RACING_LINE_CURVE_COLOR,
+        weight: 4,
+        opacity: 0.95
+      }).addTo(leafletMap);
+      racingLineLeafletLayers.push(previewLine);
+    }
+
+    if (racingLineState.preview.tangentLines && racingLineState.preview.tangentLines.start) {
+      const s0 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.start.from, mode, geoCtx);
+      const s1 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.start.to, mode, geoCtx);
+      if (Array.isArray(s0) && Array.isArray(s1)) {
+        const sLine = L.polyline([s0, s1], {
+          color: '#2e4d89',
+          weight: 3,
+          opacity: 0.9,
+          dashArray: '8 5'
+        }).addTo(leafletMap);
+        racingLineLeafletLayers.push(sLine);
+      }
+    }
+
+    if (racingLineState.preview.tangentLines && racingLineState.preview.tangentLines.end) {
+      const e0 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.end.from, mode, geoCtx);
+      const e1 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.end.to, mode, geoCtx);
+      if (Array.isArray(e0) && Array.isArray(e1)) {
+        const eLine = L.polyline([e0, e1], {
+          color: '#2e4d89',
+          weight: 3,
+          opacity: 0.9,
+          dashArray: '8 5'
+        }).addTo(leafletMap);
+        racingLineLeafletLayers.push(eLine);
+      }
+    }
+
+    if (racingLineState.preview.leastCurvature) {
+      const markerLatLng = racingLinePointToLeafletLatLng(racingLineState.preview.leastCurvature, mode, geoCtx);
+      if (Array.isArray(markerLatLng)) {
+        const marker = L.circleMarker(markerLatLng, {
+          radius: 7,
+          color: '#163f92',
+          weight: 2,
+          fillColor: '#d9e6ff',
+          fillOpacity: 0.95
+        }).bindTooltip('Least curvature', { permanent: false, direction: 'top' }).addTo(leafletMap);
+        racingLineLeafletLayers.push(marker);
+      }
+    }
+
+    if (racingLineState.preview.speedAnchor) {
+      const speedAnchorLatLng = racingLinePointToLeafletLatLng(racingLineState.preview.speedAnchor, mode, geoCtx);
+      if (Array.isArray(speedAnchorLatLng)) {
+        const speedMarker = L.circleMarker(speedAnchorLatLng, {
+          radius: 6,
+          color: '#8b4a00',
+          weight: 2,
+          fillColor: '#ffd9a8',
+          fillOpacity: 0.95
+        }).bindTooltip('Min speed anchor', { permanent: false, direction: 'top' }).addTo(leafletMap);
+        racingLineLeafletLayers.push(speedMarker);
+      }
+    }
+  }
+
+  function startRacingLineFitWorkflow() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
+    if (!cornerRef) {
+      if (racingLineStatus) racingLineStatus.textContent = 'Unable to start fit: select at least one lap with corner data.';
+      if (racingLineWizard) racingLineWizard.hidden = false;
+      return;
+    }
+
+    const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
+    const cornerData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+    const cornerSegments = (cornerData && Array.isArray(cornerData.segments))
+      ? cornerData.segments.filter(seg => seg.type === 'left' || seg.type === 'right')
+      : [];
+
+    if (cornerSegments.length === 0) {
+      if (racingLineStatus) racingLineStatus.textContent = 'No corners found to fit on the selected reference lap.';
+      if (racingLineWizard) racingLineWizard.hidden = false;
+      return;
+    }
+
+    racingLineState.active = true;
+    racingLineState.complete = false;
+    racingLineState.referenceLogId = cornerRef.log.id;
+    racingLineState.referenceLap = cornerRef.lap;
+    racingLineState.cornerSegments = cornerSegments;
+    racingLineState.currentIndex = 0;
+    racingLineState.decisions = new Map();
+    racingLineState.preview = computeCurrentRacingLinePreview();
+    const firstSegment = getCurrentRacingLineSegment();
+    if (firstSegment) zoomToCornerHeadingSegment(firstSegment);
+    updateRacingLineWizardUI();
+    renderRacingLineOverlay();
+  }
+
+  function stepRacingLineForward() {
+    if (!racingLineState.active) return;
+    const total = racingLineState.cornerSegments.length;
+    if (racingLineState.currentIndex < total - 1) {
+      racingLineState.currentIndex += 1;
+      racingLineState.preview = computeCurrentRacingLinePreview();
+      const nextSegment = getCurrentRacingLineSegment();
+      if (nextSegment) zoomToCornerHeadingSegment(nextSegment);
+    } else {
+      racingLineState.active = false;
+      racingLineState.complete = true;
+      racingLineState.preview = null;
+    }
+    updateRacingLineWizardUI();
+    renderRacingLineOverlay();
+  }
+
+  function stepRacingLineBackward() {
+    if (!racingLineState.active) return;
+    if (racingLineState.currentIndex <= 0) return;
+    racingLineState.currentIndex -= 1;
+    racingLineState.preview = computeCurrentRacingLinePreview();
+    const currentSegment = getCurrentRacingLineSegment();
+    if (currentSegment) zoomToCornerHeadingSegment(currentSegment);
+    updateRacingLineWizardUI();
+    renderRacingLineOverlay();
+  }
+
+  function acceptCurrentRacingLineFit() {
+    if (!racingLineState.active) return;
+    const segment = getCurrentRacingLineSegment();
+    if (!segment || !racingLineState.preview) return;
+
+    const key = getRacingLineSegmentKey(segment);
+    racingLineState.decisions.set(key, {
+      status: 'accepted',
+      segment,
+      fit: racingLineState.preview
+    });
+    stepRacingLineForward();
+  }
+
+  function rejectCurrentRacingLineFit() {
+    if (!racingLineState.active) return;
+    const segment = getCurrentRacingLineSegment();
+    if (!segment) return;
+
+    const key = getRacingLineSegmentKey(segment);
+    racingLineState.decisions.set(key, {
+      status: 'rejected',
+      segment,
+      fit: null
+    });
+    stepRacingLineForward();
+  }
+
+  function buildRacingLineExportObject() {
+    const log = getReferenceLogFromRacingState();
+    const lap = racingLineState.referenceLap;
+    const decisionList = [];
+    const acceptedFits = [];
+
+    racingLineState.cornerSegments.forEach((segment) => {
+      const key = getRacingLineSegmentKey(segment);
+      const decision = racingLineState.decisions.get(key);
+      const status = decision ? decision.status : 'pending';
+      let fitPayload = null;
+
+      if (decision && decision.status === 'accepted' && decision.fit) {
+        const fit = decision.fit;
+        acceptedFits.push(fit);
+        fitPayload = {
+          bezierOrder: 4,
+          speedSmoothingHalfWindowSec: RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC,
+          fitWeights: fit.fitWeights || getRacingLineFitWeights(),
+          speedTargetT: Number.isFinite(fit.speedTargetT) ? fit.speedTargetT : null,
+          speedCurvatureTError: Number.isFinite(fit.speedCurvatureTError) ? fit.speedCurvatureTError : null,
+          radiusFitRmse: Number.isFinite(fit.radiusFitRmse) ? fit.radiusFitRmse : null,
+          controlPoints: {
+            p0: { x: fit.control.p0.x, y: fit.control.p0.y },
+            p1: { x: fit.control.p1.x, y: fit.control.p1.y },
+            p2: { x: fit.control.p2.x, y: fit.control.p2.y },
+            p3: { x: fit.control.p3.x, y: fit.control.p3.y },
+            p4: { x: fit.control.p4.x, y: fit.control.p4.y }
+          },
+          tangentLines: fit.tangentLines || null,
+          minSpeedAnchorPoint: fit.speedAnchor
+            ? {
+              x: fit.speedAnchor.x,
+              y: fit.speedAnchor.y,
+              speed: fit.speedAnchor.speed,
+              rowIndex: fit.speedAnchor.rowIndex
+            }
+            : null,
+          radiusSamples: Array.isArray(fit.radiusSamples)
+            ? fit.radiusSamples.map(sample => ({ t: sample.t, radius: sample.radius }))
+            : [],
+          leastCurvaturePoint: fit.leastCurvature
+            ? {
+              x: fit.leastCurvature.x,
+              y: fit.leastCurvature.y,
+              t: fit.leastCurvature.t,
+              curvature: fit.leastCurvature.curvature
+            }
+            : null,
+          sampledPoints: fit.sampled.map(pt => ({ x: pt.x, y: pt.y, t: pt.t }))
+        };
+      }
+
+      decisionList.push({
+        number: segment.number || null,
+        type: segment.type,
+        startDist: segment.startDist,
+        endDist: segment.endDist,
+        status,
+        fit: fitPayload
+      });
+    });
+
+    const straightSegments = [];
+    if (acceptedFits.length >= 2) {
+      for (let i = 0; i < acceptedFits.length; i++) {
+        const curr = acceptedFits[i];
+        const next = acceptedFits[(i + 1) % acceptedFits.length];
+        straightSegments.push({
+          fromCorner: curr.segment.number || null,
+          toCorner: next.segment.number || null,
+          startPoint: { x: curr.endPoint.x, y: curr.endPoint.y },
+          endPoint: { x: next.startPoint.x, y: next.startPoint.y }
+        });
+      }
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      source: {
+        fileId: log ? log.id : null,
+        fileName: log ? log.name : null,
+        lap
+      },
+      fittedCorners: decisionList,
+      straightSegments
+    };
+  }
+
+  function downloadRacingLineJson() {
+    const payload = buildRacingLineExportObject();
+    const text = JSON.stringify(payload, null, 2);
+    const venue = (log => {
+      const raw = log ? (getLogVenue(log) || 'track') : 'track';
+      return String(raw).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'track';
+    })(getReferenceLogFromRacingState());
+    const stamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+$/, '');
+    const fileName = `${venue}-racing-line-${stamp}.json`;
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   // Linear interpolation over a sorted X array.
   function interpAt(xArr, yArr, x) {
     if (!xArr || xArr.length === 0) return null;
@@ -3640,6 +4828,7 @@
   function clearLeafletMapPlot() {
     leafletHoverLookup = new Map();
     clearLeafletHoverMarker();
+    clearRacingLineOverlay();
     removeLeafletColorLegend();
     leafletViewState = null;
     leafletViewStateUserSet = false;
@@ -3802,6 +4991,7 @@
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
     updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig, mapColorMode);
+    renderRacingLineOverlay(mode);
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
@@ -4057,6 +5247,8 @@
       }
     }
     const showCornerStrip = !!(cornerData && cornerData.segments.length > 0);
+    activeCornerDataForFitting = cornerData;
+    activeCornerReferenceForFitting = cornerRef;
 
     const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip);
     const layout = built.layout;
@@ -4199,6 +5391,16 @@
     bindMainPlotRelayoutSync();
     bindCornerStripZoom();
 
+    if (racingLineState.active) {
+      const referenceLog = getReferenceLogFromRacingState();
+      if (!referenceLog) {
+        resetRacingLineState();
+      } else {
+        racingLineState.preview = computeCurrentRacingLinePreview();
+        updateRacingLineWizardUI();
+      }
+    }
+
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
 
@@ -4237,6 +5439,43 @@
   if (showCornersInput) showCornersInput.addEventListener('change', ()=> updatePlot());
   if (cornerShadeOpacityInput) cornerShadeOpacityInput.addEventListener('input', ()=> updatePlot());
   if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
+  if (fitRacingLineBtn) {
+    fitRacingLineBtn.addEventListener('click', () => {
+      startRacingLineFitWorkflow();
+    });
+  }
+  if (racingLineAcceptBtn) {
+    racingLineAcceptBtn.addEventListener('click', () => {
+      acceptCurrentRacingLineFit();
+    });
+  }
+  if (racingLineRejectBtn) {
+    racingLineRejectBtn.addEventListener('click', () => {
+      rejectCurrentRacingLineFit();
+    });
+  }
+  if (racingLinePrevBtn) {
+    racingLinePrevBtn.addEventListener('click', () => {
+      stepRacingLineBackward();
+    });
+  }
+  if (racingLineDownloadBtn) {
+    racingLineDownloadBtn.addEventListener('click', () => {
+      downloadRacingLineJson();
+    });
+  }
+  const onRacingLineWeightChanged = () => {
+    updateRacingLineWeightLabels();
+    if (!racingLineState.active) return;
+    racingLineState.preview = computeCurrentRacingLinePreview();
+    updateRacingLineWizardUI();
+    renderRacingLineOverlay();
+  };
+  if (racingLineSpeedWeightInput) racingLineSpeedWeightInput.addEventListener('input', onRacingLineWeightChanged);
+  if (racingLinePositionWeightInput) racingLinePositionWeightInput.addEventListener('input', onRacingLineWeightChanged);
+  if (racingLineTangentStartWeightInput) racingLineTangentStartWeightInput.addEventListener('input', onRacingLineWeightChanged);
+  if (racingLineTangentEndWeightInput) racingLineTangentEndWeightInput.addEventListener('input', onRacingLineWeightChanged);
+  if (racingLineRadiusWeightInput) racingLineRadiusWeightInput.addEventListener('input', onRacingLineWeightChanged);
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();
@@ -4325,6 +5564,7 @@
       const idx = logs.findIndex(l=>l.id===id);
       if (idx>=0) {
         logs.splice(idx,1);
+        resetRacingLineState();
         mapOffsetManuallyAdjusted = false;
         lastAutoOffsetSignature = '';
         lastTrackDefaultSignature = '';
@@ -4399,6 +5639,7 @@
 
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
+    resetRacingLineState();
     mapOffsetManuallyAdjusted = false;
     mapCenterManuallyAdjusted = false;
     lastAutoOffsetSignature = '';
@@ -4472,6 +5713,8 @@
   }
 
   setMapDisplayMode('none');
+  updateRacingLineWeightLabels();
+  updateRacingLineWizardUI();
 
   // Math channel UI handlers
   function showMathChError(msg) {
