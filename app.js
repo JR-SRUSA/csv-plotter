@@ -6,6 +6,7 @@
   const xCustomSelect = document.getElementById('xCustomSelect');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
+  const mapDrawModeSelect = document.getElementById('mapDrawMode');
   const mapColorModeSelect = document.getElementById('mapColorMode');
   const showCornersInput = document.getElementById('showCorners');
   const cornerShadeOpacityInput = document.getElementById('cornerShadeOpacity');
@@ -64,6 +65,7 @@
   const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
   const DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS = [];
+  const BLANK_BASEMAP_BACKGROUND = '#d2d6dc';
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -3153,7 +3155,8 @@
 
     syncLeafletContainerHeight();
 
-    leafletMapDiv.style.background = '#fff';
+    // Used by the blank basemap so white values in divergent colormaps remain visible.
+    leafletMapDiv.style.background = BLANK_BASEMAP_BACKGROUND;
 
     if (mode === 'xy') {
       leafletMap = L.map(leafletMapDiv, {
@@ -3188,7 +3191,7 @@
         {
           'Satellite': satelliteLayer,
           'OpenStreetMap': osmLayer,
-          'Blank (white)': blankLayer
+          'Blank (gray)': blankLayer
         },
         {},
         { position: 'topright' }
@@ -3660,6 +3663,7 @@
     const nextLeafletHoverLookup = new Map();
     const mapColorEnabled = !!(mapColorEnabledInput && mapColorEnabledInput.checked);
     const mapColorChannel = mapColorSelect ? mapColorSelect.value : '';
+    const mapDrawMode = mapDrawModeSelect ? mapDrawModeSelect.value : 'lines';
     const mapColorMode = mapColorModeSelect ? mapColorModeSelect.value : 'continuous';
     let mapColorMin = Infinity;
     let mapColorMax = -Infinity;
@@ -3725,29 +3729,46 @@
           }
         });
         
-        if (latlngs.length >= 2) {
+        if (latlngs.length >= 1) {
           const color = colorForLap(lap);
           const dash = DASHES[fileIdx % DASHES.length];
-          if (canColorByChannel) {
-            const dashArray = mapPlotlyDashToLeaflet(dash);
-            for (let si = 0; si < latlngs.length - 1; si++) {
-              const segmentColor = getLeafletColorForValue(colorValues[si], effectiveMapColorScaleConfig) || color;
-              const segment = L.polyline([latlngs[si], latlngs[si + 1]], {
-                color: segmentColor,
-                dashArray,
-                weight: 2,
-                opacity: 0.85
+          if (mapDrawMode === 'scatter') {
+            for (let pi = 0; pi < latlngs.length; pi++) {
+              const pointColor = canColorByChannel
+                ? (getLeafletColorForValue(colorValues[pi], effectiveMapColorScaleConfig) || color)
+                : color;
+              const point = L.circleMarker(latlngs[pi], {
+                radius: 2.5,
+                color: pointColor,
+                weight: 0,
+                fillColor: pointColor,
+                fillOpacity: 0.95,
+                opacity: 0.95
               }).addTo(leafletMap);
-              leafletLayers.push(segment);
+              leafletLayers.push(point);
             }
-          } else {
-            const polyline = L.polyline(latlngs, {
-              color: color,
-              dashArray: mapPlotlyDashToLeaflet(dash),
-              weight: 2,
-              opacity: 0.7
-            }).addTo(leafletMap);
-            leafletLayers.push(polyline);
+          } else if (latlngs.length >= 2) {
+            if (canColorByChannel) {
+              const dashArray = mapPlotlyDashToLeaflet(dash);
+              for (let si = 0; si < latlngs.length - 1; si++) {
+                const segmentColor = getLeafletColorForValue(colorValues[si], effectiveMapColorScaleConfig) || color;
+                const segment = L.polyline([latlngs[si], latlngs[si + 1]], {
+                  color: segmentColor,
+                  dashArray,
+                  weight: 2,
+                  opacity: 0.85
+                }).addTo(leafletMap);
+                leafletLayers.push(segment);
+              }
+            } else {
+              const polyline = L.polyline(latlngs, {
+                color: color,
+                dashArray: mapPlotlyDashToLeaflet(dash),
+                weight: 2,
+                opacity: 0.7
+              }).addTo(leafletMap);
+              leafletLayers.push(polyline);
+            }
           }
           
           // Add lap label at start
@@ -4242,6 +4263,7 @@
     });
   }
   if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
+  if (mapDrawModeSelect) mapDrawModeSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
   ySelect.addEventListener('change', ()=> {
     renderSelectedChannelColorControls();

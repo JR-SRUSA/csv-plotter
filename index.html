@@ -122,6 +122,12 @@
         <div class="map-color-controls">
           <label><input type="checkbox" id="mapColorEnabled" checked /> Map Color</label>
           <select id="mapColorSelect" checked></select>
+          <label>Map Render
+            <select id="mapDrawMode">
+              <option value="lines" selected>Lines</option>
+              <option value="scatter">Scatter (points)</option>
+            </select>
+          </label>
           <label>Colormap
             <select id="mapColorMode">
               <option value="continuous">Continuous (Viridis)</option>
@@ -149,7 +155,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-07-10b</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-07-10c</div>
     </section>
 
     <section class="plot">
