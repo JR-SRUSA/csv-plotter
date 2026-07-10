@@ -24,6 +24,7 @@
   const racingLineTangentStartWeightInput = document.getElementById('racingLineTangentStartWeight');
   const racingLineTangentEndWeightInput = document.getElementById('racingLineTangentEndWeight');
   const racingLineRadiusWeightInput = document.getElementById('racingLineRadiusWeight');
+  const racingLineEnforceMonotonicRadiusInput = document.getElementById('racingLineEnforceMonotonicRadius');
   const racingLineSpeedWeightValue = document.getElementById('racingLineSpeedWeightValue');
   const racingLinePositionWeightValue = document.getElementById('racingLinePositionWeightValue');
   const racingLineTangentStartWeightValue = document.getElementById('racingLineTangentStartWeightValue');
@@ -140,10 +141,12 @@
   const RACING_LINE_DEFAULT_WEIGHTS = {
     speedAnchor: 3.5,
     position: 1.0,
-    tangentStart: 1.5,
-    tangentEnd: 1.5,
+    tangentStart: 1.2,
+    tangentEnd: 1.2,
     radiusFit: 2.0
   };
+  const RACING_LINE_MAX_TANGENT_RAY_M = 500;
+  const RACING_LINE_MAX_TANGENT_HANDLE_M = RACING_LINE_MAX_TANGENT_RAY_M / 1.8;
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
   let isApplyingAutoOffset = false;
@@ -181,7 +184,10 @@
     currentIndex: 0,
     decisions: new Map(),
     preview: null,
-    fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS }
+    fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS },
+    fitOptions: {
+      enforceMonotonicRadius: true
+    }
   };
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
@@ -2138,10 +2144,21 @@
       currentIndex: 0,
       decisions: new Map(),
       preview: null,
-      fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS }
+      fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS },
+      fitOptions: {
+        enforceMonotonicRadius: true
+      }
     };
     updateRacingLineWizardUI();
     renderRacingLineOverlay();
+  }
+
+  function getRacingLineFitOptions() {
+    const fromState = (racingLineState && racingLineState.fitOptions) ? racingLineState.fitOptions : { enforceMonotonicRadius: true };
+    const enforceMonotonicRadius = racingLineEnforceMonotonicRadiusInput
+      ? !!racingLineEnforceMonotonicRadiusInput.checked
+      : !!fromState.enforceMonotonicRadius;
+    return { enforceMonotonicRadius };
   }
 
   function normalizeFitWeight(value, fallback) {
@@ -2182,6 +2199,11 @@
     if (racingLineTangentEndWeightValue) racingLineTangentEndWeightValue.textContent = w.tangentEnd.toFixed(1);
     if (racingLineRadiusWeightValue) racingLineRadiusWeightValue.textContent = w.radiusFit.toFixed(1);
     if (racingLineState) racingLineState.fitWeights = w;
+    const options = getRacingLineFitOptions();
+    if (racingLineState) racingLineState.fitOptions = options;
+    if (racingLineEnforceMonotonicRadiusInput) {
+      racingLineEnforceMonotonicRadiusInput.checked = !!options.enforceMonotonicRadius;
+    }
   }
 
   function getRacingLineSegmentKey(seg) {
@@ -2381,8 +2403,8 @@
 
     const tanStartLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * startNeighborDist));
     const tanEndLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * endNeighborDist));
-    const tanStartLen = tanStartLenBase * startTangencyScale;
-    const tanEndLen = tanEndLenBase * endTangencyScale;
+    const tanStartLen = Math.min(RACING_LINE_MAX_TANGENT_HANDLE_M, tanStartLenBase * startTangencyScale);
+    const tanEndLen = Math.min(RACING_LINE_MAX_TANGENT_HANDLE_M, tanEndLenBase * endTangencyScale);
 
     const p1 = {
       x: p0.x + startDir.x * tanStartLen,
@@ -2530,6 +2552,121 @@
     return Number.isFinite(radius) ? radius : null;
   }
 
+  function analyzeRadiusUnimodality(control, preferredMinT, sampleCount = 81) {
+    if (!control) return { penalty: 0, minimaCount: 0, targetT: null, monotonicViolationMax: 0, monotonicViolationRms: 0 };
+    const n = Math.max(21, Number(sampleCount) || 81);
+    const ts = [];
+    const rs = [];
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      const r = computeRadiusAtT(control, t);
+      if (!Number.isFinite(r)) continue;
+      ts.push(t);
+      rs.push(r);
+    }
+    if (rs.length < 7) return { penalty: 0, minimaCount: 0, targetT: null, monotonicViolationMax: 0, monotonicViolationRms: 0 };
+
+    const targetTClamped = Number.isFinite(preferredMinT) ? Math.max(0, Math.min(1, preferredMinT)) : 0.5;
+    let targetIdx = 0;
+    let bestDt = Infinity;
+    for (let i = 0; i < ts.length; i++) {
+      const dt = Math.abs(ts[i] - targetTClamped);
+      if (dt < bestDt) {
+        bestDt = dt;
+        targetIdx = i;
+      }
+    }
+
+    const rMin = Math.min(...rs);
+    const rMax = Math.max(...rs);
+    const range = Math.max(1, rMax - rMin);
+    const slopeSlack = 0.01 * range;
+    const distinctDelta = Math.max(0.03 * range, 0.25);
+
+    let monotonicPenalty = 0;
+    let monotonicViolationMax = 0;
+    let monotonicViolationSq = 0;
+    let monotonicViolationCount = 0;
+    for (let i = 0; i < targetIdx; i++) {
+      const diff = rs[i + 1] - rs[i];
+      if (diff > slopeSlack) {
+        const e = (diff - slopeSlack) / range;
+        monotonicPenalty += e * e;
+        monotonicViolationMax = Math.max(monotonicViolationMax, e);
+        monotonicViolationSq += e * e;
+        monotonicViolationCount += 1;
+      }
+    }
+    for (let i = targetIdx; i < rs.length - 1; i++) {
+      const diff = rs[i + 1] - rs[i];
+      if (diff < -slopeSlack) {
+        const e = (-diff - slopeSlack) / range;
+        monotonicPenalty += e * e;
+        monotonicViolationMax = Math.max(monotonicViolationMax, e);
+        monotonicViolationSq += e * e;
+        monotonicViolationCount += 1;
+      }
+    }
+
+    let minimaCount = 0;
+    const minimaIndices = [];
+    for (let i = 1; i < rs.length - 1; i++) {
+      if (rs[i] <= rs[i - 1] - slopeSlack && rs[i] <= rs[i + 1] - slopeSlack) {
+        minimaCount += 1;
+        minimaIndices.push(i);
+      }
+    }
+
+    let multiplicityPenalty = 0;
+    if (minimaCount > 1) {
+      multiplicityPenalty += (minimaCount - 1) * (minimaCount - 1);
+    }
+
+    const minAtTarget = rs[targetIdx];
+    let distinctPenalty = 0;
+    if (targetIdx > 0) {
+      const leftGap = rs[targetIdx - 1] - minAtTarget;
+      if (leftGap < distinctDelta) {
+        const e = (distinctDelta - leftGap) / range;
+        distinctPenalty += e * e;
+      }
+    }
+    if (targetIdx < rs.length - 1) {
+      const rightGap = rs[targetIdx + 1] - minAtTarget;
+      if (rightGap < distinctDelta) {
+        const e = (distinctDelta - rightGap) / range;
+        distinctPenalty += e * e;
+      }
+    }
+
+    let targetMinPenalty = 0;
+    if (minimaIndices.length > 0) {
+      const nearestMin = minimaIndices.reduce((best, idx) => {
+        const d = Math.abs(ts[idx] - ts[targetIdx]);
+        return (!best || d < best.d) ? { idx, d } : best;
+      }, null);
+      if (nearestMin) {
+        const e = nearestMin.d / 0.25;
+        targetMinPenalty = e * e;
+      }
+    } else {
+      // If no detected strict local minimum, encourage target to be a stronger basin.
+      targetMinPenalty = 1;
+    }
+
+    const monotonicViolationRms = monotonicViolationCount > 0
+      ? Math.sqrt(monotonicViolationSq / monotonicViolationCount)
+      : 0;
+
+    return {
+      penalty: monotonicPenalty + 2 * multiplicityPenalty + distinctPenalty + targetMinPenalty,
+      minimaCount,
+      targetT: ts[targetIdx],
+      monotonicViolationMax,
+      monotonicViolationRms
+    };
+  }
+
   function computeLeastCurvaturePoint(control, sampleCount = 161) {
     if (!control || !control.p0 || !control.p1 || !control.p2 || !control.p3 || !control.p4) return null;
 
@@ -2540,7 +2677,8 @@
       const curvature = computeCurvatureAtT(control, t);
       if (!Number.isFinite(curvature)) continue;
 
-      if (!best || curvature < best.curvature) {
+      // For racing-line fitting we target the min-radius point, which is max curvature.
+      if (!best || curvature > best.curvature) {
         const pt = evalQuarticBezier(control, t);
         best = { x: pt.x, y: pt.y, t, curvature };
       }
@@ -2558,6 +2696,7 @@
       speedTargetT,
       radiusSamples,
       fitWeights,
+      fitOptions,
       chordLen
     } = optimizationContext;
 
@@ -2565,7 +2704,26 @@
     const wPos = normalizeFitWeight(weights.position, RACING_LINE_DEFAULT_WEIGHTS.position);
     const wSpeed = normalizeFitWeight(weights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor);
     const wRadius = normalizeFitWeight(weights.radiusFit, RACING_LINE_DEFAULT_WEIGHTS.radiusFit);
+    const enforceMonotonicRadius = !!(fitOptions && fitOptions.enforceMonotonicRadius);
     const normLenSq = Math.max(1e-6, chordLen * chordLen);
+
+    const anchorRadiusSamples = (() => {
+      if (!Array.isArray(radiusSamples) || radiusSamples.length === 0) return [];
+      const byClosest = (targetT) => radiusSamples.reduce((best, s) => {
+        const d = Math.abs(Number(s.t) - targetT);
+        return (!best || d < best.d) ? { d, s } : best;
+      }, null);
+      const startPick = byClosest(0);
+      const endPick = byClosest(1);
+      const minPick = Number.isFinite(speedTargetT) ? byClosest(Math.max(0, Math.min(1, speedTargetT))) : null;
+      const uniq = new Map();
+      [startPick, minPick, endPick].forEach((pick) => {
+        if (!pick || !pick.s) return;
+        const key = `${Number(pick.s.t).toFixed(5)}|${Number(pick.s.radius).toFixed(5)}`;
+        if (!uniq.has(key)) uniq.set(key, pick.s);
+      });
+      return Array.from(uniq.values());
+    })();
 
     const evaluateCost = (control) => {
       let posCost = 0;
@@ -2600,8 +2758,8 @@
 
       let radiusCost = 0;
       let radiusCount = 0;
-      if (Array.isArray(radiusSamples)) {
-        radiusSamples.forEach((sample) => {
+      if (anchorRadiusSamples.length > 0) {
+        anchorRadiusSamples.forEach((sample) => {
           const radiusCurve = computeRadiusAtT(control, sample.t);
           if (!Number.isFinite(radiusCurve) || !Number.isFinite(sample.radius) || sample.radius <= 0) return;
           const denom = Math.max(5, Math.abs(sample.radius));
@@ -2612,7 +2770,21 @@
       }
       if (radiusCount > 0) radiusCost /= radiusCount;
 
-      return (wPos * posCost) + (wSpeed * (8 * speedAlignCost + speedPointCost)) + (wRadius * radiusCost);
+      let singleMinCost = 0;
+      if (enforceMonotonicRadius) {
+        const unimodal = analyzeRadiusUnimodality(control, Number.isFinite(speedTargetT) ? speedTargetT : null, 161);
+        singleMinCost = Number.isFinite(unimodal.penalty) ? unimodal.penalty : 0;
+        if (Number.isFinite(unimodal.minimaCount) && unimodal.minimaCount > 1) {
+          return Number.POSITIVE_INFINITY;
+        }
+        if (Number.isFinite(unimodal.monotonicViolationMax) && unimodal.monotonicViolationMax > 0.02) {
+          return Number.POSITIVE_INFINITY;
+        }
+      }
+
+      return (wPos * posCost)
+        + (wSpeed * (8 * speedAlignCost + speedPointCost))
+        + (wRadius * (radiusCost + 2.2 * singleMinCost));
     };
 
     const control = {
@@ -2705,6 +2877,7 @@
   }
 
   function buildCornerBezierFit(log, lap, segment, cornerSegments, segmentIndex, fitWeights) {
+      const fitOptionsResolved = getRacingLineFitOptions();
     const pointsByRowIndex = new Map();
     const points = collectCornerMapPoints(log, lap, segment);
     if (points.length < 4) return null;
@@ -2762,6 +2935,7 @@
       speedTargetT,
       radiusSamples,
       fitWeights: fitWeightsResolved,
+      fitOptions: fitOptionsResolved,
       chordLen: Math.max(1, Math.hypot(control.p4.x - control.p0.x, control.p4.y - control.p0.y))
     });
 
@@ -2785,6 +2959,7 @@
     const speedCurvatureTError = (leastCurvature && Number.isFinite(leastCurvature.t) && Number.isFinite(speedTargetT))
       ? Math.abs(leastCurvature.t - speedTargetT)
       : null;
+    const radiusUnimodal = analyzeRadiusUnimodality(control, Number.isFinite(speedTargetT) ? speedTargetT : null, 241);
 
     const tangentStartDir = normalizeVec(control.p1.x - control.p0.x, control.p1.y - control.p0.y);
     const tangentEndDir = normalizeVec(control.p4.x - control.p3.x, control.p4.y - control.p3.y);
@@ -2794,8 +2969,8 @@
         ? {
           from: { x: control.p0.x, y: control.p0.y },
           to: {
-            x: control.p0.x + tangentStartDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0),
-            y: control.p0.y + tangentStartDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0)
+            x: control.p0.x - tangentStartDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0),
+            y: control.p0.y - tangentStartDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0)
           }
         }
         : null,
@@ -2820,8 +2995,12 @@
       speedCurvatureTError,
       speedAnchor,
       fitWeights: fitWeightsResolved,
+      fitOptions: fitOptionsResolved,
       radiusSamples,
       radiusFitRmse,
+      radiusMinimaCount: Number.isFinite(radiusUnimodal.minimaCount) ? radiusUnimodal.minimaCount : null,
+      radiusMonotonicViolationMax: Number.isFinite(radiusUnimodal.monotonicViolationMax) ? radiusUnimodal.monotonicViolationMax : null,
+      radiusMonotonicViolationRms: Number.isFinite(radiusUnimodal.monotonicViolationRms) ? radiusUnimodal.monotonicViolationRms : null,
       tangentLines,
       startPoint: { x: control.p0.x, y: control.p0.y },
       endPoint: { x: control.p4.x, y: control.p4.y }
@@ -2899,7 +3078,13 @@
         const radiusFitText = Number.isFinite(racingLineState.preview.radiusFitRmse)
           ? ` Radius RMSE ${racingLineState.preview.radiusFitRmse.toFixed(2)} m.`
           : '';
-        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) | ${racingLineState.preview.pointCount} source points.${speedAnchorText}${speedMatchText}${radiusFitText} Accept or reject to continue.`;
+        const minCountText = Number.isFinite(racingLineState.preview.radiusMinimaCount)
+          ? ` Radius minima ${racingLineState.preview.radiusMinimaCount}.`
+          : '';
+        const monotonicText = Number.isFinite(racingLineState.preview.radiusMonotonicViolationMax)
+          ? ` Mono-viol ${racingLineState.preview.radiusMonotonicViolationMax.toFixed(3)}.`
+          : '';
+        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) | ${racingLineState.preview.pointCount} source points.${speedAnchorText}${speedMatchText}${radiusFitText}${minCountText}${monotonicText} Accept or reject to continue.`;
       } else {
         racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) has too few valid Map X/Y points for a stable fit. Reject to continue.`;
       }
@@ -3053,7 +3238,7 @@
           weight: 2,
           fillColor: '#d9e6ff',
           fillOpacity: 0.95
-        }).bindTooltip('Least curvature', { permanent: false, direction: 'top' }).addTo(leafletMap);
+        }).bindTooltip('Min radius point', { permanent: false, direction: 'top' }).addTo(leafletMap);
         racingLineLeafletLayers.push(marker);
       }
     }
@@ -3142,6 +3327,22 @@
     const segment = getCurrentRacingLineSegment();
     if (!segment || !racingLineState.preview) return;
 
+    const enforceMonotonic = !!(racingLineState.preview.fitOptions && racingLineState.preview.fitOptions.enforceMonotonicRadius);
+    if (enforceMonotonic && Number.isFinite(racingLineState.preview.radiusMinimaCount) && racingLineState.preview.radiusMinimaCount > 1) {
+      if (racingLineStatus) {
+        racingLineStatus.textContent = `Corner ${segment.number || (racingLineState.currentIndex + 1)} rejected for acceptance: fitted radius has ${racingLineState.preview.radiusMinimaCount} minima. Tune weights and re-fit, or press Reject.`;
+      }
+      return;
+    }
+    if (enforceMonotonic
+      && Number.isFinite(racingLineState.preview.radiusMonotonicViolationMax)
+      && racingLineState.preview.radiusMonotonicViolationMax > 0.02) {
+      if (racingLineStatus) {
+        racingLineStatus.textContent = `Corner ${segment.number || (racingLineState.currentIndex + 1)} rejected for acceptance: monotonic-radius violation ${racingLineState.preview.radiusMonotonicViolationMax.toFixed(3)} is above threshold. Tune weights and re-fit, or press Reject.`;
+      }
+      return;
+    }
+
     const key = getRacingLineSegmentKey(segment);
     racingLineState.decisions.set(key, {
       status: 'accepted',
@@ -3184,9 +3385,13 @@
           bezierOrder: 4,
           speedSmoothingHalfWindowSec: RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC,
           fitWeights: fit.fitWeights || getRacingLineFitWeights(),
+          fitOptions: fit.fitOptions || getRacingLineFitOptions(),
           speedTargetT: Number.isFinite(fit.speedTargetT) ? fit.speedTargetT : null,
           speedCurvatureTError: Number.isFinite(fit.speedCurvatureTError) ? fit.speedCurvatureTError : null,
           radiusFitRmse: Number.isFinite(fit.radiusFitRmse) ? fit.radiusFitRmse : null,
+          radiusMinimaCount: Number.isFinite(fit.radiusMinimaCount) ? fit.radiusMinimaCount : null,
+          radiusMonotonicViolationMax: Number.isFinite(fit.radiusMonotonicViolationMax) ? fit.radiusMonotonicViolationMax : null,
+          radiusMonotonicViolationRms: Number.isFinite(fit.radiusMonotonicViolationRms) ? fit.radiusMonotonicViolationRms : null,
           controlPoints: {
             p0: { x: fit.control.p0.x, y: fit.control.p0.y },
             p1: { x: fit.control.p1.x, y: fit.control.p1.y },
@@ -5056,6 +5261,123 @@
     return `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}<extra></extra>`;
   }
 
+  function findNearestRowIndexByLapDistance(log, lap, targetDist) {
+    if (!log || !log.meta || !Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist)) return -1;
+    const target = Number(targetDist);
+    if (!Number.isFinite(target)) return -1;
+
+    let bestIdx = -1;
+    let bestAbs = Infinity;
+    for (let i = 0; i < log.meta.lapNum.length; i++) {
+      if (log.meta.lapNum[i] !== lap) continue;
+      const d = Number(log.meta.lapRelDist[i]);
+      if (!Number.isFinite(d)) continue;
+      const abs = Math.abs(d - target);
+      if (abs < bestAbs) {
+        bestAbs = abs;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  }
+
+  function buildRacingLineRadiusComparisonTraces(xMode, customXCol) {
+    if (!racingLineState.active || !racingLineState.preview) return { traces: [], yRange: null };
+    if (xMode !== 'distance') return { traces: [], yRange: null };
+
+    const log = getReferenceLogFromRacingState();
+    const segment = getCurrentRacingLineSegment();
+    const lap = racingLineState.referenceLap;
+    if (!log || !segment || !Number.isFinite(Number(lap))) return { traces: [], yRange: null };
+
+    const radiusCol = getRadiusColumnForLog(log);
+    if (!radiusCol || !Array.isArray(racingLineState.preview.radiusSamples) || racingLineState.preview.radiusSamples.length === 0) {
+      return { traces: [], yRange: null };
+    }
+
+    const xData = [];
+    const yData = [];
+    for (let i = 0; i < log.meta.lapNum.length; i++) {
+      if (log.meta.lapNum[i] !== lap) continue;
+      const dist = Number(log.meta.lapRelDist[i]);
+      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
+      const radius = Number(log.data[i][radiusCol]);
+      if (!Number.isFinite(radius) || radius <= 0) continue;
+      xData.push(dist);
+      yData.push(radius);
+    }
+    if (xData.length < 2) return { traces: [], yRange: null };
+
+    const xFit = [];
+    const yFit = [];
+    const denom = Math.max(1e-9, Number(segment.endDist) - Number(segment.startDist));
+    racingLineState.preview.sampled.forEach((pt) => {
+      const t = Number(pt.t);
+      if (!Number.isFinite(t)) return;
+      const radiusCurve = computeRadiusAtT(racingLineState.preview.control, t);
+      if (!Number.isFinite(radiusCurve) || radiusCurve <= 0) return;
+      xFit.push(Number(segment.startDist) + denom * t);
+      yFit.push(radiusCurve);
+    });
+    if (xFit.length < 2) return { traces: [], yRange: null };
+
+    const unit = getUnitForChannel('Radius') || 'm';
+    const yLabel = `Radius [${unit}]`;
+    const dataTrace = {
+      x: xData,
+      y: yData,
+      yaxis: 'y',
+      name: 'Corner Data Radius',
+      mode: 'lines',
+      line: { color: '#8a95a6', width: 2, dash: 'dot' },
+      hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
+    };
+    const fitTrace = {
+      x: xFit,
+      y: yFit,
+      yaxis: 'y',
+      name: 'Fitted Line Radius (1/curvature)',
+      mode: 'lines',
+      line: { color: '#2b6de9', width: 3 },
+      hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
+    };
+
+    const startRadius = yData.length > 0 ? Number(yData[0]) : null;
+    const endRadius = yData.length > 0 ? Number(yData[yData.length - 1]) : null;
+    let speedRadius = null;
+    if (racingLineState.preview.speedAnchor && Number.isFinite(racingLineState.preview.speedAnchor.rowIndex)) {
+      const idx = Number(racingLineState.preview.speedAnchor.rowIndex);
+      const speedDist = Number(log.meta.lapRelDist[idx]);
+      speedRadius = Number(log.data[idx][radiusCol]);
+      if (Number.isFinite(speedDist) && Number.isFinite(speedRadius) && speedRadius > 0) {
+        const speedMarker = {
+          x: [speedDist],
+          y: [speedRadius],
+          yaxis: 'y',
+          name: 'Min Speed Radius Point',
+          mode: 'markers',
+          marker: { color: '#8b4a00', size: 8, symbol: 'diamond' },
+          hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
+        };
+        const anchors = [startRadius, endRadius, speedRadius].filter(v => Number.isFinite(v) && v > 0);
+        const aMin = anchors.length > 0 ? Math.min(...anchors) : null;
+        const aMax = anchors.length > 0 ? Math.max(...anchors) : null;
+        const yRange = (Number.isFinite(aMin) && Number.isFinite(aMax))
+          ? [Math.max(0, aMin - Math.max(5, (aMax - aMin) * 0.3)), aMax + Math.max(5, (aMax - aMin) * 0.3)]
+          : null;
+        return { traces: [dataTrace, fitTrace, speedMarker], yRange };
+      }
+    }
+
+    const anchors = [startRadius, endRadius, speedRadius].filter(v => Number.isFinite(v) && v > 0);
+    const aMin = anchors.length > 0 ? Math.min(...anchors) : null;
+    const aMax = anchors.length > 0 ? Math.max(...anchors) : null;
+    const yRange = (Number.isFinite(aMin) && Number.isFinite(aMax))
+      ? [Math.max(0, aMin - Math.max(5, (aMax - aMin) * 0.3)), aMax + Math.max(5, (aMax - aMin) * 0.3)]
+      : null;
+    return { traces: [dataTrace, fitTrace], yRange };
+  }
+
   function buildSortedNumericSeries(xArr, yArr) {
     const pairs = [];
     for (let i = 0; i < xArr.length; i++) {
@@ -5216,7 +5538,11 @@
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const selectedYChannels = getSelectedY();
-    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const radiusCompareMode = !!(racingLineState.active && racingLineState.preview);
+    let ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    if (radiusCompareMode) {
+      ycols = ['Radius'];
+    }
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const xRangeSignature = `${xMode}|${xMode === 'custom' ? (customXCol || '') : ''}`;
@@ -5230,7 +5556,7 @@
     const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
     const singleLapSelected = totalSelectedLaps === 1;
     syncSelectedChannelColors(ycols);
-    const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
+    const channelColors = new Map(ycols.map((y) => [y, radiusCompareMode ? '#2b6de9' : getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
@@ -5334,8 +5660,30 @@
       });
     });
 
+    if (radiusCompareMode) {
+      const radiusPlot = buildRacingLineRadiusComparisonTraces(xMode, customXCol);
+      traces = Array.isArray(radiusPlot.traces) ? radiusPlot.traces : [];
+      if (radiusPlot.yRange && Array.isArray(radiusPlot.yRange) && Number.isFinite(radiusPlot.yRange[0]) && Number.isFinite(radiusPlot.yRange[1])) {
+        layout.yaxis = {
+          ...(layout.yaxis || {}),
+          range: radiusPlot.yRange,
+          autorange: false
+        };
+      }
+      const currSeg = getCurrentRacingLineSegment();
+      if (currSeg && Number.isFinite(Number(currSeg.startDist)) && Number.isFinite(Number(currSeg.endDist))) {
+        const width = Number(currSeg.endDist) - Number(currSeg.startDist);
+        const pad = Math.max(2, width * 0.08);
+        const x0 = Math.max(0, Number(currSeg.startDist) - pad);
+        const x1 = Number(currSeg.endDist) + pad;
+        mainPlotXRange = [x0, x1];
+        layout.xaxis.range = [x0, x1];
+        layout.xaxis.autorange = false;
+      }
+    }
+
     // if shading requested and plotting by lap, compute envelope per Y channel
-    if (shadeLaps && ycols.length>0) {
+    if (!radiusCompareMode && shadeLaps && ycols.length>0) {
       // for each y channel compute global union x grid across all selected files/laps
       ycols.forEach(y => {
         const allLapSeries = [];
@@ -5470,12 +5818,14 @@
     racingLineState.preview = computeCurrentRacingLinePreview();
     updateRacingLineWizardUI();
     renderRacingLineOverlay();
+    updatePlot();
   };
   if (racingLineSpeedWeightInput) racingLineSpeedWeightInput.addEventListener('input', onRacingLineWeightChanged);
   if (racingLinePositionWeightInput) racingLinePositionWeightInput.addEventListener('input', onRacingLineWeightChanged);
   if (racingLineTangentStartWeightInput) racingLineTangentStartWeightInput.addEventListener('input', onRacingLineWeightChanged);
   if (racingLineTangentEndWeightInput) racingLineTangentEndWeightInput.addEventListener('input', onRacingLineWeightChanged);
   if (racingLineRadiusWeightInput) racingLineRadiusWeightInput.addEventListener('input', onRacingLineWeightChanged);
+  if (racingLineEnforceMonotonicRadiusInput) racingLineEnforceMonotonicRadiusInput.addEventListener('change', onRacingLineWeightChanged);
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();
