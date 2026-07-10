@@ -138,6 +138,7 @@
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
   let lastLinkedHoverKey = null;
+  let activeCornerHeadingSegments = []; // clickable corner/straight strip segments for current plot
 
   function resizeVisualizations() {
     if (plotDiv && plotDiv.data) {
@@ -433,6 +434,133 @@
       clearLeafletHoverMarker();
       lastLinkedHoverKey = null;
       Plotly.Fx.unhover(plotDiv);
+    });
+  }
+
+  function zoomToCornerHeadingSegment(segment) {
+    if (!plotDiv || !segment) return;
+    const startDist = Number(segment.startDist);
+    const endDist = Number(segment.endDist);
+    if (!Number.isFinite(startDist) || !Number.isFinite(endDist) || endDist <= startDist) return;
+
+    const width = endDist - startDist;
+    const pad = Math.max(3, width * 0.1);
+    const x0 = Math.max(0, startDist - pad);
+    const x1 = endDist + pad;
+
+    const relayoutUpdate = {
+      'xaxis.range': [x0, x1]
+    };
+
+    const mainAxisRanges = computeMainYAxisRangesForXWindow(x0, x1);
+    mainAxisRanges.forEach((range, axisRef) => {
+      const axisKey = axisRef === 'y' ? 'yaxis.range' : `yaxis${axisRef.slice(1)}.range`;
+      relayoutUpdate[axisKey] = range;
+    });
+
+    const timeSlipRange = computeTsYRangeForXWindow(x0, x1);
+    if (timeSlipRange) {
+      relayoutUpdate['yaxis2.range'] = timeSlipRange;
+    }
+
+    Plotly.relayout(plotDiv, relayoutUpdate);
+  }
+
+  function computeMainYAxisRangesForXWindow(x0, x1) {
+    const rangesByAxis = new Map();
+    if (!plotDiv || !Array.isArray(plotDiv.data)) return rangesByAxis;
+
+    plotDiv.data.forEach((trace) => {
+      if (!trace || trace.visible === false) return;
+      const xAxisRef = trace.xaxis || 'x';
+      const yAxisRef = trace.yaxis || 'y';
+      if (xAxisRef !== 'x') return; // only main subplot traces
+      if (yAxisRef === 'y2') return; // time slip axis handled separately
+
+      const xs = Array.isArray(trace.x) ? trace.x : null;
+      const ys = Array.isArray(trace.y) ? trace.y : null;
+      if (!xs || !ys || xs.length === 0 || ys.length === 0) return;
+
+      let minY = null;
+      let maxY = null;
+      const n = Math.min(xs.length, ys.length);
+      for (let i = 0; i < n; i++) {
+        const x = Number(xs[i]);
+        const y = Number(ys[i]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (x < x0 || x > x1) continue;
+        if (minY === null || y < minY) minY = y;
+        if (maxY === null || y > maxY) maxY = y;
+      }
+
+      if (minY === null || maxY === null) return;
+
+      if (!rangesByAxis.has(yAxisRef)) {
+        rangesByAxis.set(yAxisRef, { min: minY, max: maxY });
+        return;
+      }
+
+      const existing = rangesByAxis.get(yAxisRef);
+      existing.min = Math.min(existing.min, minY);
+      existing.max = Math.max(existing.max, maxY);
+    });
+
+    const paddedRanges = new Map();
+    rangesByAxis.forEach((value, axisRef) => {
+      const span = Math.abs(value.max - value.min);
+      const pad = Math.max(0.05, span * 0.1);
+      paddedRanges.set(axisRef, [value.min - pad, value.max + pad]);
+    });
+
+    return paddedRanges;
+  }
+
+  function findCornerHeadingSegmentAtDistance(distance) {
+    const x = Number(distance);
+    if (!Number.isFinite(x) || !Array.isArray(activeCornerHeadingSegments) || activeCornerHeadingSegments.length === 0) {
+      return null;
+    }
+
+    return activeCornerHeadingSegments.find((segment) => {
+      const startDist = Number(segment.startDist);
+      const endDist = Number(segment.endDist);
+      if (!Number.isFinite(startDist) || !Number.isFinite(endDist)) return false;
+      return x >= startDist && x <= endDist;
+    }) || null;
+  }
+
+  function bindCornerStripZoom() {
+    if (!plotDiv || plotDiv.__cornerStripZoomBound) return;
+    if (typeof plotDiv.on !== 'function') return;
+    plotDiv.__cornerStripZoomBound = true;
+
+    // Clicking the color strip at the top zooms X and fits Y for that segment.
+    plotDiv.addEventListener('click', (event) => {
+      if (!Array.isArray(activeCornerHeadingSegments) || activeCornerHeadingSegments.length === 0) return;
+      const fullLayout = plotDiv._fullLayout;
+      if (!fullLayout || !fullLayout.xaxis || !fullLayout._size) return;
+
+      const bounds = plotDiv.getBoundingClientRect();
+      const size = fullLayout._size;
+      const pxFromLeft = event.clientX - bounds.left;
+      const pxFromTop = event.clientY - bounds.top;
+      const plotX0 = size.l;
+      const plotX1 = size.l + size.w;
+      const plotY0 = size.t;
+      const plotY1 = size.t + size.h;
+
+      if (pxFromLeft < plotX0 || pxFromLeft > plotX1 || pxFromTop < plotY0 || pxFromTop > plotY1) return;
+
+      const paperY = 1 - ((pxFromTop - plotY0) / size.h);
+      if (paperY < CORNER_STRIP_DOMAIN[0] || paperY > CORNER_STRIP_DOMAIN[1]) return;
+
+      const xPixels = pxFromLeft - fullLayout.xaxis._offset;
+      const xValue = Number(fullLayout.xaxis.p2l(xPixels));
+      if (!Number.isFinite(xValue)) return;
+
+      const segment = findCornerHeadingSegmentAtDistance(xValue);
+      if (!segment) return;
+      zoomToCornerHeadingSegment(segment);
     });
   }
 
@@ -1859,10 +1987,14 @@
     segments.push({ startDist: segStart, endDist: rows[rows.length - 1].dist, type: segType });
 
     let cornerNum = 0;
+    let straightNum = 0;
     segments.forEach(seg => {
       if (seg.type === 'left' || seg.type === 'right') {
         cornerNum += 1;
         seg.number = cornerNum;
+      } else {
+        straightNum += 1;
+        seg.straightNumber = straightNum;
       }
     });
 
@@ -3676,7 +3808,8 @@
   function buildCornerShapesAndAnnotations(cornerData, mainDomainTop, shadeOpacityPct) {
     const shapes = [];
     const annotations = [];
-    if (!cornerData || !Array.isArray(cornerData.segments)) return { shapes, annotations };
+    const clickTargets = [];
+    if (!cornerData || !Array.isArray(cornerData.segments)) return { shapes, annotations, clickTargets };
 
     const colorForType = (type) => {
       if (type === 'right') return CORNER_RIGHT_COLOR;
@@ -3696,6 +3829,23 @@
         fillcolor: color, opacity: 1, line: { width: 0.5, color: '#fff' }, layer: 'above'
       });
 
+      if (seg.type === 'left' || seg.type === 'right') {
+        annotations.push({
+          x: (seg.startDist + seg.endDist) / 2, xref: 'x',
+          y: (CORNER_STRIP_DOMAIN[0] + CORNER_STRIP_DOMAIN[1]) / 2, yref: 'paper',
+          text: String(seg.number),
+          showarrow: false,
+          font: { color: '#fff', size: 11 }
+        });
+      }
+      clickTargets.push({
+        type: seg.type,
+        number: seg.number,
+        straightNumber: seg.straightNumber,
+        startDist: seg.startDist,
+        endDist: seg.endDist
+      });
+
       // Faint full-height shading over corner zones only.
       if (seg.type === 'left' || seg.type === 'right') {
         shapes.push({
@@ -3704,17 +3854,10 @@
           y0: 0, y1: mainDomainTop,
           fillcolor: color, opacity: shadeOpacity, line: { width: 0 }, layer: 'below'
         });
-
-        annotations.push({
-          x: (seg.startDist + seg.endDist) / 2, xref: 'x',
-          y: (CORNER_STRIP_DOMAIN[0] + CORNER_STRIP_DOMAIN[1]) / 2, yref: 'paper',
-          text: String(seg.number), showarrow: false,
-          font: { color: '#fff', size: 11 }
-        });
       }
     });
 
-    return { shapes, annotations };
+    return { shapes, annotations, clickTargets };
   }
 
   function computeCornerTotals(cornerData) {
@@ -3819,6 +3962,7 @@
       const cornerVis = buildCornerShapesAndAnnotations(cornerData, built.mainDomainTop, shadeOpacityPct);
       layout.shapes = cornerVis.shapes;
       layout.annotations = cornerVis.annotations;
+      activeCornerHeadingSegments = cornerVis.clickTargets;
 
       const cornerTotals = computeCornerTotals(cornerData);
       const cornerVenue = getLogVenue(cornerRef.log);
@@ -3827,6 +3971,7 @@
     } else {
       layout.shapes = [];
       layout.annotations = [];
+      activeCornerHeadingSegments = [];
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
     }
 
@@ -3936,6 +4081,7 @@
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
+    bindCornerStripZoom();
 
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
