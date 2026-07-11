@@ -34,6 +34,7 @@ try {
   const distDir = path.join(rootDir, 'dist');
   const appSource = path.join(rootDir, 'app.js');
   const processorSource = path.join(rootDir, 'file-processors.js');
+  const racingLineCalculationsSource = path.join(rootDir, 'racing-line-calculations.js');
   const mapCoordSource = path.join(rootDir, 'map-coordinate-utils.js');
   const resizePanelsSource = path.join(rootDir, 'resize-panels.js');
   const appMinified = path.join(buildDir, 'app.min.js');
@@ -63,7 +64,8 @@ try {
     fs.readFileSync(processorSource, 'utf8'),
     fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(appMinified, 'utf8'),
-    fs.readFileSync(resizePanelsSource, 'utf8')
+    fs.readFileSync(resizePanelsSource, 'utf8'),
+    fs.readFileSync(racingLineCalculationsSource, 'utf8')
   ];
 
   fs.writeFileSync(bundleSource, `${bundleParts.join('\n;\n')}\n`);
@@ -78,6 +80,7 @@ try {
     .replace(/\s*<script src="file-processors\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="map-coordinate-utils\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="resize-panels\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="racing-line-calculations\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
