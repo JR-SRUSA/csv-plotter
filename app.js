@@ -29,6 +29,13 @@
   const racingLineGammaWeightInput = document.getElementById('racingLineGammaWeight');
   const racingLineGammaWeightNumberInput = document.getElementById('racingLineGammaWeightNumber');
   const racingLineGammaWeightValue = document.getElementById('racingLineGammaWeightValue');
+  const vehicleSimMaxLatGInput = document.getElementById('vehicleSimMaxLatG');
+  const vehicleSimMaxLongGInput = document.getElementById('vehicleSimMaxLongG');
+  const vehicleSimPowerKwInput = document.getElementById('vehicleSimPowerKw');
+  const vehicleSimCdaInput = document.getElementById('vehicleSimCda');
+  const vehicleSimMassInput = document.getElementById('vehicleSimMass');
+  const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
+  const vehicleSimStatus = document.getElementById('vehicleSimStatus');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -2440,10 +2447,96 @@
         synthetic: true,
         racingLine: true,
         sourceLogId: referenceLog ? referenceLog.id : null,
-        sourceLap: referenceLap
+        sourceLap: referenceLap,
+        // Retained so a vehicle simulation can be (re-)run later against the exact
+        // analytic curve, rather than re-estimating curvature from the flattened rows.
+        splineControl: fit.control
       },
       rawRows: null
     };
+  }
+
+  function getVehicleSimParams() {
+    const num = (input, fallback) => {
+      const n = input ? Number(input.value) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+    return {
+      maxLatG: num(vehicleSimMaxLatGInput, 1.3),
+      maxLongG: num(vehicleSimMaxLongGInput, 1.0),
+      powerKw: num(vehicleSimPowerKwInput, 32),
+      cda: num(vehicleSimCdaInput, 0.35),
+      massKg: num(vehicleSimMassInput, 215)
+    };
+  }
+
+  function formatSimLapTime(seconds) {
+    if (!Number.isFinite(seconds)) return '--:--.---';
+    const totalMs = Math.max(0, Math.round(seconds * 1000));
+    const mins = Math.floor(totalMs / 60000);
+    const secs = Math.floor((totalMs % 60000) / 1000);
+    const ms = totalMs % 1000;
+    return `${mins}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  }
+
+  // Runs the quasi-steady-state lap simulation against the accepted racing-line lap's
+  // exact spline (retained in meta.splineControl at accept time) and writes the result
+  // in as new channels on that same log -- re-runnable any time the vehicle parameters
+  // change, without needing to re-fit or re-accept the racing line itself. Written under
+  // the same channel names real telemetry uses (Speed, LatAcc, LongAcc -- resolved via
+  // resolveChannelForLog so they line up correctly regardless of log format) rather than
+  // a separate "(Sim)" set, so the simulated lap plots, colors, and channel-selects
+  // exactly like any other lap and can be directly overlaid against a real one. Total
+  // Acceleration (calc) then comes for free from the existing LatAcc/LongAcc-driven
+  // calculation shared with real logs.
+  function simulateVehicle() {
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.simulateVehicleSpeed !== 'function' || typeof calc.samplePeriodicBSpline !== 'function') {
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation is unavailable (calculations module not loaded).';
+      return;
+    }
+    const log = logs.find(l => l.meta && l.meta.racingLine);
+    if (!log || !log.meta.splineControl) {
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Fit and accept a racing line first, then simulate the vehicle on it.';
+      return;
+    }
+
+    const rep = log.meta.splineControl;
+    const n = log.data.length;
+    const sampled = calc.samplePeriodicBSpline(rep, n);
+    const params = getVehicleSimParams();
+    const result = calc.simulateVehicleSpeed(rep, sampled, params);
+    if (!result) {
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation failed on this racing line.';
+      return;
+    }
+
+    const speedCol = resolveChannelForLog('Speed', log);
+    const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, log);
+    const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, log);
+    [speedCol, latAccCol, longAccCol].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
+    for (let i = 0; i < n; i++) {
+      log.data[i][speedCol] = result.speed[i] * 3.6; // m/s -> km/h
+      log.data[i][longAccCol] = result.ax[i] / 9.81; // m/s^2 -> g
+      log.data[i][latAccCol] = result.ay[i] / 9.81;
+      log.data[i]['Lap Time'] = result.time[i];
+      log.meta.lapTime[i] = result.time[i];
+    }
+    if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+    log.meta.units[speedCol] = 'km/h';
+    log.meta.units[latAccCol] = 'g';
+    log.meta.units[longAccCol] = 'g';
+    addCalculatedCommonChannels(log.data, log.cols, log.meta);
+
+    if (vehicleSimStatus) {
+      vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
+        + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h). `
+        + `${speedCol}, ${latAccCol}, ${longAccCol} added to the racing line lap.`;
+    }
+
+    populateYSelect();
+    renderLapsList();
+    updatePlot();
   }
 
   function startWholeCircuitFit() {
@@ -4862,6 +4955,11 @@
   if (racingLineWholeCircuitAcceptBtn) {
     racingLineWholeCircuitAcceptBtn.addEventListener('click', () => {
       acceptWholeCircuitFit();
+    });
+  }
+  if (vehicleSimulateBtn) {
+    vehicleSimulateBtn.addEventListener('click', () => {
+      simulateVehicle();
     });
   }
   if (racingLineWholeCircuitDiscardBtn) {

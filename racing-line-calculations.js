@@ -969,6 +969,148 @@
     return finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants);
   }
 
+  // =======================================================================
+  // Vehicle simulation: a quasi-steady-state point-mass lap-time simulator, the standard
+  // technique used throughout motorsport lap simulation (three passes over the track):
+  //
+  //   1. Speed envelope: at every point, the fastest speed achievable considering just
+  //      that point in isolation -- limited by either how much lateral grip is needed to
+  //      hold the corner (v = sqrt(a_lat_max / kappa)), or by the vehicle's power/drag-
+  //      limited top speed, whichever is lower.
+  //   2. Forward pass: starting from every point, "accelerate away" along the track using
+  //      whatever longitudinal grip the friction circle leaves available after the
+  //      lateral demand at that point, and whatever the engine can deliver (power/speed,
+  //      minus aerodynamic drag), capped by the envelope from step 1.
+  //   3. Backward pass: the mirror image -- walking backward along the track, "reverse
+  //      accelerate" (brake) from every point using available braking grip (plus drag,
+  //      which helps deceleration), again capped by the envelope.
+  //
+  // The final speed at each point is the minimum of the forward and backward results:
+  // this is what naturally produces "accelerate away from a slow corner until either the
+  // next corner's envelope or the braking curve coming backward from it forces you back
+  // down" -- the intersection the two curves are describing -- without needing to
+  // explicitly find corners or apexes. Both passes are run twice around the closed loop
+  // so the state correctly wraps across the start/finish line.
+  //
+  // Longitudinal/lateral grip combine via an elliptical friction circle: using some
+  // fraction of available lateral grip for cornering proportionally reduces the
+  // longitudinal grip left over for accelerating or braking.
+  // =======================================================================
+
+  const GRAVITY_MS2 = 9.81;
+  const AIR_DENSITY_KGM3 = 1.225;
+  const VEHICLE_SIM_LAPS_FOR_CONVERGENCE = 3; // passes around the loop so periodic wrap settles
+
+  // `rep`: the periodic B-spline representation being simulated (a live fit's
+  // `fit.control`, or one reconstructed for an already-accepted racing-line lap).
+  // `sampled`: points along it to simulate at, e.g. `fit.sampled` or a fresh call to
+  // samplePeriodicBSpline -- only `.dist` is used, curvature comes directly from the
+  // spline's own analytic derivatives at that position, not a discrete polyline estimate.
+  // Using the exact analytic curvature (rather than estimating it from the sampled
+  // points, the way buildCurvatureProfile has to for noisy raw telemetry) avoids a whole
+  // class of artifacts a discrete estimator has at sharp curvature transitions -- e.g. a
+  // baseline chord spanning across a corner/straight boundary can substantially
+  // over- or under-estimate curvature right at that boundary, which is exactly where
+  // this simulation is most sensitive to it (a corner's braking point).
+  function simulateVehicleSpeed(rep, sampled, params) {
+    const n = sampled.length;
+    const period = rep.period;
+    if (n < 3 || !(period > 0)) return null;
+
+    const aLatMax = Math.max(0.05, Number(params.maxLatG) || 1.3) * GRAVITY_MS2;
+    const aLongMax = Math.max(0.05, Number(params.maxLongG) || 1.0) * GRAVITY_MS2;
+    const powerW = Math.max(0, Number(params.powerKw) || 0) * 1000;
+    const cda = Math.max(0.01, Number(params.cda) || 0.35);
+    const mass = Math.max(1, Number(params.massKg) || 215);
+
+    const kappaSigned = new Array(n);
+    const kappaAbs = new Array(n);
+    const ds = new Array(n); // ds[i] = distance from sampled[i] to sampled[(i+1)%n]
+    for (let i = 0; i < n; i++) {
+      const d = evalPeriodicBSplineDerivatives(rep, sampled[i].dist);
+      const speedSq = d.first.x * d.first.x + d.first.y * d.first.y;
+      let k = 0;
+      if (speedSq > 1e-9) {
+        const cross = d.first.x * d.second.y - d.first.y * d.second.x;
+        k = cross / Math.pow(speedSq, 1.5); // signed
+      }
+      kappaSigned[i] = k;
+      kappaAbs[i] = Math.abs(k);
+
+      const next = sampled[(i + 1) % n];
+      let gap = next.dist - sampled[i].dist;
+      if (gap <= 0) gap += period;
+      ds[i] = gap;
+    }
+
+    const dragDecel = (v) => (0.5 * AIR_DENSITY_KGM3 * cda * v * v) / mass;
+    const tractionAvail = (aLatDemand) => {
+      const frac = Math.min(1, aLatDemand / aLatMax);
+      return aLongMax * Math.sqrt(Math.max(0, 1 - frac * frac));
+    };
+    const topSpeedFromPower = powerW > 0 ? Math.cbrt(powerW / (0.5 * AIR_DENSITY_KGM3 * cda)) : Infinity;
+
+    const vEnvelope = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const vCorner = kappaAbs[i] > 1e-9 ? Math.sqrt(aLatMax / kappaAbs[i]) : Infinity;
+      vEnvelope[i] = Math.min(vCorner, topSpeedFromPower);
+    }
+
+    const vFwd = vEnvelope.slice();
+    for (let lap = 0; lap < VEHICLE_SIM_LAPS_FOR_CONVERGENCE; lap++) {
+      for (let i = 0; i < n; i++) {
+        const prev = (i - 1 + n) % n;
+        const aLatDemand = vFwd[prev] * vFwd[prev] * kappaAbs[prev];
+        const aTraction = tractionAvail(aLatDemand);
+        const aPower = powerW > 0 ? (powerW / (mass * Math.max(1, vFwd[prev]))) : Infinity;
+        const aEngine = Math.min(aTraction, aPower);
+        const aNet = aEngine - dragDecel(vFwd[prev]);
+        const vReach = Math.sqrt(Math.max(0, vFwd[prev] * vFwd[prev] + 2 * aNet * ds[prev]));
+        vFwd[i] = Math.min(vEnvelope[i], vReach);
+      }
+    }
+
+    const vBwd = vEnvelope.slice();
+    for (let lap = 0; lap < VEHICLE_SIM_LAPS_FOR_CONVERGENCE; lap++) {
+      for (let i = n - 1; i >= 0; i--) {
+        const next = (i + 1) % n;
+        const aLatDemand = vBwd[next] * vBwd[next] * kappaAbs[next];
+        const aTraction = tractionAvail(aLatDemand);
+        const aBrakeTotal = aTraction + dragDecel(vBwd[next]); // drag assists braking
+        const vReach = Math.sqrt(Math.max(0, vBwd[next] * vBwd[next] + 2 * aBrakeTotal * ds[i]));
+        vBwd[i] = Math.min(vEnvelope[i], vReach);
+      }
+    }
+
+    const speed = new Array(n);
+    for (let i = 0; i < n; i++) speed[i] = Math.min(vFwd[i], vBwd[i]);
+
+    const ax = new Array(n); // tangential accel, m/s^2 (signed: + accelerating, - braking)
+    const ay = new Array(n); // lateral accel, m/s^2 (signed by turn direction)
+    for (let i = 0; i < n; i++) {
+      const prevI = (i - 1 + n) % n;
+      const nextI = (i + 1) % n;
+      const dsCentral = ds[prevI] + ds[i];
+      ax[i] = dsCentral > 1e-9 ? (speed[nextI] * speed[nextI] - speed[prevI] * speed[prevI]) / (2 * dsCentral) : 0;
+      ay[i] = speed[i] * speed[i] * kappaSigned[i];
+    }
+
+    // Cumulative time since the start/finish line to reach each point; index 0 is
+    // defined as t=0, so this sums forward *without* wrapping the final closing segment
+    // back into time[0] (that segment's duration is only reflected in the total lapTime).
+    const time = new Array(n).fill(0);
+    let acc = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const vAvg = Math.max(0.5, (speed[i] + speed[i + 1]) / 2);
+      acc += ds[i] / vAvg;
+      time[i + 1] = acc;
+    }
+    const vAvgClose = Math.max(0.5, (speed[n - 1] + speed[0]) / 2);
+    const lapTime = acc + ds[n - 1] / vAvgClose;
+
+    return { speed, ax, ay, time, lapTime, topSpeedFromPower };
+  }
+
   window.RacingLineCalculations = {
     normalizeFitWeight,
     buildWholeCircuitFit,
@@ -977,6 +1119,7 @@
     periodicEntryDistances,
     evalPeriodicBSpline,
     computePeriodicBSplineRadiusAtT,
-    samplePeriodicBSpline
+    samplePeriodicBSpline,
+    simulateVehicleSpeed
   };
 })();

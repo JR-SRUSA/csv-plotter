@@ -91,6 +91,8 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .racing-line-weight-controls span{grid-column:2 / 3;justify-self:end;min-width:32px;text-align:right;font-weight:600;color:#1a3c6b}
 .racing-line-weight-controls input[type=number]{grid-column:2 / 3;justify-self:end;width:70px;padding:2px 4px;font-size:12px;border:1px solid #c7d6ea;border-radius:4px;color:#1a3c6b;background:#fff}
 .racing-line-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.vehicle-sim-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
+.vehicle-sim-controls button{width:100%}
 .map-color-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .map-color-controls select{width:100%}
 .map-align-controls{padding-top:6px;border-top:1px dashed #e7edf5}
@@ -223,4 +225,21 @@ body.sidebar-collapsed .controls{display:none}
 
 @media (max-width: 700px){
 	.maps-container{grid-template-columns:1fr}
+}
+
+/* Desktop only: the mobile breakpoint above already makes .controls a fixed,
+   independently-scrolling drawer. On desktop it's a normal flex child that grows with
+   its content, so as more control sections get added the whole page grows past the
+   viewport and scrolls as one unit. Bounding body to the viewport height and letting
+   .controls scroll vertically-only internally keeps the plot/map area always in view
+   while the sidebar scrolls on its own; the main (plot/map) side is fixed to that same
+   bounded height with no scrolling of its own -- its content (#plotDiv's height,
+   map-panel heights) is already sized to fit, so overflow there is clipped rather than
+   scrolling, per the same "no scrolling on the main part" requirement as the sidebar's
+   "no side scrolling". */
+@media (min-width: 981px){
+	body{height:100vh;display:flex;flex-direction:column;overflow:hidden}
+	main{flex:1;min-height:0}
+	.controls{overflow-y:auto;overflow-x:hidden}
+	.plot{overflow:hidden}
 }
