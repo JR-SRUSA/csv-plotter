@@ -1,4 +1,8 @@
 *{box-sizing:border-box;font-family:Segoe UI, Roboto, Arial, sans-serif}
+/* Author styles beat the UA stylesheet's [hidden]{display:none} regardless of
+   specificity, so any element that both sets its own `display` via a class and is
+   toggled with the `hidden` attribute needs this to actually hide. */
+[hidden]{display:none!important}
 html,body{width:100%;max-width:100%;overflow-x:clip;}
 body{margin:0;padding:0;background:#f7f9fb;color:#0b2545;position:relative}
 header{display:none;overflow-x:clip}
@@ -18,6 +22,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .file-name-wrap strong{overflow-wrap:anywhere}
 .file-line-preview{display:inline-flex;align-items:center;color:#5a6b82;flex:0 0 auto}
 .file-line-preview svg{display:block;width:44px;height:8px}
+.file-synthetic-remove-btn{margin-left:auto;padding:2px 8px;font-size:11px;border:1px solid #d9a0a0;border-radius:4px;color:#8b1c1c;background:#fff5f5;cursor:pointer;flex:0 0 auto}
 .file-decoder-row{display:flex;align-items:center;gap:4px;flex:0 0 100%;margin-left:26px;font-size:0.82em}
 .file-decoder-badge{color:#5a6b82;background:#f0f4fa;border:1px solid #dde6f0;border-radius:3px;padding:1px 6px;white-space:nowrap}
 .file-decoder-edit{padding:1px 5px;font-size:0.8em;color:#1a4b8c;border-color:#c8d8f8;background:#f0f5ff}
@@ -75,6 +80,17 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .corner-detect-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .corner-detect-controls input[type=number]{width:70px;margin-left:6px}
 .corner-track-info{font-size:12px;color:#5a6b82;min-height:16px}
+.racing-line-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
+.racing-line-controls button{width:100%}
+.racing-line-whole-circuit-panel{padding:8px;border:1px solid #dce7f4;background:#f6faff;border-radius:4px;display:flex;flex-direction:column;gap:8px}
+.racing-line-status{font-size:12px;color:#1a3c6b;line-height:1.35;min-height:16px}
+.racing-line-hint{font-size:11px;color:#5a6b82;font-style:italic}
+.racing-line-weight-controls{display:flex;flex-direction:column;gap:6px;padding:6px;border:1px dashed #c9d9ef;border-radius:4px;background:#fbfdff}
+.racing-line-weight-controls label{display:grid;grid-template-columns:1fr auto;align-items:center;column-gap:8px;row-gap:4px;font-size:12px;color:#24476f}
+.racing-line-weight-controls input[type=range]{grid-column:1 / 2;width:100%}
+.racing-line-weight-controls span{grid-column:2 / 3;justify-self:end;min-width:32px;text-align:right;font-weight:600;color:#1a3c6b}
+.racing-line-weight-controls input[type=number]{grid-column:2 / 3;justify-self:end;width:70px;padding:2px 4px;font-size:12px;border:1px solid #c7d6ea;border-radius:4px;color:#1a3c6b;background:#fff}
+.racing-line-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .map-color-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .map-color-controls select{width:100%}
 .map-align-controls{padding-top:6px;border-top:1px dashed #e7edf5}
