@@ -19,13 +19,16 @@
   const racingLineWholeCircuitDiscardBtn = document.getElementById('racingLineWholeCircuitDiscardBtn');
   const racingLineWholeCircuitPrevCornerBtn = document.getElementById('racingLineWholeCircuitPrevCornerBtn');
   const racingLineWholeCircuitNextCornerBtn = document.getElementById('racingLineWholeCircuitNextCornerBtn');
-  const racingLineWholeCircuitAddPointBtn = document.getElementById('racingLineWholeCircuitAddPointBtn');
   const racingLineBetaWeightInput = document.getElementById('racingLineBetaWeight');
   const racingLineBetaWeightNumberInput = document.getElementById('racingLineBetaWeightNumber');
   const racingLineAlphaWeightInput = document.getElementById('racingLineAlphaWeight');
   const racingLineAlphaWeightNumberInput = document.getElementById('racingLineAlphaWeightNumber');
   const racingLineBetaWeightValue = document.getElementById('racingLineBetaWeightValue');
   const racingLineAlphaWeightValue = document.getElementById('racingLineAlphaWeightValue');
+  const racingLineCornerGammaRow = document.getElementById('racingLineCornerGammaRow');
+  const racingLineGammaWeightInput = document.getElementById('racingLineGammaWeight');
+  const racingLineGammaWeightNumberInput = document.getElementById('racingLineGammaWeightNumber');
+  const racingLineGammaWeightValue = document.getElementById('racingLineGammaWeightValue');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -2203,6 +2206,28 @@
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   }
 
+  // Per-corner gamma ("minimize curvature") overrides, keyed by corner index, in the
+  // reference log's lapRelDist coordinate frame -- converted to the fit's baseDist-
+  // relative frame in buildCornerWeightOverrides(). Global alpha/beta apply everywhere;
+  // gamma is 0 (off) everywhere except a corner the user has explicitly dialed in while
+  // reviewing, which is why changes to it are scoped to just that corner, not the lap.
+  function buildCornerWeightOverrides() {
+    if (!wholeCircuitFitPreview) return [];
+    const { cornerSegments, cornerGammaOverrides, fit } = wholeCircuitFitPreview;
+    if (!Array.isArray(cornerSegments) || !Array.isArray(cornerGammaOverrides) || !fit) return [];
+    const overrides = [];
+    cornerSegments.forEach((segment, i) => {
+      const gamma = cornerGammaOverrides[i];
+      if (!(gamma > 0)) return;
+      overrides.push({
+        startDist: Number(segment.startDist) - fit.baseDist,
+        endDist: Number(segment.endDist) - fit.baseDist,
+        gamma
+      });
+    });
+    return overrides;
+  }
+
   function getRacingLineFitWeights() {
     const beta = normalizeFitWeight(
       racingLineBetaWeightInput ? racingLineBetaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.beta,
@@ -2212,7 +2237,7 @@
       racingLineAlphaWeightInput ? racingLineAlphaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.alpha,
       RACING_LINE_DEFAULT_WEIGHTS.alpha
     );
-    return { alpha, beta };
+    return { alpha, beta, cornerOverrides: buildCornerWeightOverrides() };
   }
 
   function updateRacingLineWeightLabels() {
@@ -2221,6 +2246,24 @@
     if (racingLineBetaWeightNumberInput) racingLineBetaWeightNumberInput.value = w.beta.toFixed(1);
     if (racingLineAlphaWeightValue) racingLineAlphaWeightValue.textContent = w.alpha.toFixed(1);
     if (racingLineAlphaWeightNumberInput) racingLineAlphaWeightNumberInput.value = w.alpha.toFixed(1);
+  }
+
+  // Shows/hides the per-corner gamma slider based on whether a corner is currently
+  // focused, and syncs its displayed value to that corner's stored override (0 if none).
+  function updateCornerGammaControl() {
+    if (!racingLineCornerGammaRow) return;
+    if (!wholeCircuitFitPreview || wholeCircuitFitPreview.currentCornerIndex < 0) {
+      racingLineCornerGammaRow.hidden = true;
+      return;
+    }
+    racingLineCornerGammaRow.hidden = false;
+    const { cornerGammaOverrides, currentCornerIndex } = wholeCircuitFitPreview;
+    const gamma = (Array.isArray(cornerGammaOverrides) && Number.isFinite(cornerGammaOverrides[currentCornerIndex]))
+      ? cornerGammaOverrides[currentCornerIndex]
+      : 0;
+    if (racingLineGammaWeightInput) racingLineGammaWeightInput.value = gamma;
+    if (racingLineGammaWeightNumberInput) racingLineGammaWeightNumberInput.value = gamma.toFixed(1);
+    if (racingLineGammaWeightValue) racingLineGammaWeightValue.textContent = gamma.toFixed(1);
   }
 
   // Curvature of the in-progress whole-circuit fit preview (before it's been accepted
@@ -2454,7 +2497,8 @@
       referenceLog: ref.log,
       referenceLap: ref.lap,
       cornerSegments,
-      currentCornerIndex: cornerSegments.length > 0 ? 0 : -1
+      currentCornerIndex: cornerSegments.length > 0 ? 0 : -1,
+      cornerGammaOverrides: new Array(cornerSegments.length).fill(0)
     };
     updateWholeCircuitStatusText();
     if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
@@ -2471,6 +2515,7 @@
     if (cornerSegments.length > 0) {
       focusWholeCircuitCorner(0);
     } else {
+      updateCornerGammaControl();
       renderWholeCircuitOverlay();
     }
   }
@@ -2539,6 +2584,7 @@
     const segment = wholeCircuitFitPreview.cornerSegments[clamped];
     if (segment) zoomToCornerHeadingSegment(segment);
     updateWholeCircuitStatusText();
+    updateCornerGammaControl();
     renderWholeCircuitOverlay();
   }
 
@@ -2570,25 +2616,6 @@
     renderWholeCircuitOverlay();
     updatePlot();
     return true;
-  }
-
-  function addWholeCircuitControlPointAtCurrentCorner() {
-    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
-    const { cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
-    const segment = (Array.isArray(cornerSegments) && currentCornerIndex >= 0) ? cornerSegments[currentCornerIndex] : null;
-    if (!segment) {
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Navigate to a corner first (Prev/Next Corner) before adding a control point.';
-      return;
-    }
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.insertPeriodicControlPoint !== 'function') return;
-    const midDist = (Number(segment.startDist) + Number(segment.endDist)) / 2 - wholeCircuitFitPreview.fit.baseDist;
-    const newEntries = calc.insertPeriodicControlPoint(wholeCircuitFitPreview.fit.entries, midDist);
-    if (!newEntries) {
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Could not add a control point there (too close to an existing one, or at the maximum count).';
-      return;
-    }
-    refitWholeCircuitPreviewWithEntries(newEntries);
   }
 
   function removeWholeCircuitControlPoint(index) {
@@ -2626,6 +2653,7 @@
     wholeCircuitFitPreview = null;
     if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Fit discarded.';
     if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+    updateCornerGammaControl();
     renderWholeCircuitOverlay();
     updatePlot();
   }
@@ -4851,13 +4879,8 @@
       stepWholeCircuitCorner(1);
     });
   }
-  if (racingLineWholeCircuitAddPointBtn) {
-    racingLineWholeCircuitAddPointBtn.addEventListener('click', () => {
-      addWholeCircuitControlPointAtCurrentCorner();
-    });
-  }
   // Weight sliders re-fit the live preview in place (same control points, new weights)
-  // so tuning is immediately visible without losing any manual add/remove edits.
+  // so tuning is immediately visible without losing any manual removal edits.
   const onRacingLineWeightChanged = () => {
     updateRacingLineWeightLabels();
     if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
@@ -4880,6 +4903,31 @@
   };
   bindSliderAndNumber(racingLineBetaWeightInput, racingLineBetaWeightNumberInput, 1);
   bindSliderAndNumber(racingLineAlphaWeightInput, racingLineAlphaWeightNumberInput, 1);
+
+  // Gamma is stored per-corner (index into cornerGammaOverrides), not read back from the
+  // slider on every fit like alpha/beta -- so its handler writes the value into state
+  // itself before re-fitting, instead of going through the generic weight-changed path.
+  const onCornerGammaChanged = (value) => {
+    if (!wholeCircuitFitPreview || wholeCircuitFitPreview.currentCornerIndex < 0) return;
+    const gamma = Number.isFinite(value) ? Math.max(0, value) : 0;
+    wholeCircuitFitPreview.cornerGammaOverrides[wholeCircuitFitPreview.currentCornerIndex] = gamma;
+    if (racingLineGammaWeightValue) racingLineGammaWeightValue.textContent = gamma.toFixed(1);
+    if (!wholeCircuitFitPreview.fit) return;
+    refitWholeCircuitPreviewWithEntries(wholeCircuitFitPreview.fit.entries);
+  };
+  if (racingLineGammaWeightInput && racingLineGammaWeightNumberInput) {
+    racingLineGammaWeightInput.addEventListener('input', () => {
+      const v = Number(racingLineGammaWeightInput.value);
+      racingLineGammaWeightNumberInput.value = Number.isFinite(v) ? v.toFixed(1) : racingLineGammaWeightInput.value;
+      onCornerGammaChanged(v);
+    });
+    racingLineGammaWeightNumberInput.addEventListener('input', () => {
+      const n = Number(racingLineGammaWeightNumberInput.value);
+      if (!Number.isFinite(n)) return;
+      racingLineGammaWeightInput.value = String(n);
+      onCornerGammaChanged(n);
+    });
+  }
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();

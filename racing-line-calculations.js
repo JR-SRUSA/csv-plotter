@@ -37,6 +37,23 @@
   // asks the *rate of change* of curvature to be smooth, which is what
   // gives the fitted path a natural, vehicle-like feel instead of jagged
   // steering transitions.
+  //
+  // Control points are seeded at uniform arc-length spacing (curvature-aware seeding --
+  // denser in corners, sparser on straights -- was tried and reverted: the extra
+  // control-point freedom it added in corners let the fit track more of the logged
+  // data's noise there, which made the result visibly less smooth than uniform spacing).
+  //
+  // One more piece sits around the core QP: a soft per-corner max-curvature cap (inside
+  // solveQuinticCurvatureQP), an additional penalty term active only where the current
+  // fit curves more sharply than the logged data's own local peak (a rolling max of a
+  // robust, baseline-distance curvature estimate -- see buildCurvatureProfile), pulling
+  // violating samples down via a sum-of-squared-violations penalty (not a true minimax --
+  // that would need inequality constraints and a real QP solver). This does NOT minimize
+  // the lap's overall curvature (a genuinely different, lap-time-oriented objective
+  // requiring track-width constraints) -- it only discourages the fit from being sharper
+  // than the data it's smoothing. There's also an optional per-corner gamma weight
+  // (see the cornerOverrides mechanism below) that *does* directly minimize curvature,
+  // but only within whichever corner the user has explicitly dialed it up for.
   // =======================================================================
 
   function normalizeFitWeight(value, fallback) {
@@ -204,12 +221,6 @@
   const QP_SAMPLE_MAX = 400;
   const QP_SAMPLE_SPACING_M = 8;
 
-  function buildUniformPeriodicEntries(controlPoints, period) {
-    const S = controlPoints.length;
-    const span = period / S;
-    return controlPoints.map((p) => ({ point: { x: p.x, y: p.y }, span }));
-  }
-
   function buildPeriodicRepFromEntries(entries, degree) {
     const S = entries.length;
     const primary = [0];
@@ -275,35 +286,6 @@
     return pts;
   }
 
-  // Inserts a new control point at along-track distance `tInsert`, splitting whichever
-  // knot span currently contains it. The new point is seeded at the midpoint of its two
-  // new neighbors -- just a starting guess, since the caller always re-runs the fit
-  // pipeline immediately afterward.
-  function insertPeriodicControlPoint(entries, tInsert) {
-    const S = entries.length;
-    if (S >= WHOLE_CIRCUIT_MAX_CONTROL_POINTS) return null;
-    const primary = periodicEntryDistances(entries).concat([entries.reduce((sum, e) => sum + e.span, 0)]);
-    const period = primary[S];
-    const tc = ((tInsert % period) + period) % period;
-
-    let k = S - 1;
-    for (let i = 0; i < S; i++) {
-      if (tc >= primary[i] && tc < primary[i + 1]) { k = i; break; }
-    }
-    const leftSpan = tc - primary[k];
-    const rightSpan = primary[k + 1] - tc;
-    if (leftSpan < WHOLE_CIRCUIT_MIN_SPAN_M || rightSpan < WHOLE_CIRCUIT_MIN_SPAN_M) return null;
-
-    const prevPt = entries[k].point;
-    const nextPt = entries[(k + 1) % S].point;
-    const newEntry = { point: { x: (prevPt.x + nextPt.x) / 2, y: (prevPt.y + nextPt.y) / 2 }, span: rightSpan };
-
-    const newEntries = entries.slice();
-    newEntries[k] = { point: entries[k].point, span: leftSpan };
-    newEntries.splice(k + 1, 0, newEntry);
-    return newEntries;
-  }
-
   // Removes the control point at `indexToRemove`, merging its knot span into the
   // previous one.
   function removePeriodicControlPoint(entries, indexToRemove) {
@@ -341,6 +323,167 @@
       deduped.push(curr);
     }
     return deduped;
+  }
+
+  // ---------------------------------------------------------------------
+  // Curvature profile of the raw logged data, used for two purposes:
+  //   1. Curvature-aware initial control-point seeding (more points where the track
+  //      curves sharply, fewer on straights).
+  //   2. A soft per-corner max-curvature cap in the QP (see solveQuinticCurvatureQP)
+  //      that discourages the fit from curving *more* sharply than the logged data
+  //      ever did in that region.
+  // Both reuse the same discrete curvature estimate and windowed-stat helpers below.
+  // ---------------------------------------------------------------------
+
+  const CURVATURE_ESTIMATE_BASELINE_M = 5; // chord length for the discrete curvature estimate itself
+  const SEEDING_CURVATURE_SMOOTH_HALF_WINDOW_M = 15; // smoothing for the cap's reference profile
+  const CURVATURE_CAP_WINDOW_M = 25; // ~corner-scale local-max window for the cap target
+  const CURVATURE_CAP_TOLERANCE = 1.05; // allow 5% over the local data peak before penalizing
+  const CURVATURE_CAP_PENALTY_STRENGTH = 2.0;
+
+  // Shortest signed distance from a to b on a circle of the given period.
+  function periodicDelta(a, b, period) {
+    let d = (b - a) % period;
+    if (d > period / 2) d -= period;
+    if (d < -period / 2) d += period;
+    return d;
+  }
+
+  // Discrete (Menger) curvature at every point, via 2*|cross(AB,BC)| / (|AB|*|BC|*|CA|)
+  // for the circle through three points: the point itself, and neighbors roughly
+  // `baselineM` away on each side (found by stepping outward in distance, same technique
+  // as periodicWindowStat). Using a fixed *distance* baseline rather than the immediately
+  // adjacent logged rows is essential for real (densely-logged, noisy) telemetry: a
+  // three-point curvature estimate is a second finite difference, so its noise
+  // sensitivity scales as (position noise / baseline length)^2 -- with adjacent rows
+  // often well under a meter apart, even sub-meter GPS/logging noise completely swamps
+  // the true curvature signal (verified: ~0.02 true curvature measured as ~1.2 with
+  // adjacent-row spacing on synthetic noisy data). A several-meter baseline brings that
+  // ratio back down to where the estimate actually reflects track geometry.
+  function computeMengerCurvature(points, period, baselineM) {
+    const n = points.length;
+    const out = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      let prevIdx = i;
+      for (let step = 1; step < n; step++) {
+        const j = (i - step + n) % n;
+        prevIdx = j;
+        if (Math.abs(periodicDelta(points[i].dist, points[j].dist, period)) >= baselineM) break;
+      }
+      let nextIdx = i;
+      for (let step = 1; step < n; step++) {
+        const j = (i + step) % n;
+        nextIdx = j;
+        if (Math.abs(periodicDelta(points[i].dist, points[j].dist, period)) >= baselineM) break;
+      }
+      const a = points[prevIdx];
+      const b = points[i];
+      const c = points[nextIdx];
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const bcx = c.x - b.x, bcy = c.y - b.y;
+      const cax = a.x - c.x, cay = a.y - c.y;
+      const cross = abx * bcy - aby * bcx;
+      const denom = Math.hypot(abx, aby) * Math.hypot(bcx, bcy) * Math.hypot(cax, cay);
+      out[i] = denom > 1e-9 ? (2 * Math.abs(cross)) / denom : 0;
+    }
+    return out;
+  }
+
+  // Periodic windowed mean or max of `values` (parallel to `points`) over a physical
+  // arc-length half-window, using the fact that `points` is already sorted by distance
+  // so stepping outward in index order also steps outward in distance.
+  function periodicWindowStat(points, values, period, halfWindowM, mode) {
+    const n = points.length;
+    const out = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      let sum = 0, count = 0, maxVal = 0;
+      for (let step = 0; step < n; step++) {
+        const j = (i + step) % n;
+        const delta = step === 0 ? 0 : periodicDelta(points[i].dist, points[j].dist, period);
+        if (Math.abs(delta) > halfWindowM) break;
+        sum += values[j]; count++;
+        if (values[j] > maxVal) maxVal = values[j];
+      }
+      for (let step = 1; step < n; step++) {
+        const j = (i - step + n) % n;
+        const delta = periodicDelta(points[i].dist, points[j].dist, period);
+        if (Math.abs(delta) > halfWindowM) break;
+        sum += values[j]; count++;
+        if (values[j] > maxVal) maxVal = values[j];
+      }
+      out[i] = mode === 'max' ? maxVal : (count > 0 ? sum / count : 0);
+    }
+    return out;
+  }
+
+  function buildCurvatureProfile(points, totalLapDistance) {
+    const raw = computeMengerCurvature(points, totalLapDistance, CURVATURE_ESTIMATE_BASELINE_M);
+    const smoothed = periodicWindowStat(points, raw, totalLapDistance, SEEDING_CURVATURE_SMOOTH_HALF_WINDOW_M, 'mean');
+    const localMax = periodicWindowStat(points, smoothed, totalLapDistance, CURVATURE_CAP_WINDOW_M, 'max');
+    return { smoothed, localMax };
+  }
+
+  // Linearly interpolates a per-point profile array (parallel to `points`) at an
+  // arbitrary along-track distance, wrapping across the seam.
+  function lookupProfileAtDistance(points, profile, targetDist, period) {
+    const n = points.length;
+    const tc = ((targetDist % period) + period) % period;
+    if (tc <= points[0].dist) {
+      const prevDist = points[n - 1].dist - period;
+      const span = points[0].dist - prevDist;
+      const frac = span > 1e-9 ? (tc - prevDist) / span : 0;
+      return profile[n - 1] + frac * (profile[0] - profile[n - 1]);
+    }
+    if (tc >= points[n - 1].dist) {
+      const nextDist = points[0].dist + period;
+      const span = nextDist - points[n - 1].dist;
+      const frac = span > 1e-9 ? (tc - points[n - 1].dist) / span : 0;
+      return profile[n - 1] + frac * (profile[0] - profile[n - 1]);
+    }
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].dist < tc) lo = mid + 1; else hi = mid;
+    }
+    const idx = lo;
+    const prevIdx = idx - 1;
+    const span = points[idx].dist - points[prevIdx].dist;
+    const frac = span > 1e-9 ? (tc - points[prevIdx].dist) / span : 0;
+    return profile[prevIdx] + frac * (profile[idx] - profile[prevIdx]);
+  }
+
+  // Builds periodic entries (control point + knot span) from non-uniform seed
+  // distances, clamping any span that ended up implausibly short (extreme curvature
+  // peaks pulling two seeds very close together).
+  function buildPeriodicEntriesFromDistances(controlPoints, seedDistances, period) {
+    const S = controlPoints.length;
+    const entries = controlPoints.map((p, i) => {
+      const next = seedDistances[(i + 1) % S];
+      const cur = seedDistances[i];
+      let span = next - cur;
+      if (span <= 0) span += period;
+      return { point: { x: p.x, y: p.y }, span };
+    });
+    for (let i = 0; i < S; i++) {
+      if (entries[i].span < WHOLE_CIRCUIT_MIN_SPAN_M) {
+        const deficit = WHOLE_CIRCUIT_MIN_SPAN_M - entries[i].span;
+        entries[i].span = WHOLE_CIRCUIT_MIN_SPAN_M;
+        const donor = (i - 1 + S) % S;
+        entries[donor].span = Math.max(WHOLE_CIRCUIT_MIN_SPAN_M, entries[donor].span - deficit);
+      }
+    }
+    // The clamp above can drift the total away from `period` (e.g. when a donor span was
+    // already near the minimum and couldn't absorb the full deficit, so part of it was
+    // effectively invented from nowhere). Renormalize so spans always sum back to exactly
+    // the true lap distance -- otherwise the periodic wrap (keyed off this sum) silently
+    // desyncs from the raw logged distances, and samples near the desync point land on the
+    // wrong part of the track entirely.
+    const sumSpans = entries.reduce((s, e) => s + e.span, 0);
+    if (sumSpans > 1e-9 && Math.abs(sumSpans - period) > 1e-9) {
+      const scale = period / sumSpans;
+      entries.forEach((e) => { e.span *= scale; });
+    }
+    return entries;
   }
 
   // =======================================================================
@@ -448,45 +591,91 @@
     return { indices: Array.from(merged.keys()), values: Array.from(merged.values()) };
   }
 
+  // Resolves the effective LOCAL value of a weight ('alpha' | 'beta' | 'gamma') at
+  // along-track position `dist`: the corresponding field of whichever corner override
+  // (from fitWeights.cornerOverrides) contains that position, or `fallback` (the global
+  // slider value, or 0 for gamma which has no global slider) outside any override.
+  // Overrides are {startDist, endDist, alpha?, beta?, gamma?} in the same coordinate
+  // frame as `points[i].dist`, wrapping periodically like everything else here.
+  function resolveLocalWeight(dist, key, fallback, overrides, period) {
+    if (!Array.isArray(overrides) || overrides.length === 0) return fallback;
+    const tc = ((dist % period) + period) % period;
+    for (let i = 0; i < overrides.length; i++) {
+      const ov = overrides[i];
+      if (!Number.isFinite(ov[key])) continue;
+      const start = ((Number(ov.startDist) % period) + period) % period;
+      const end = ((Number(ov.endDist) % period) + period) % period;
+      const inRange = start <= end ? (tc >= start && tc <= end) : (tc >= start || tc <= end);
+      if (inRange) return Number(ov[key]);
+    }
+    return fallback;
+  }
+
   // Builds and solves the joint (2S-dimensional, z = [x_1..x_S, y_1..y_S]) QP described
-  // above. `referenceRep` is the Stage-1 fit, used only to supply frozen first-derivative
-  // values for the curvature linearization -- the actual decision variables are the
-  // (fresh) control points being solved for, sharing the same knot structure.
-  function solveQuinticCurvatureQP(entries, points, referenceRep, weights, constants) {
+  // above. `referenceRep` is the Stage-1 fit (or the previous iteration's result, see the
+  // re-linearization loop in finishWholeCircuitFit), used to supply frozen first-
+  // derivative values for the curvature linearization -- the actual decision variables
+  // are the (fresh) control points being solved for, sharing the same knot structure.
+  // `curvatureProfile` (from buildCurvatureProfile) is optional; when present it adds a
+  // fourth soft penalty term discouraging the fit from curving more sharply, at any
+  // point, than the logged data ever did nearby (see the cap section below).
+  //
+  // `weights.cornerOverrides`, if present, lets alpha/beta/gamma vary along the track
+  // (e.g. a stronger "minimize curvature" gamma just within one corner being reviewed).
+  // Every term below is therefore built in two parallel matrices: an *unweighted*
+  // version (weight = 1, or for alpha/beta the notional "global value ignoring
+  // overrides") used only to compute that term's auto-scale factor, and a *weighted*
+  // version with the actual per-position value baked in, which is what's actually added
+  // to the system. Keeping the auto-scale calibration on the unweighted matrix is
+  // essential: if the local weight were baked in before computing its own auto-scale
+  // factor, raising that weight would proportionally shrink its own auto-scale factor,
+  // silently canceling out the change instead of applying it.
+  function solveQuinticCurvatureQP(entries, points, referenceRep, weights, constants, curvatureProfile) {
     const degree = SPLINE_DEGREE;
     const S = entries.length;
     const N = 2 * S;
-    const alpha = normalizeFitWeight(weights.alpha, constants.defaultWeights.alpha);
-    const betaRaw = normalizeFitWeight(weights.beta, constants.defaultWeights.beta);
-    const beta = betaRaw > 0 ? betaRaw : 1e-6;
+    const period = referenceRep.period;
+    const globalAlpha = normalizeFitWeight(weights.alpha, constants.defaultWeights.alpha);
+    const globalBetaRaw = normalizeFitWeight(weights.beta, constants.defaultWeights.beta);
+    const globalBeta = globalBetaRaw > 0 ? globalBetaRaw : 1e-6;
+    const overrides = Array.isArray(weights.cornerOverrides) ? weights.cornerOverrides : [];
 
     const Hdata = Array.from({ length: N }, () => new Array(N).fill(0));
     const gdata = new Array(N).fill(0);
+    const HdataWeighted = Array.from({ length: N }, () => new Array(N).fill(0));
+    const gdataWeighted = new Array(N).fill(0);
 
     // ---- Data fidelity term: beta * sum ||T(t_i) - data_i||^2 ----
     // x and y are decoupled here (fitting x doesn't depend on y or vice versa), so this
     // only ever touches the x-block [0..S) or the y-block [S..2S) of the joint system.
     points.forEach((pt) => {
-      const tc = ((pt.dist % referenceRep.period) + referenceRep.period) % referenceRep.period;
+      const tc = ((pt.dist % period) + period) % period;
       const basis = computeBSplineBasisFuns(tc, degree, referenceRep.knots, referenceRep.points.length);
+      const localBeta = resolveLocalWeight(pt.dist, 'beta', globalBeta, overrides, period);
       for (let a = 0; a <= degree; a++) {
         const extA = basis.span - degree + a;
         const realA = ((extA % S) + S) % S;
         gdata[realA] += basis.values[a] * pt.x;
         gdata[S + realA] += basis.values[a] * pt.y;
+        gdataWeighted[realA] += localBeta * basis.values[a] * pt.x;
+        gdataWeighted[S + realA] += localBeta * basis.values[a] * pt.y;
         for (let b = 0; b <= degree; b++) {
           const extB = basis.span - degree + b;
           const realB = ((extB % S) + S) % S;
-          Hdata[realA][realB] += basis.values[a] * basis.values[b];
-          Hdata[S + realA][S + realB] += basis.values[a] * basis.values[b];
+          const prod = basis.values[a] * basis.values[b];
+          Hdata[realA][realB] += prod;
+          Hdata[S + realA][S + realB] += prod;
+          HdataWeighted[realA][realB] += localBeta * prod;
+          HdataWeighted[S + realA][S + realB] += localBeta * prod;
         }
       }
     });
 
     // ---- Curvature-smoothness term: alpha * integral(kappa'(s)^2) ds ----
     const Hsmooth = Array.from({ length: N }, () => new Array(N).fill(0));
-    const sampleCount = Math.max(QP_SAMPLE_MIN, Math.min(QP_SAMPLE_MAX, Math.round(referenceRep.period / QP_SAMPLE_SPACING_M)));
-    const dt = referenceRep.period / sampleCount;
+    const HsmoothWeighted = Array.from({ length: N }, () => new Array(N).fill(0));
+    const sampleCount = Math.max(QP_SAMPLE_MIN, Math.min(QP_SAMPLE_MAX, Math.round(period / QP_SAMPLE_SPACING_M)));
+    const dt = period / sampleCount;
 
     // Precompute, at every sample, the linearized kappa(t) as a sparse coefficient
     // vector over z (indices into the x-block and y-block of the joint system).
@@ -503,7 +692,7 @@
       const idx = basis.indices;
       const xCoef = basis.values.map((v) => -w * d.first.y * v);
       const yCoef = basis.values.map((v) => w * d.first.x * v);
-      kappaCoeffs[j] = { idx, xCoef, yCoef, speed: Math.sqrt(speedSq) };
+      kappaCoeffs[j] = { idx, xCoef, yCoef, speed: Math.sqrt(speedSq), first: d.first, second: d.second };
     }
 
     for (let j = 0; j < sampleCount; j++) {
@@ -527,20 +716,90 @@
       const nz = Array.from(v.entries()).filter(([, val]) => Math.abs(val) > 1e-14);
       if (nz.length === 0) continue;
       const arcWeight = arcStep; // ds measure for this sample's contribution to the integral
+      const localAlpha = resolveLocalWeight(j * dt, 'alpha', globalAlpha, overrides, period);
       for (let p = 0; p < nz.length; p++) {
         const [gi, vi] = nz[p];
         for (let q = 0; q < nz.length; q++) {
           const [gj, vj] = nz[q];
           Hsmooth[gi][gj] += arcWeight * vi * vj;
+          HsmoothWeighted[gi][gj] += arcWeight * localAlpha * vi * vj;
         }
       }
     }
 
-    // Auto-scale alpha's contribution relative to beta's so the two sliders operate on
-    // comparable magnitudes regardless of the raw (very different) physical units of a
-    // position-squared term (m^2) versus a curvature-derivative-squared term (1/m^3) --
-    // without this, alpha=1 would be either imperceptible or would blow out the fit
-    // depending on track scale.
+    // ---- Minimize-curvature term: gamma * integral(kappa(s)^2) ds ----
+    // Unlike alpha/beta there's no global slider for this -- it defaults to 0 (off)
+    // everywhere and only does anything within a corner override that sets it, so it
+    // never disturbs a fit the user hasn't explicitly asked to straighten out. Reuses
+    // the same linearized kappa(t) proxy as the smoothness term above, just penalizing
+    // its value directly rather than its arc-length derivative.
+    const Hgamma = Array.from({ length: N }, () => new Array(N).fill(0));
+    const HgammaWeighted = Array.from({ length: N }, () => new Array(N).fill(0));
+    for (let j = 0; j < sampleCount; j++) {
+      const sample = kappaCoeffs[j];
+      const arcStep = Math.max(1e-6, sample.speed * dt);
+      const localGamma = resolveLocalWeight(j * dt, 'gamma', 0, overrides, period);
+      const nzIdx = [];
+      const nzVal = [];
+      sample.idx.forEach((realIdx, k) => {
+        nzIdx.push(realIdx); nzVal.push(sample.xCoef[k]);
+        nzIdx.push(S + realIdx); nzVal.push(sample.yCoef[k]);
+      });
+      for (let p = 0; p < nzIdx.length; p++) {
+        for (let q = 0; q < nzIdx.length; q++) {
+          const contrib = arcStep * nzVal[p] * nzVal[q];
+          Hgamma[nzIdx[p]][nzIdx[q]] += contrib;
+          if (localGamma > 0) HgammaWeighted[nzIdx[p]][nzIdx[q]] += localGamma * contrib;
+        }
+      }
+    }
+
+    // ---- Soft per-corner max-curvature cap ----
+    // Discourages the fit from curving more sharply, anywhere, than the logged data's own
+    // local peak (a rolling max of the smoothed data curvature -- see buildCurvatureProfile
+    // -- which acts as a per-corner ceiling without needing any explicit corner
+    // boundaries). This checks the *actual* (nonlinear) curvature of the current
+    // reference against that ceiling; only violating samples get penalized, and the
+    // penalty targets the same linearized kappa(t) proxy used above, pulled toward the
+    // (correctly signed) cap value rather than toward zero. Because this depends on the
+    // current reference, it sharpens up across the re-linearization loop just like the
+    // smoothness term does.
+    const Hcap = Array.from({ length: N }, () => new Array(N).fill(0));
+    const gcap = new Array(N).fill(0);
+    if (curvatureProfile) {
+      for (let j = 0; j < sampleCount; j++) {
+        const sample = kappaCoeffs[j];
+        const kappaActual = curvatureFromDerivatives(sample.first, sample.second);
+        if (kappaActual === null) continue;
+        const t = j * dt;
+        const cap = lookupProfileAtDistance(points, curvatureProfile.localMax, t, referenceRep.period);
+        if (!(cap > 1e-9) || kappaActual <= cap * CURVATURE_CAP_TOLERANCE) continue;
+
+        const crossSign = Math.sign(sample.first.x * sample.second.y - sample.first.y * sample.second.x) || 1;
+        const target = crossSign * cap;
+
+        const nzIdx = [];
+        const nzVal = [];
+        sample.idx.forEach((realIdx, k) => {
+          nzIdx.push(realIdx); nzVal.push(sample.xCoef[k]);
+          nzIdx.push(S + realIdx); nzVal.push(sample.yCoef[k]);
+        });
+        for (let p = 0; p < nzIdx.length; p++) {
+          gcap[nzIdx[p]] += target * nzVal[p];
+          for (let q = 0; q < nzIdx.length; q++) {
+            Hcap[nzIdx[p]][nzIdx[q]] += nzVal[p] * nzVal[q];
+          }
+        }
+      }
+    }
+
+    // Auto-scale alpha's, gamma's, and the cap penalty's contributions relative to the
+    // (unweighted) data term so the sliders operate on comparable magnitudes regardless
+    // of the raw (very different) physical units of a position-squared term (m^2) versus
+    // curvature-based terms (1/m^2, 1/m^3) -- without this, alpha/gamma=1 would be either
+    // imperceptible or would blow out the fit depending on track scale. Computed from the
+    // *unweighted* matrices (see function doc) so this calibration doesn't move when the
+    // user actually changes alpha/beta/gamma -- only the intended term does.
     const avgDiag = (mat) => {
       let sum = 0;
       let count = 0;
@@ -551,14 +810,19 @@
     };
     const dataDiagAvg = avgDiag(Hdata);
     const smoothDiagAvg = avgDiag(Hsmooth);
+    const gammaDiagAvg = avgDiag(Hgamma);
+    const capDiagAvg = avgDiag(Hcap);
     const alphaScale = smoothDiagAvg > 1e-12 ? (dataDiagAvg / smoothDiagAvg) : 0;
+    const gammaScale = gammaDiagAvg > 1e-12 ? (dataDiagAvg / gammaDiagAvg) : 0;
+    const capScale = capDiagAvg > 1e-12 ? (dataDiagAvg / capDiagAvg) : 0;
+    const capWeight = CURVATURE_CAP_PENALTY_STRENGTH * capScale;
 
     const H = Array.from({ length: N }, () => new Array(N).fill(0));
     const g = new Array(N).fill(0);
     for (let i = 0; i < N; i++) {
-      g[i] = beta * gdata[i];
+      g[i] = gdataWeighted[i] + capWeight * gcap[i];
       for (let j = 0; j < N; j++) {
-        H[i][j] = beta * Hdata[i][j] + alpha * alphaScale * Hsmooth[i][j];
+        H[i][j] = HdataWeighted[i][j] + alphaScale * HsmoothWeighted[i][j] + gammaScale * HgammaWeighted[i][j] + capWeight * Hcap[i][j];
       }
     }
 
@@ -574,8 +838,14 @@
   function finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants) {
     const fitWeightsResolved = {
       alpha: normalizeFitWeight(fitWeights && fitWeights.alpha, constants.defaultWeights.alpha),
-      beta: normalizeFitWeight(fitWeights && fitWeights.beta, constants.defaultWeights.beta)
+      beta: normalizeFitWeight(fitWeights && fitWeights.beta, constants.defaultWeights.beta),
+      cornerOverrides: Array.isArray(fitWeights && fitWeights.cornerOverrides) ? fitWeights.cornerOverrides : []
     };
+
+    // Reference curvature profile of the raw data, used by the QP's soft max-curvature
+    // cap term (see solveQuinticCurvatureQP) -- purely a property of the logged points,
+    // independent of the fit itself, so it's computed once up front.
+    const curvatureProfile = buildCurvatureProfile(points, totalLapDistance);
 
     // Stage 1: reference curve for linearizing the curvature term (see module doc).
     const referenceEntries = fitPeriodicPositionLSQ(entries, points, 1.0);
@@ -587,11 +857,12 @@
     // derivative terms stop being a good approximation, so curvature smoothness actually
     // *worsens* rather than improves as alpha grows past a certain point. Re-solving with
     // the previous solution as the new reference (a small sequential-convexification loop)
-    // corrects this, converging in just a couple of iterations for realistic weights.
+    // corrects this, converging in just a couple of iterations for realistic weights, and
+    // also sharpens the max-curvature cap term against the current solution each pass.
     const QP_RELINEARIZE_ITERATIONS = 4;
     let solvedEntries = referenceEntries;
     for (let iter = 0; iter < QP_RELINEARIZE_ITERATIONS; iter++) {
-      solvedEntries = solveQuinticCurvatureQP(entries, points, referenceRep, fitWeightsResolved, constants);
+      solvedEntries = solveQuinticCurvatureQP(entries, points, referenceRep, fitWeightsResolved, constants, curvatureProfile);
       const nextRep = buildPeriodicRepFromEntries(solvedEntries, SPLINE_DEGREE);
       let maxMove = 0;
       for (let i = 0; i < solvedEntries.length; i++) {
@@ -618,6 +889,24 @@
     });
     const positionRmse = count > 0 ? Math.sqrt(sumSq / count) : null;
 
+    // Diagnostic: how much of the final curve still exceeds the data's own local
+    // curvature peak (see the cap term in solveQuinticCurvatureQP) -- this is a *soft*
+    // constraint, so some residual overshoot is expected, especially at low alpha/high
+    // beta where data fidelity is prioritized over it.
+    let curvatureCapExceedCount = 0;
+    let curvatureCapMaxExceedPct = 0;
+    const diagSampleCount = Math.max(200, Math.min(800, Math.round(totalLapDistance / 5)));
+    for (let j = 0; j < diagSampleCount; j++) {
+      const t = (j / diagSampleCount) * rep.period;
+      const kappa = computePeriodicBSplineCurvatureAtT(rep, t);
+      if (kappa === null) continue;
+      const cap = lookupProfileAtDistance(points, curvatureProfile.localMax, t, totalLapDistance);
+      if (cap > 1e-9 && kappa > cap * CURVATURE_CAP_TOLERANCE) {
+        curvatureCapExceedCount += 1;
+        curvatureCapMaxExceedPct = Math.max(curvatureCapMaxExceedPct, (kappa / cap - 1) * 100);
+      }
+    }
+
     return {
       method: 'whole-circuit',
       entries: solvedEntries,
@@ -627,6 +916,8 @@
       baseDist,
       pointCount: points.length,
       positionRmse,
+      curvatureCapExceedCount,
+      curvatureCapMaxExceedPct,
       fitWeights: fitWeightsResolved,
       fitOptions
     };
@@ -644,26 +935,31 @@
     let numControlPoints = Math.round(totalLapDistance / WHOLE_CIRCUIT_TARGET_SPACING_M);
     numControlPoints = Math.max(WHOLE_CIRCUIT_MIN_CONTROL_POINTS, Math.min(WHOLE_CIRCUIT_MAX_CONTROL_POINTS, numControlPoints));
 
-    const seedControlPoints = [];
-    for (let i = 0; i < numControlPoints; i++) {
-      const t = (i / numControlPoints) * totalLapDistance;
+    // Uniform arc-length seeding. (Curvature-aware seeding was tried here -- denser
+    // spacing in corners, sparser on straights -- but the extra control points'
+    // freedom let the fit track more of the noise in the logged data, which made the
+    // result visibly less smooth than uniform spacing despite reducing peak error.)
+    const seedDistances = [];
+    for (let i = 0; i < numControlPoints; i++) seedDistances.push((i / numControlPoints) * totalLapDistance);
+
+    const seedControlPoints = seedDistances.map((t) => {
       let bestIdx = 0;
       let bestDt = Infinity;
       for (let j = 0; j < points.length; j++) {
         const dt = Math.abs(points[j].dist - t);
         if (dt < bestDt) { bestDt = dt; bestIdx = j; }
       }
-      seedControlPoints.push({ x: points[bestIdx].x, y: points[bestIdx].y });
-    }
-    const entries = buildUniformPeriodicEntries(seedControlPoints, totalLapDistance);
+      return { x: points[bestIdx].x, y: points[bestIdx].y };
+    });
+    const entries = buildPeriodicEntriesFromDistances(seedControlPoints, seedDistances, totalLapDistance);
 
     return finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants);
   }
 
-  // Re-fits an already-built whole-circuit fit after the user has added/removed a
-  // control point while navigating corners, or changed alpha/beta -- reuses the same
-  // reference lap and baseDist coordinate system, just re-running both fit stages for
-  // the (possibly locally denser) entries ring.
+  // Re-fits an already-built whole-circuit fit after the user has removed a control
+  // point while navigating corners, or changed alpha/beta -- reuses the same reference
+  // lap and baseDist coordinate system, just re-running both fit stages for the
+  // (possibly thinned) entries ring.
   function refitWholeCircuitFromEntries(log, lap, entries, baseDist, fitWeights, fitOptions, deps, constants) {
     const rawPoints = collectWholeLapMapPoints(log, lap, deps);
     if (rawPoints.length < 20) return null;
@@ -677,7 +973,6 @@
     normalizeFitWeight,
     buildWholeCircuitFit,
     refitWholeCircuitFromEntries,
-    insertPeriodicControlPoint,
     removePeriodicControlPoint,
     periodicEntryDistances,
     evalPeriodicBSpline,
