@@ -37,6 +37,39 @@
       </label>
 
       <div id="filesList" class="files-list"></div>
+
+      <div class="racing-line-controls">
+        <strong>Racing Line Fit</strong>
+        <button id="fitRacingLineBtn" type="button">Fit Racing Line</button>
+        <div id="racingLineWholeCircuitPanel" class="racing-line-whole-circuit-panel" hidden>
+          <div class="racing-line-weight-controls">
+            <label>Map X/Y Fit Weight
+              <input id="racingLinePositionWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
+              <span id="racingLinePositionWeightValue">1.0</span>
+              <input id="racingLinePositionWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
+            </label>
+            <label>Curvature Anchor Weight
+              <input id="racingLineRadiusWeight" type="range" min="0" max="10" step="0.1" value="2.0" />
+              <span id="racingLineRadiusWeightValue">2.0</span>
+              <input id="racingLineRadiusWeightNumber" type="number" min="0" max="10" step="0.1" value="2.0" />
+            </label>
+          </div>
+          <div id="racingLineWholeCircuitStatus" class="racing-line-status" aria-live="polite"></div>
+          <div class="racing-line-actions">
+            <button id="racingLineWholeCircuitPrevCornerBtn" type="button">◀ Prev Corner</button>
+            <button id="racingLineWholeCircuitNextCornerBtn" type="button">Next Corner ▶</button>
+          </div>
+          <div class="racing-line-actions">
+            <button id="racingLineWholeCircuitAddPointBtn" type="button">+ Add Control Point Here</button>
+          </div>
+          <div class="racing-line-hint">Click a control point on the map to remove it.</div>
+          <div class="racing-line-actions">
+            <button id="racingLineWholeCircuitAcceptBtn" type="button" disabled>Accept &amp; Add as Lap</button>
+            <button id="racingLineWholeCircuitDiscardBtn" type="button">Discard</button>
+          </div>
+        </div>
+      </div>
+
       <div id="lapsList" class="files-list" style="margin-top:8px"></div>
 
       <div style="margin-top:6px">
@@ -50,42 +83,6 @@
         </label>
         <label><input type="checkbox" id="cornerSwapLR" /> Swap left/right</label> -->
         <div id="cornerTrackInfo" class="corner-track-info" aria-live="polite"></div>
-      </div>
-
-      <div class="racing-line-controls">
-        <strong>Racing Line Fit</strong>
-        <button id="fitRacingLineBtn" type="button">Fit Racing Line</button>
-        <div id="racingLineWizard" class="racing-line-wizard" hidden>
-          <div id="racingLineStatus" class="racing-line-status" aria-live="polite"></div>
-          <div class="racing-line-weight-controls">
-            <label>Speed/Min Radius Weight
-              <input id="racingLineSpeedWeight" type="range" min="0" max="10" step="0.1" value="3.5" />
-              <span id="racingLineSpeedWeightValue">3.5</span>
-            </label>
-            <label>Map X/Y Fit Weight
-              <input id="racingLinePositionWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-              <span id="racingLinePositionWeightValue">1.0</span>
-            </label>
-            <label>Start Tangency Weight
-              <input id="racingLineTangentStartWeight" type="range" min="0" max="4" step="0.1" value="1.2" />
-              <span id="racingLineTangentStartWeightValue">1.2</span>
-            </label>
-            <label>End Tangency Weight
-              <input id="racingLineTangentEndWeight" type="range" min="0" max="4" step="0.1" value="1.2" />
-              <span id="racingLineTangentEndWeightValue">1.2</span>
-            </label>
-            <label>Radius Fit Weight (data vs 1/curvature)
-              <input id="racingLineRadiusWeight" type="range" min="0" max="10" step="0.1" value="2.0" />
-              <span id="racingLineRadiusWeightValue">2.0</span>
-            </label>
-          </div>
-          <div class="racing-line-actions">
-            <button id="racingLineAcceptBtn" type="button">Accept Fit</button>
-            <button id="racingLineRejectBtn" type="button">Reject Fit</button>
-            <button id="racingLinePrevBtn" type="button">Previous</button>
-            <button id="racingLineDownloadBtn" type="button" disabled>Download Racing Line JSON</button>
-          </div>
-        </div>
       </div>
 
       <div class="axis-controls">
@@ -188,7 +185,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-07-10e</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-07-11c</div>
     </section>
 
     <section class="plot">
@@ -203,6 +200,7 @@
   <!-- <footer>
     <small>Supports CSVs with headers. Detects `Time`/`Timestamp` and `Distance` columns. Computes distance if `lat`/`lon` present.</small>
   </footer> -->
+  <script src="racing-line-calculations.js"></script>
   <script src="gpbikes-plotter.bundle.min.js"></script>
 </body>
 </html>

@@ -13,22 +13,18 @@
   const cornerSwapLRInput = document.getElementById('cornerSwapLR');
   const cornerTrackInfoDiv = document.getElementById('cornerTrackInfo');
   const fitRacingLineBtn = document.getElementById('fitRacingLineBtn');
-  const racingLineWizard = document.getElementById('racingLineWizard');
-  const racingLineStatus = document.getElementById('racingLineStatus');
-  const racingLineAcceptBtn = document.getElementById('racingLineAcceptBtn');
-  const racingLineRejectBtn = document.getElementById('racingLineRejectBtn');
-  const racingLinePrevBtn = document.getElementById('racingLinePrevBtn');
-  const racingLineDownloadBtn = document.getElementById('racingLineDownloadBtn');
-  const racingLineSpeedWeightInput = document.getElementById('racingLineSpeedWeight');
+  const racingLineWholeCircuitPanel = document.getElementById('racingLineWholeCircuitPanel');
+  const racingLineWholeCircuitStatus = document.getElementById('racingLineWholeCircuitStatus');
+  const racingLineWholeCircuitAcceptBtn = document.getElementById('racingLineWholeCircuitAcceptBtn');
+  const racingLineWholeCircuitDiscardBtn = document.getElementById('racingLineWholeCircuitDiscardBtn');
+  const racingLineWholeCircuitPrevCornerBtn = document.getElementById('racingLineWholeCircuitPrevCornerBtn');
+  const racingLineWholeCircuitNextCornerBtn = document.getElementById('racingLineWholeCircuitNextCornerBtn');
+  const racingLineWholeCircuitAddPointBtn = document.getElementById('racingLineWholeCircuitAddPointBtn');
   const racingLinePositionWeightInput = document.getElementById('racingLinePositionWeight');
-  const racingLineTangentStartWeightInput = document.getElementById('racingLineTangentStartWeight');
-  const racingLineTangentEndWeightInput = document.getElementById('racingLineTangentEndWeight');
+  const racingLinePositionWeightNumberInput = document.getElementById('racingLinePositionWeightNumber');
   const racingLineRadiusWeightInput = document.getElementById('racingLineRadiusWeight');
-  const racingLineEnforceMonotonicRadiusInput = document.getElementById('racingLineEnforceMonotonicRadius');
-  const racingLineSpeedWeightValue = document.getElementById('racingLineSpeedWeightValue');
+  const racingLineRadiusWeightNumberInput = document.getElementById('racingLineRadiusWeightNumber');
   const racingLinePositionWeightValue = document.getElementById('racingLinePositionWeightValue');
-  const racingLineTangentStartWeightValue = document.getElementById('racingLineTangentStartWeightValue');
-  const racingLineTangentEndWeightValue = document.getElementById('racingLineTangentEndWeightValue');
   const racingLineRadiusWeightValue = document.getElementById('racingLineRadiusWeightValue');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
@@ -135,18 +131,12 @@
   const CORNER_LEFT_COLOR = COLORS[4]; // purple
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
-  const RACING_LINE_CURVE_COLOR = '#2b6de9';
-  const RACING_LINE_ACCEPTED_COLOR = '#7ea7f4';
-  const RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC = 0.25;
+  const CURVATURE_SMOOTH_HALF_WINDOW_M = 35; // matches WHOLE_CIRCUIT_CURVATURE_SMOOTH_HALF_WINDOW_M in racing-line-calculations.js
+  const CURVATURE_SMOOTHED_CHANNEL = 'Curvature (Smoothed 35m)';
   const RACING_LINE_DEFAULT_WEIGHTS = {
-    speedAnchor: 3.5,
     position: 1.0,
-    tangentStart: 1.2,
-    tangentEnd: 1.2,
     radiusFit: 2.0
   };
-  const RACING_LINE_MAX_TANGENT_RAY_M = 500;
-  const RACING_LINE_MAX_TANGENT_HANDLE_M = RACING_LINE_MAX_TANGENT_RAY_M / 1.8;
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
   let isApplyingAutoOffset = false;
@@ -174,21 +164,8 @@
   let activeCornerHeadingSegments = []; // clickable corner/straight strip segments for current plot
   let activeCornerDataForFitting = null;
   let activeCornerReferenceForFitting = null;
-  let racingLineLeafletLayers = [];
-  let racingLineState = {
-    active: false,
-    complete: false,
-    referenceLogId: '',
-    referenceLap: null,
-    cornerSegments: [],
-    currentIndex: 0,
-    decisions: new Map(),
-    preview: null,
-    fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS },
-    fitOptions: {
-      enforceMonotonicRadius: true
-    }
-  };
+  let wholeCircuitLeafletLayers = [];
+  let wholeCircuitFitPreview = null; // { fit, referenceLog, referenceLap, cornerSegments, currentCornerIndex } awaiting Accept/Discard
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
 
@@ -331,7 +308,9 @@
       }
     }
     if (yMin === null || yMax === null) return null;
-    const pad = Math.max(0.05, Math.abs(yMax - yMin) * 0.1);
+    const span = Math.abs(yMax - yMin);
+    const scale = Math.max(Math.abs(yMin), Math.abs(yMax), 1e-6);
+    const pad = Math.max(span * 0.1, scale * 0.05, 1e-6);
     return [yMin - pad, yMax + pad];
   }
 
@@ -641,8 +620,15 @@
     const paddedRanges = new Map();
     rangesByAxis.forEach((value, axisRef) => {
       const span = Math.abs(value.max - value.min);
-      const pad = Math.max(0.05, span * 0.1);
-      paddedRanges.set(axisRef, [value.min - pad, value.max + pad]);
+      // Scale the padding floor to the values' own magnitude instead of a fixed 0.05 --
+      // a fixed floor swamps small-scale channels like Curvature (1/m, often < 0.05
+      // total) and pushes the axis well past the visible data on both ends.
+      const scale = Math.max(Math.abs(value.min), Math.abs(value.max), 1e-6);
+      const pad = Math.max(span * 0.1, scale * 0.05, 1e-6);
+      // Don't let padding push the axis negative for channels whose data never was --
+      // radius/curvature/speed-like quantities that are physically non-negative.
+      const lower = value.min >= 0 ? Math.max(0, value.min - pad) : (value.min - pad);
+      paddedRanges.set(axisRef, [lower, value.max + pad]);
     });
 
     return paddedRanges;
@@ -701,6 +687,14 @@
     const n = Number.isFinite(lap) ? Math.floor(lap) : 0;
     const idx = ((n % COLORS.length) + COLORS.length) % COLORS.length;
     return COLORS[idx];
+  }
+
+  // The racing-line synthetic log is always a single lap numbered 1, so this is exactly
+  // the color the laps list will show for it once added -- used to keep the map polyline
+  // and the curvature comparison trace visually matched to that sidebar entry, both
+  // during preview and after acceptance.
+  function getRacingLineDisplayColor() {
+    return colorForLap(1);
   }
 
   function getLineDashForFileIndex(fileIdx) {
@@ -842,6 +836,7 @@
     meta.lapTime = lapTime;
 
     addCalculatedCommonChannels(data, cols, meta);
+    addCurvatureChannel(data, cols, meta);
     deriveAndExposeMapXY(data, cols, meta);
     applyAllMathChannelsToLog({ data, cols, meta });
 
@@ -980,6 +975,18 @@
       nameWrap.appendChild(linePreview);
       label.appendChild(checkbox);
       label.appendChild(nameWrap);
+
+      if (log.meta && log.meta.synthetic) {
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = 'Remove';
+        removeBtn.setAttribute('data-remove', log.id);
+        removeBtn.className = 'file-synthetic-remove-btn';
+        el.appendChild(label);
+        el.appendChild(removeBtn);
+        filesList.appendChild(el);
+        return;
+      }
 
       const decoderName = resolveDecoderName(log.meta) || ((log.meta && log.meta.source) ? log.meta.source : 'Unknown');
       const decoderRow = document.createElement('div');
@@ -1235,7 +1242,7 @@
     updatePlot();
   }
 
-  // Like populateYSelect but restores a given set of selections instead of previous state.
+
   function populateYSelectWithSelections(targetSelections) {
     const numericCols = new Set();
     logs.forEach(l => {
@@ -1902,6 +1909,46 @@
     return mapping.displayName || mapping.piboso;
   }
 
+  // Adds a general "Curvature" (1/Radius) channel to any log that has a resolvable
+  // Radius column, so it can be plotted like any other channel, plus a precomputed
+  // "Curvature (Smoothed 35m)" channel using the same forward/backward windowed-average
+  // technique (and the same 35m half-window) the whole-circuit racing-line fit uses
+  // internally to find each corner's apex -- so that exact signal is directly plottable
+  // rather than only reproducible by hand via Quick Modify.
+  function addCurvatureChannel(data, cols, meta) {
+    if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
+    const mappingContext = { meta };
+    const radiusCol = resolveChannelForLog('Radius', mappingContext);
+    if (!radiusCol || !cols.includes(radiusCol)) return;
+    if (!cols.includes('Curvature')) cols.push('Curvature');
+    data.forEach((row) => {
+      const radius = Number(row[radiusCol]);
+      row['Curvature'] = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : null;
+    });
+    if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+    meta.units['Curvature'] = '1/m';
+
+    if (Array.isArray(meta.lapNum) && Array.isArray(meta.lapRelDist) && meta.lapNum.length === data.length) {
+      if (!cols.includes(CURVATURE_SMOOTHED_CHANNEL)) cols.push(CURVATURE_SMOOTHED_CHANNEL);
+      const smoothedArr = new Array(data.length).fill(null);
+      const lapGroups = new Map();
+      meta.lapNum.forEach((lapN, i) => {
+        if (!lapGroups.has(lapN)) lapGroups.set(lapN, []);
+        lapGroups.get(lapN).push(i);
+      });
+      // Smooth per-lap: lapRelDist resets to 0 at each lap boundary, so smoothing
+      // across the full row array would blend unrelated laps at similar in-lap distances.
+      lapGroups.forEach((rowIndices) => {
+        const curvatureSub = rowIndices.map((i) => data[i]['Curvature']);
+        const distSub = rowIndices.map((i) => Number(meta.lapRelDist[i]));
+        const smoothedSub = computeWindowedAverage(curvatureSub, distSub, CURVATURE_SMOOTH_HALF_WINDOW_M);
+        rowIndices.forEach((i, idx) => { smoothedArr[i] = smoothedSub[idx]; });
+      });
+      data.forEach((row, i) => { row[CURVATURE_SMOOTHED_CHANNEL] = smoothedArr[i]; });
+      meta.units[CURVATURE_SMOOTHED_CHANNEL] = '1/m';
+    }
+  }
+
   function addCalculatedCommonChannels(data, cols, meta) {
     if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
 
@@ -2134,31 +2181,21 @@
     return { segments, trackLength: rows[rows.length - 1].dist };
   }
 
-  function resetRacingLineState() {
-    racingLineState = {
-      active: false,
-      complete: false,
-      referenceLogId: '',
-      referenceLap: null,
-      cornerSegments: [],
-      currentIndex: 0,
-      decisions: new Map(),
-      preview: null,
-      fitWeights: { ...RACING_LINE_DEFAULT_WEIGHTS },
-      fitOptions: {
-        enforceMonotonicRadius: true
-      }
-    };
-    updateRacingLineWizardUI();
-    renderRacingLineOverlay();
+  // Resets any in-progress whole-circuit fit preview and its map overlay -- called when
+  // the underlying data changes (file removed, "Clear All") so a stale preview referring
+  // to a log that may no longer exist doesn't linger.
+  function resetWholeCircuitFitState() {
+    wholeCircuitFitPreview = null;
+    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = true;
+    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+    if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = '';
+    renderWholeCircuitOverlay();
   }
 
-  function getRacingLineFitOptions() {
-    const fromState = (racingLineState && racingLineState.fitOptions) ? racingLineState.fitOptions : { enforceMonotonicRadius: true };
-    const enforceMonotonicRadius = racingLineEnforceMonotonicRadiusInput
-      ? !!racingLineEnforceMonotonicRadiusInput.checked
-      : !!fromState.enforceMonotonicRadius;
-    return { enforceMonotonicRadius };
+  function getRacingLineCalculationsApi() {
+    return (typeof window !== 'undefined' && window.RacingLineCalculations)
+      ? window.RacingLineCalculations
+      : null;
   }
 
   function normalizeFitWeight(value, fallback) {
@@ -2167,940 +2204,63 @@
   }
 
   function getRacingLineFitWeights() {
-    const fromState = racingLineState && racingLineState.fitWeights ? racingLineState.fitWeights : RACING_LINE_DEFAULT_WEIGHTS;
-    const speedAnchor = normalizeFitWeight(
-      racingLineSpeedWeightInput ? racingLineSpeedWeightInput.value : fromState.speedAnchor,
-      fromState.speedAnchor
-    );
     const position = normalizeFitWeight(
-      racingLinePositionWeightInput ? racingLinePositionWeightInput.value : fromState.position,
-      fromState.position
-    );
-    const tangentStart = normalizeFitWeight(
-      racingLineTangentStartWeightInput ? racingLineTangentStartWeightInput.value : fromState.tangentStart,
-      fromState.tangentStart
-    );
-    const tangentEnd = normalizeFitWeight(
-      racingLineTangentEndWeightInput ? racingLineTangentEndWeightInput.value : fromState.tangentEnd,
-      fromState.tangentEnd
+      racingLinePositionWeightInput ? racingLinePositionWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.position,
+      RACING_LINE_DEFAULT_WEIGHTS.position
     );
     const radiusFit = normalizeFitWeight(
-      racingLineRadiusWeightInput ? racingLineRadiusWeightInput.value : fromState.radiusFit,
-      fromState.radiusFit
+      racingLineRadiusWeightInput ? racingLineRadiusWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.radiusFit,
+      RACING_LINE_DEFAULT_WEIGHTS.radiusFit
     );
-    return { speedAnchor, position, tangentStart, tangentEnd, radiusFit };
+    return { position, radiusFit };
   }
 
   function updateRacingLineWeightLabels() {
     const w = getRacingLineFitWeights();
-    if (racingLineSpeedWeightValue) racingLineSpeedWeightValue.textContent = w.speedAnchor.toFixed(1);
     if (racingLinePositionWeightValue) racingLinePositionWeightValue.textContent = w.position.toFixed(1);
-    if (racingLineTangentStartWeightValue) racingLineTangentStartWeightValue.textContent = w.tangentStart.toFixed(1);
-    if (racingLineTangentEndWeightValue) racingLineTangentEndWeightValue.textContent = w.tangentEnd.toFixed(1);
+    if (racingLinePositionWeightNumberInput) racingLinePositionWeightNumberInput.value = w.position.toFixed(1);
     if (racingLineRadiusWeightValue) racingLineRadiusWeightValue.textContent = w.radiusFit.toFixed(1);
-    if (racingLineState) racingLineState.fitWeights = w;
-    const options = getRacingLineFitOptions();
-    if (racingLineState) racingLineState.fitOptions = options;
-    if (racingLineEnforceMonotonicRadiusInput) {
-      racingLineEnforceMonotonicRadiusInput.checked = !!options.enforceMonotonicRadius;
-    }
+    if (racingLineRadiusWeightNumberInput) racingLineRadiusWeightNumberInput.value = w.radiusFit.toFixed(1);
   }
 
-  function getRacingLineSegmentKey(seg) {
-    if (!seg) return '';
-    const numberPart = Number.isFinite(Number(seg.number)) ? Number(seg.number) : 0;
-    const startPart = Number.isFinite(Number(seg.startDist)) ? Number(seg.startDist).toFixed(3) : '0';
-    const endPart = Number.isFinite(Number(seg.endDist)) ? Number(seg.endDist).toFixed(3) : '0';
-    return `${numberPart}|${startPart}|${endPart}`;
-  }
-
-  function getCurrentRacingLineSegment() {
-    if (!racingLineState.active) return null;
-    if (!Array.isArray(racingLineState.cornerSegments) || racingLineState.cornerSegments.length === 0) return null;
-    const idx = Math.max(0, Math.min(racingLineState.currentIndex, racingLineState.cornerSegments.length - 1));
-    return racingLineState.cornerSegments[idx] || null;
-  }
-
-  function collectCornerMapPoints(log, lap, segment) {
-    if (!log || !log.meta || !Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist) || !segment) return [];
-    const mapSource = getMapSourceForLog(log);
-    if (!mapSource) return [];
-
-    const startDist = Number(segment.startDist);
-    const endDist = Number(segment.endDist);
-    if (!Number.isFinite(startDist) || !Number.isFinite(endDist) || endDist <= startDist) return [];
-
-    const points = [];
-    for (let i = 0; i < log.meta.lapNum.length; i++) {
-      if (log.meta.lapNum[i] !== lap) continue;
-      const dist = Number(log.meta.lapRelDist[i]);
-      if (!Number.isFinite(dist) || dist < startDist || dist > endDist) continue;
-      const x = Number(mapSource.xAt(i));
-      const y = Number(mapSource.yAt(i));
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      points.push({ x, y, dist, rowIndex: i });
-    }
-
-    if (points.length < 3) return [];
-    points.sort((a, b) => a.dist - b.dist);
-
-    const deduped = [points[0]];
-    for (let i = 1; i < points.length; i++) {
-      const prev = deduped[deduped.length - 1];
-      const curr = points[i];
-      if (Math.hypot(curr.x - prev.x, curr.y - prev.y) <= 1e-6) continue;
-      deduped.push(curr);
-    }
-
-    return deduped;
-  }
-
-  function getSpeedColumnForLog(log) {
-    const resolved = resolveChannelForLog('Speed', log);
-    if (resolved && Array.isArray(log.cols) && log.cols.includes(resolved)) return resolved;
-    const fallbacks = ['Speed', 'GPS Speed', 'Ground Speed'];
-    for (const name of fallbacks) {
-      if (Array.isArray(log.cols) && log.cols.includes(name)) return name;
-    }
-    return '';
-  }
-
-  function getRadiusColumnForLog(log) {
-    const resolved = resolveChannelForLog('Radius', log);
-    if (resolved && Array.isArray(log.cols) && log.cols.includes(resolved)) return resolved;
-    const fallbacks = ['GPS Radius', 'Radius', 'Track Radius'];
-    for (const name of fallbacks) {
-      if (Array.isArray(log.cols) && log.cols.includes(name)) return name;
-    }
-    return '';
-  }
-
-  function buildSmoothedSpeedByRow(log) {
-    if (!log || !Array.isArray(log.data) || !log.meta) return null;
-    const speedCol = getSpeedColumnForLog(log);
-    if (!speedCol) return null;
-    const timeCol = log.meta.timeCol;
-    if (!timeCol) return null;
-
-    const speedValues = log.data.map((row) => {
-      const v = Number(row[speedCol]);
-      return Number.isFinite(v) ? v : null;
+  // Curvature of the in-progress whole-circuit fit preview (before it's been accepted
+  // as a lap), sampled analytically -- unsmoothed, since the fit itself is already
+  // smooth -- across the whole lap so it can be overlaid against the logged
+  // Curvature/Curvature (Smoothed 35m) channels to judge fit quality while reviewing.
+  function buildWholeCircuitPreviewCurvatureSeries() {
+    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return null;
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.computePeriodicBSplineRadiusAtT !== 'function') return null;
+    const { fit } = wholeCircuitFitPreview;
+    const xArr = [];
+    const yArr = [];
+    (Array.isArray(fit.sampled) ? fit.sampled : []).forEach((pt) => {
+      const radius = calc.computePeriodicBSplineRadiusAtT(fit.control, pt.dist);
+      const curvature = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : 0;
+      xArr.push(pt.dist + fit.baseDist);
+      yArr.push(curvature);
     });
-    const timeValues = log.data.map((row) => {
-      const t = Number(row[timeCol]);
-      return Number.isFinite(t) ? t : null;
+    if (xArr.length === 0) return null;
+    return { x: xArr, y: yArr };
+  }
+
+  // Curvature of the accepted racing-line lap, read directly from its own precomputed
+  // (unsmoothed, analytic) Curvature column -- the after-Accept counterpart to
+  // buildWholeCircuitPreviewCurvatureSeries above.
+  function buildAcceptedRacingLineCurvatureSeries() {
+    const log = logs.find(l => l.meta && l.meta.racingLine);
+    if (!log || !Array.isArray(log.data) || !log.meta || !Array.isArray(log.meta.lapRelDist)) return null;
+    const xArr = [];
+    const yArr = [];
+    log.data.forEach((row, i) => {
+      const d = Number(log.meta.lapRelDist[i]);
+      const c = Number(row.Curvature);
+      if (!Number.isFinite(d) || !Number.isFinite(c)) return;
+      xArr.push(d);
+      yArr.push(c);
     });
-
-    return computeWindowedAverage(speedValues, timeValues, RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC);
-  }
-
-  function getCornerMinSpeedAnchor(log, lap, segment, pointsByRowIndex) {
-    if (!log || !segment || !(pointsByRowIndex instanceof Map)) return null;
-    const smoothedSpeed = buildSmoothedSpeedByRow(log);
-    if (!Array.isArray(smoothedSpeed)) return null;
-
-    let best = null;
-    for (let i = 0; i < log.meta.lapNum.length; i++) {
-      if (log.meta.lapNum[i] !== lap) continue;
-      const dist = Number(log.meta.lapRelDist[i]);
-      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
-      if (!pointsByRowIndex.has(i)) continue;
-      const speed = Number(smoothedSpeed[i]);
-      if (!Number.isFinite(speed)) continue;
-      const pt = pointsByRowIndex.get(i);
-      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
-      if (!best || speed < best.speed) {
-        best = { x: pt.x, y: pt.y, speed, rowIndex: i };
-      }
-    }
-
-    return best;
-  }
-
-  function buildCornerRadiusSamples(log, lap, segment, tByRowIndex) {
-    if (!log || !segment || !(tByRowIndex instanceof Map)) return [];
-    const radiusCol = getRadiusColumnForLog(log);
-    if (!radiusCol) return [];
-
-    const samples = [];
-    for (let i = 0; i < log.meta.lapNum.length; i++) {
-      if (log.meta.lapNum[i] !== lap) continue;
-      const dist = Number(log.meta.lapRelDist[i]);
-      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
-      if (!tByRowIndex.has(i)) continue;
-      const t = Number(tByRowIndex.get(i));
-      const radius = Number(log.data[i][radiusCol]);
-      if (!Number.isFinite(t) || !Number.isFinite(radius) || radius <= 0) continue;
-      samples.push({ t, radius });
-    }
-    return samples;
-  }
-
-  function normalizeVec(x, y) {
-    const nx = Number(x);
-    const ny = Number(y);
-    const mag = Math.hypot(nx, ny);
-    if (!(mag > 1e-9)) return null;
-    return { x: nx / mag, y: ny / mag };
-  }
-
-  function getDefaultStartDirection(points) {
-    if (!Array.isArray(points) || points.length < 2) return { x: 1, y: 0 };
-    for (let i = 1; i < points.length; i++) {
-      const d = normalizeVec(points[i].x - points[0].x, points[i].y - points[0].y);
-      if (d) return d;
-    }
-    return { x: 1, y: 0 };
-  }
-
-  function getDefaultEndDirection(points) {
-    if (!Array.isArray(points) || points.length < 2) return { x: 1, y: 0 };
-    const end = points.length - 1;
-    for (let i = end - 1; i >= 0; i--) {
-      const d = normalizeVec(points[end].x - points[i].x, points[end].y - points[i].y);
-      if (d) return d;
-    }
-    return { x: 1, y: 0 };
-  }
-
-  function fitQuarticBezierWithEndpointTangents(points, tangentGuide, speedAnchor, fitWeights, speedTargetT) {
-    if (!Array.isArray(points) || points.length < 4) return null;
-    const p0 = points[0];
-    const p4 = points[points.length - 1];
-    const chord = [0];
-    let total = 0;
-    for (let i = 1; i < points.length; i++) {
-      total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
-      chord.push(total);
-    }
-
-    const denomDist = total > 1e-9 ? total : (points.length - 1);
-    const startDir = normalizeVec(
-      tangentGuide && tangentGuide.startDir ? tangentGuide.startDir.x : NaN,
-      tangentGuide && tangentGuide.startDir ? tangentGuide.startDir.y : NaN
-    ) || getDefaultStartDirection(points);
-    const endDir = normalizeVec(
-      tangentGuide && tangentGuide.endDir ? tangentGuide.endDir.x : NaN,
-      tangentGuide && tangentGuide.endDir ? tangentGuide.endDir.y : NaN
-    ) || getDefaultEndDirection(points);
-
-    const chordLen = Math.max(1e-6, Math.hypot(p4.x - p0.x, p4.y - p0.y));
-    const startNeighborDist = tangentGuide && Number.isFinite(Number(tangentGuide.startNeighborDist))
-      ? Math.max(1e-6, Number(tangentGuide.startNeighborDist))
-      : chordLen;
-    const endNeighborDist = tangentGuide && Number.isFinite(Number(tangentGuide.endNeighborDist))
-      ? Math.max(1e-6, Number(tangentGuide.endNeighborDist))
-      : chordLen;
-    const weights = fitWeights || RACING_LINE_DEFAULT_WEIGHTS;
-    const positionWeight = normalizeFitWeight(weights.position, RACING_LINE_DEFAULT_WEIGHTS.position);
-    const speedWeight = normalizeFitWeight(weights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor);
-    const startTangencyWeight = normalizeFitWeight(weights.tangentStart, RACING_LINE_DEFAULT_WEIGHTS.tangentStart);
-    const endTangencyWeight = normalizeFitWeight(weights.tangentEnd, RACING_LINE_DEFAULT_WEIGHTS.tangentEnd);
-    const effectivePositionWeight = positionWeight > 0 ? positionWeight : 1e-6;
-
-    const startTangencyScale = Math.max(0.2, Math.min(3.0, startTangencyWeight / effectivePositionWeight));
-    const endTangencyScale = Math.max(0.2, Math.min(3.0, endTangencyWeight / effectivePositionWeight));
-
-    const tanStartLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * startNeighborDist));
-    const tanEndLenBase = Math.max(0.08 * chordLen, Math.min(0.45 * chordLen, 0.25 * endNeighborDist));
-    const tanStartLen = Math.min(RACING_LINE_MAX_TANGENT_HANDLE_M, tanStartLenBase * startTangencyScale);
-    const tanEndLen = Math.min(RACING_LINE_MAX_TANGENT_HANDLE_M, tanEndLenBase * endTangencyScale);
-
-    const p1 = {
-      x: p0.x + startDir.x * tanStartLen,
-      y: p0.y + startDir.y * tanStartLen
-    };
-    const p3 = {
-      x: p4.x - endDir.x * tanEndLen,
-      y: p4.y - endDir.y * tanEndLen
-    };
-
-    let sumB2 = 0;
-    let sumBx = 0;
-    let sumBy = 0;
-
-    for (let i = 0; i < points.length; i++) {
-      const t = total > 1e-9 ? (chord[i] / denomDist) : (i / denomDist);
-      const omt = 1 - t;
-      const b0 = omt * omt * omt * omt;
-      const b1 = 4 * omt * omt * omt * t;
-      const b2 = 6 * omt * omt * t * t;
-      const b3 = 4 * omt * t * t * t;
-      const b4 = t * t * t * t;
-      if (Math.abs(b2) < 1e-9) continue;
-
-      const rhsX = points[i].x - (b0 * p0.x + b1 * p1.x + b3 * p3.x + b4 * p4.x);
-      const rhsY = points[i].y - (b0 * p0.y + b1 * p1.y + b3 * p3.y + b4 * p4.y);
-      const w = effectivePositionWeight;
-      sumB2 += w * b2 * b2;
-      sumBx += w * b2 * rhsX;
-      sumBy += w * b2 * rhsY;
-    }
-
-    if (speedAnchor && Number.isFinite(speedAnchor.x) && Number.isFinite(speedAnchor.y) && speedWeight > 0) {
-      const targetT = Number.isFinite(speedTargetT) ? Math.max(0, Math.min(1, speedTargetT)) : 0.5;
-      const omt = 1 - targetT;
-      const b0 = omt * omt * omt * omt;
-      const b1 = 4 * omt * omt * omt * targetT;
-      const b2 = 6 * omt * omt * targetT * targetT;
-      const b3 = 4 * omt * targetT * targetT * targetT;
-      const b4 = targetT * targetT * targetT * targetT;
-
-      const rhsX = speedAnchor.x - (b0 * p0.x + b1 * p1.x + b3 * p3.x + b4 * p4.x);
-      const rhsY = speedAnchor.y - (b0 * p0.y + b1 * p1.y + b3 * p3.y + b4 * p4.y);
-      sumB2 += speedWeight * b2 * b2;
-      sumBx += speedWeight * b2 * rhsX;
-      sumBy += speedWeight * b2 * rhsY;
-    }
-
-    let p2;
-    if (sumB2 > 1e-12) {
-      p2 = { x: sumBx / sumB2, y: sumBy / sumB2 };
-    } else {
-      p2 = { x: (p0.x + p4.x) * 0.5, y: (p0.y + p4.y) * 0.5 };
-    }
-
-    return {
-      p0: { x: p0.x, y: p0.y },
-      p1,
-      p2,
-      p3,
-      p4: { x: p4.x, y: p4.y },
-      tangentLengths: {
-        start: tanStartLen,
-        end: tanEndLen
-      }
-    };
-  }
-
-  function evalQuarticBezier(control, t) {
-    const omt = 1 - t;
-    const b0 = omt * omt * omt * omt;
-    const b1 = 4 * omt * omt * omt * t;
-    const b2 = 6 * omt * omt * t * t;
-    const b3 = 4 * omt * t * t * t;
-    const b4 = t * t * t * t;
-    return {
-      x: b0 * control.p0.x + b1 * control.p1.x + b2 * control.p2.x + b3 * control.p3.x + b4 * control.p4.x,
-      y: b0 * control.p0.y + b1 * control.p1.y + b2 * control.p2.y + b3 * control.p3.y + b4 * control.p4.y
-    };
-  }
-
-  function sampleQuarticBezier(control, sampleCount) {
-    const count = Math.max(2, Number(sampleCount) || 60);
-    const pts = [];
-    for (let i = 0; i < count; i++) {
-      const t = count === 1 ? 0 : (i / (count - 1));
-      pts.push({ ...evalQuarticBezier(control, t), t });
-    }
-    return pts;
-  }
-
-  function evalQuarticDerivatives(control, t) {
-    const omt = 1 - t;
-    const d10 = { x: control.p1.x - control.p0.x, y: control.p1.y - control.p0.y };
-    const d21 = { x: control.p2.x - control.p1.x, y: control.p2.y - control.p1.y };
-    const d32 = { x: control.p3.x - control.p2.x, y: control.p3.y - control.p2.y };
-    const d43 = { x: control.p4.x - control.p3.x, y: control.p4.y - control.p3.y };
-    const dd20 = { x: control.p2.x - 2 * control.p1.x + control.p0.x, y: control.p2.y - 2 * control.p1.y + control.p0.y };
-    const dd31 = { x: control.p3.x - 2 * control.p2.x + control.p1.x, y: control.p3.y - 2 * control.p2.y + control.p1.y };
-    const dd42 = { x: control.p4.x - 2 * control.p3.x + control.p2.x, y: control.p4.y - 2 * control.p3.y + control.p2.y };
-
-    const first = {
-      x: 4 * (
-        omt * omt * omt * d10.x
-        + 3 * omt * omt * t * d21.x
-        + 3 * omt * t * t * d32.x
-        + t * t * t * d43.x
-      ),
-      y: 4 * (
-        omt * omt * omt * d10.y
-        + 3 * omt * omt * t * d21.y
-        + 3 * omt * t * t * d32.y
-        + t * t * t * d43.y
-      )
-    };
-    const second = {
-      x: 12 * (
-        omt * omt * dd20.x
-        + 2 * omt * t * dd31.x
-        + t * t * dd42.x
-      ),
-      y: 12 * (
-        omt * omt * dd20.y
-        + 2 * omt * t * dd31.y
-        + t * t * dd42.y
-      )
-    };
-
-    return { first, second };
-  }
-
-  function computeCurvatureAtT(control, t) {
-    const d = evalQuarticDerivatives(control, t);
-    const speedSq = d.first.x * d.first.x + d.first.y * d.first.y;
-    if (!(speedSq > 1e-12)) return null;
-    const cross = Math.abs(d.first.x * d.second.y - d.first.y * d.second.x);
-    const curvature = cross / Math.pow(speedSq, 1.5);
-    return Number.isFinite(curvature) ? curvature : null;
-  }
-
-  function computeRadiusAtT(control, t) {
-    const curvature = computeCurvatureAtT(control, t);
-    if (!(Number.isFinite(curvature) && curvature > 1e-9)) return null;
-    const radius = 1 / curvature;
-    return Number.isFinite(radius) ? radius : null;
-  }
-
-  function analyzeRadiusUnimodality(control, preferredMinT, sampleCount = 81) {
-    if (!control) return { penalty: 0, minimaCount: 0, targetT: null, monotonicViolationMax: 0, monotonicViolationRms: 0 };
-    const n = Math.max(21, Number(sampleCount) || 81);
-    const ts = [];
-    const rs = [];
-    for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);
-      const r = computeRadiusAtT(control, t);
-      if (!Number.isFinite(r)) continue;
-      ts.push(t);
-      rs.push(r);
-    }
-    if (rs.length < 7) return { penalty: 0, minimaCount: 0, targetT: null, monotonicViolationMax: 0, monotonicViolationRms: 0 };
-
-    const targetTClamped = Number.isFinite(preferredMinT) ? Math.max(0, Math.min(1, preferredMinT)) : 0.5;
-    let targetIdx = 0;
-    let bestDt = Infinity;
-    for (let i = 0; i < ts.length; i++) {
-      const dt = Math.abs(ts[i] - targetTClamped);
-      if (dt < bestDt) {
-        bestDt = dt;
-        targetIdx = i;
-      }
-    }
-
-    const rMin = Math.min(...rs);
-    const rMax = Math.max(...rs);
-    const range = Math.max(1, rMax - rMin);
-    const slopeSlack = 0.01 * range;
-    const distinctDelta = Math.max(0.03 * range, 0.25);
-
-    let monotonicPenalty = 0;
-    let monotonicViolationMax = 0;
-    let monotonicViolationSq = 0;
-    let monotonicViolationCount = 0;
-    for (let i = 0; i < targetIdx; i++) {
-      const diff = rs[i + 1] - rs[i];
-      if (diff > slopeSlack) {
-        const e = (diff - slopeSlack) / range;
-        monotonicPenalty += e * e;
-        monotonicViolationMax = Math.max(monotonicViolationMax, e);
-        monotonicViolationSq += e * e;
-        monotonicViolationCount += 1;
-      }
-    }
-    for (let i = targetIdx; i < rs.length - 1; i++) {
-      const diff = rs[i + 1] - rs[i];
-      if (diff < -slopeSlack) {
-        const e = (-diff - slopeSlack) / range;
-        monotonicPenalty += e * e;
-        monotonicViolationMax = Math.max(monotonicViolationMax, e);
-        monotonicViolationSq += e * e;
-        monotonicViolationCount += 1;
-      }
-    }
-
-    let minimaCount = 0;
-    const minimaIndices = [];
-    for (let i = 1; i < rs.length - 1; i++) {
-      if (rs[i] <= rs[i - 1] - slopeSlack && rs[i] <= rs[i + 1] - slopeSlack) {
-        minimaCount += 1;
-        minimaIndices.push(i);
-      }
-    }
-
-    let multiplicityPenalty = 0;
-    if (minimaCount > 1) {
-      multiplicityPenalty += (minimaCount - 1) * (minimaCount - 1);
-    }
-
-    const minAtTarget = rs[targetIdx];
-    let distinctPenalty = 0;
-    if (targetIdx > 0) {
-      const leftGap = rs[targetIdx - 1] - minAtTarget;
-      if (leftGap < distinctDelta) {
-        const e = (distinctDelta - leftGap) / range;
-        distinctPenalty += e * e;
-      }
-    }
-    if (targetIdx < rs.length - 1) {
-      const rightGap = rs[targetIdx + 1] - minAtTarget;
-      if (rightGap < distinctDelta) {
-        const e = (distinctDelta - rightGap) / range;
-        distinctPenalty += e * e;
-      }
-    }
-
-    let targetMinPenalty = 0;
-    if (minimaIndices.length > 0) {
-      const nearestMin = minimaIndices.reduce((best, idx) => {
-        const d = Math.abs(ts[idx] - ts[targetIdx]);
-        return (!best || d < best.d) ? { idx, d } : best;
-      }, null);
-      if (nearestMin) {
-        const e = nearestMin.d / 0.25;
-        targetMinPenalty = e * e;
-      }
-    } else {
-      // If no detected strict local minimum, encourage target to be a stronger basin.
-      targetMinPenalty = 1;
-    }
-
-    const monotonicViolationRms = monotonicViolationCount > 0
-      ? Math.sqrt(monotonicViolationSq / monotonicViolationCount)
-      : 0;
-
-    return {
-      penalty: monotonicPenalty + 2 * multiplicityPenalty + distinctPenalty + targetMinPenalty,
-      minimaCount,
-      targetT: ts[targetIdx],
-      monotonicViolationMax,
-      monotonicViolationRms
-    };
-  }
-
-  function computeLeastCurvaturePoint(control, sampleCount = 161) {
-    if (!control || !control.p0 || !control.p1 || !control.p2 || !control.p3 || !control.p4) return null;
-
-    let best = null;
-    const steps = Math.max(5, Number(sampleCount) || 161);
-    for (let i = 0; i < steps; i++) {
-      const t = i / (steps - 1);
-      const curvature = computeCurvatureAtT(control, t);
-      if (!Number.isFinite(curvature)) continue;
-
-      // For racing-line fitting we target the min-radius point, which is max curvature.
-      if (!best || curvature > best.curvature) {
-        const pt = evalQuarticBezier(control, t);
-        best = { x: pt.x, y: pt.y, t, curvature };
-      }
-    }
-
-    return best;
-  }
-
-  function optimizeQuarticP2(controlSeed, optimizationContext) {
-    if (!controlSeed || !optimizationContext) return controlSeed;
-    const {
-      points,
-      pointTs,
-      speedAnchor,
-      speedTargetT,
-      radiusSamples,
-      fitWeights,
-      fitOptions,
-      chordLen
-    } = optimizationContext;
-
-    const weights = fitWeights || RACING_LINE_DEFAULT_WEIGHTS;
-    const wPos = normalizeFitWeight(weights.position, RACING_LINE_DEFAULT_WEIGHTS.position);
-    const wSpeed = normalizeFitWeight(weights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor);
-    const wRadius = normalizeFitWeight(weights.radiusFit, RACING_LINE_DEFAULT_WEIGHTS.radiusFit);
-    const enforceMonotonicRadius = !!(fitOptions && fitOptions.enforceMonotonicRadius);
-    const normLenSq = Math.max(1e-6, chordLen * chordLen);
-
-    const anchorRadiusSamples = (() => {
-      if (!Array.isArray(radiusSamples) || radiusSamples.length === 0) return [];
-      const byClosest = (targetT) => radiusSamples.reduce((best, s) => {
-        const d = Math.abs(Number(s.t) - targetT);
-        return (!best || d < best.d) ? { d, s } : best;
-      }, null);
-      const startPick = byClosest(0);
-      const endPick = byClosest(1);
-      const minPick = Number.isFinite(speedTargetT) ? byClosest(Math.max(0, Math.min(1, speedTargetT))) : null;
-      const uniq = new Map();
-      [startPick, minPick, endPick].forEach((pick) => {
-        if (!pick || !pick.s) return;
-        const key = `${Number(pick.s.t).toFixed(5)}|${Number(pick.s.radius).toFixed(5)}`;
-        if (!uniq.has(key)) uniq.set(key, pick.s);
-      });
-      return Array.from(uniq.values());
-    })();
-
-    const evaluateCost = (control) => {
-      let posCost = 0;
-      let posCount = 0;
-      if (Array.isArray(points) && Array.isArray(pointTs)) {
-        const n = Math.min(points.length, pointTs.length);
-        for (let i = 0; i < n; i++) {
-          const t = pointTs[i];
-          if (!Number.isFinite(t)) continue;
-          const p = evalQuarticBezier(control, t);
-          const dx = p.x - points[i].x;
-          const dy = p.y - points[i].y;
-          posCost += (dx * dx + dy * dy) / normLenSq;
-          posCount += 1;
-        }
-      }
-      if (posCount > 0) posCost /= posCount;
-
-      const least = computeLeastCurvaturePoint(control, 241);
-      let speedAlignCost = 0;
-      let speedPointCost = 0;
-      if (Number.isFinite(speedTargetT) && least && Number.isFinite(least.t)) {
-        const dt = least.t - speedTargetT;
-        speedAlignCost = dt * dt;
-      }
-      if (speedAnchor && Number.isFinite(speedTargetT)) {
-        const anchorFit = evalQuarticBezier(control, speedTargetT);
-        const dx = anchorFit.x - speedAnchor.x;
-        const dy = anchorFit.y - speedAnchor.y;
-        speedPointCost = (dx * dx + dy * dy) / normLenSq;
-      }
-
-      let radiusCost = 0;
-      let radiusCount = 0;
-      if (anchorRadiusSamples.length > 0) {
-        anchorRadiusSamples.forEach((sample) => {
-          const radiusCurve = computeRadiusAtT(control, sample.t);
-          if (!Number.isFinite(radiusCurve) || !Number.isFinite(sample.radius) || sample.radius <= 0) return;
-          const denom = Math.max(5, Math.abs(sample.radius));
-          const err = (radiusCurve - sample.radius) / denom;
-          radiusCost += err * err;
-          radiusCount += 1;
-        });
-      }
-      if (radiusCount > 0) radiusCost /= radiusCount;
-
-      let singleMinCost = 0;
-      if (enforceMonotonicRadius) {
-        const unimodal = analyzeRadiusUnimodality(control, Number.isFinite(speedTargetT) ? speedTargetT : null, 161);
-        singleMinCost = Number.isFinite(unimodal.penalty) ? unimodal.penalty : 0;
-        if (Number.isFinite(unimodal.minimaCount) && unimodal.minimaCount > 1) {
-          return Number.POSITIVE_INFINITY;
-        }
-        if (Number.isFinite(unimodal.monotonicViolationMax) && unimodal.monotonicViolationMax > 0.02) {
-          return Number.POSITIVE_INFINITY;
-        }
-      }
-
-      return (wPos * posCost)
-        + (wSpeed * (8 * speedAlignCost + speedPointCost))
-        + (wRadius * (radiusCost + 2.2 * singleMinCost));
-    };
-
-    const control = {
-      ...controlSeed,
-      p2: { x: controlSeed.p2.x, y: controlSeed.p2.y }
-    };
-    let bestCost = evaluateCost(control);
-    let step = Math.max(0.2, chordLen * 0.12);
-
-    for (let iter = 0; iter < 28; iter++) {
-      let improved = false;
-      const candidates = [
-        { x: control.p2.x + step, y: control.p2.y },
-        { x: control.p2.x - step, y: control.p2.y },
-        { x: control.p2.x, y: control.p2.y + step },
-        { x: control.p2.x, y: control.p2.y - step },
-        { x: control.p2.x + step * 0.7, y: control.p2.y + step * 0.7 },
-        { x: control.p2.x - step * 0.7, y: control.p2.y - step * 0.7 },
-        { x: control.p2.x + step * 0.7, y: control.p2.y - step * 0.7 },
-        { x: control.p2.x - step * 0.7, y: control.p2.y + step * 0.7 }
-      ];
-
-      for (const candidate of candidates) {
-        const candidateControl = {
-          ...control,
-          p2: candidate
-        };
-        const cost = evaluateCost(candidateControl);
-        if (cost + 1e-10 < bestCost) {
-          bestCost = cost;
-          control.p2 = candidate;
-          improved = true;
-        }
-      }
-
-      if (!improved) step *= 0.55;
-      if (step < Math.max(0.01, chordLen * 0.0008)) break;
-    }
-
-    return control;
-  }
-
-  function getCornerNeighborTangentGuide(log, lap, cornerSegments, segmentIndex, points) {
-    if (!Array.isArray(cornerSegments) || cornerSegments.length === 0 || !Array.isArray(points) || points.length < 2) return null;
-
-    const total = cornerSegments.length;
-    const prevIndex = (segmentIndex - 1 + total) % total;
-    const nextIndex = (segmentIndex + 1) % total;
-    const prevSeg = cornerSegments[prevIndex];
-    const nextSeg = cornerSegments[nextIndex];
-
-    const start = points[0];
-    const end = points[points.length - 1];
-
-    let startDir = null;
-    let endDir = null;
-    let startNeighborDist = null;
-    let endNeighborDist = null;
-
-    if (prevSeg && prevIndex !== segmentIndex) {
-      const prevPts = collectCornerMapPoints(log, lap, prevSeg);
-      if (prevPts.length > 0) {
-        const prevEnd = prevPts[prevPts.length - 1];
-        const d = normalizeVec(start.x - prevEnd.x, start.y - prevEnd.y);
-        if (d) {
-          startDir = d;
-          startNeighborDist = Math.hypot(start.x - prevEnd.x, start.y - prevEnd.y);
-        }
-      }
-    }
-
-    if (nextSeg && nextIndex !== segmentIndex) {
-      const nextPts = collectCornerMapPoints(log, lap, nextSeg);
-      if (nextPts.length > 0) {
-        const nextStart = nextPts[0];
-        const d = normalizeVec(nextStart.x - end.x, nextStart.y - end.y);
-        if (d) {
-          endDir = d;
-          endNeighborDist = Math.hypot(nextStart.x - end.x, nextStart.y - end.y);
-        }
-      }
-    }
-
-    return {
-      startDir,
-      endDir,
-      startNeighborDist,
-      endNeighborDist
-    };
-  }
-
-  function buildCornerBezierFit(log, lap, segment, cornerSegments, segmentIndex, fitWeights) {
-      const fitOptionsResolved = getRacingLineFitOptions();
-    const pointsByRowIndex = new Map();
-    const points = collectCornerMapPoints(log, lap, segment);
-    if (points.length < 4) return null;
-
-    if (log && log.meta && Array.isArray(log.meta.lapNum) && Array.isArray(log.meta.lapRelDist)) {
-      const mapSource = getMapSourceForLog(log);
-      if (mapSource) {
-        for (let i = 0; i < log.meta.lapNum.length; i++) {
-          if (log.meta.lapNum[i] !== lap) continue;
-          const dist = Number(log.meta.lapRelDist[i]);
-          if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
-          const x = Number(mapSource.xAt(i));
-          const y = Number(mapSource.yAt(i));
-          if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-          pointsByRowIndex.set(i, { x, y, dist });
-        }
-      }
-    }
-
-    const tangentGuide = getCornerNeighborTangentGuide(log, lap, cornerSegments, segmentIndex, points);
-    const speedAnchor = getCornerMinSpeedAnchor(log, lap, segment, pointsByRowIndex);
-    const fitWeightsResolved = {
-      speedAnchor: normalizeFitWeight(fitWeights && fitWeights.speedAnchor, RACING_LINE_DEFAULT_WEIGHTS.speedAnchor),
-      position: normalizeFitWeight(fitWeights && fitWeights.position, RACING_LINE_DEFAULT_WEIGHTS.position),
-      tangentStart: normalizeFitWeight(fitWeights && fitWeights.tangentStart, RACING_LINE_DEFAULT_WEIGHTS.tangentStart),
-      tangentEnd: normalizeFitWeight(fitWeights && fitWeights.tangentEnd, RACING_LINE_DEFAULT_WEIGHTS.tangentEnd),
-      radiusFit: normalizeFitWeight(fitWeights && fitWeights.radiusFit, RACING_LINE_DEFAULT_WEIGHTS.radiusFit)
-    };
-
-    const chord = [0];
-    let total = 0;
-    for (let i = 1; i < points.length; i++) {
-      total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
-      chord.push(total);
-    }
-    const denomDist = total > 1e-9 ? total : (points.length - 1);
-    const pointTs = points.map((_, i) => (total > 1e-9 ? (chord[i] / denomDist) : (i / denomDist)));
-    const tByRowIndex = new Map();
-    points.forEach((point, i) => {
-      if (Number.isFinite(point.rowIndex)) tByRowIndex.set(point.rowIndex, pointTs[i]);
-    });
-
-    const speedTargetT = (speedAnchor && Number.isFinite(speedAnchor.rowIndex) && tByRowIndex.has(speedAnchor.rowIndex))
-      ? Number(tByRowIndex.get(speedAnchor.rowIndex))
-      : null;
-    const radiusSamples = buildCornerRadiusSamples(log, lap, segment, tByRowIndex);
-
-    let control = fitQuarticBezierWithEndpointTangents(points, tangentGuide, speedAnchor, fitWeightsResolved, speedTargetT);
-    if (!control) return null;
-
-    control = optimizeQuarticP2(control, {
-      points,
-      pointTs,
-      speedAnchor,
-      speedTargetT,
-      radiusSamples,
-      fitWeights: fitWeightsResolved,
-      fitOptions: fitOptionsResolved,
-      chordLen: Math.max(1, Math.hypot(control.p4.x - control.p0.x, control.p4.y - control.p0.y))
-    });
-
-    const sampled = sampleQuarticBezier(control, Math.max(60, Math.min(280, points.length * 4)));
-    const leastCurvature = computeLeastCurvaturePoint(control, 181);
-
-    let radiusFitRmse = null;
-    if (radiusSamples.length > 0) {
-      let sumSq = 0;
-      let count = 0;
-      radiusSamples.forEach((sample) => {
-        const rCurve = computeRadiusAtT(control, sample.t);
-        if (!Number.isFinite(rCurve) || !Number.isFinite(sample.radius)) return;
-        const diff = rCurve - sample.radius;
-        sumSq += diff * diff;
-        count += 1;
-      });
-      if (count > 0) radiusFitRmse = Math.sqrt(sumSq / count);
-    }
-
-    const speedCurvatureTError = (leastCurvature && Number.isFinite(leastCurvature.t) && Number.isFinite(speedTargetT))
-      ? Math.abs(leastCurvature.t - speedTargetT)
-      : null;
-    const radiusUnimodal = analyzeRadiusUnimodality(control, Number.isFinite(speedTargetT) ? speedTargetT : null, 241);
-
-    const tangentStartDir = normalizeVec(control.p1.x - control.p0.x, control.p1.y - control.p0.y);
-    const tangentEndDir = normalizeVec(control.p4.x - control.p3.x, control.p4.y - control.p3.y);
-    const tangentRayScale = 1.8;
-    const tangentLines = {
-      start: tangentStartDir
-        ? {
-          from: { x: control.p0.x, y: control.p0.y },
-          to: {
-            x: control.p0.x - tangentStartDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0),
-            y: control.p0.y - tangentStartDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.start) ? control.tangentLengths.start * tangentRayScale : 0)
-          }
-        }
-        : null,
-      end: tangentEndDir
-        ? {
-          from: { x: control.p4.x, y: control.p4.y },
-          to: {
-            x: control.p4.x + tangentEndDir.x * (control.tangentLengths && Number.isFinite(control.tangentLengths.end) ? control.tangentLengths.end * tangentRayScale : 0),
-            y: control.p4.y + tangentEndDir.y * (control.tangentLengths && Number.isFinite(control.tangentLengths.end) ? control.tangentLengths.end * tangentRayScale : 0)
-          }
-        }
-        : null
-    };
-
-    return {
-      segment,
-      pointCount: points.length,
-      control,
-      sampled,
-      leastCurvature,
-      speedTargetT,
-      speedCurvatureTError,
-      speedAnchor,
-      fitWeights: fitWeightsResolved,
-      fitOptions: fitOptionsResolved,
-      radiusSamples,
-      radiusFitRmse,
-      radiusMinimaCount: Number.isFinite(radiusUnimodal.minimaCount) ? radiusUnimodal.minimaCount : null,
-      radiusMonotonicViolationMax: Number.isFinite(radiusUnimodal.monotonicViolationMax) ? radiusUnimodal.monotonicViolationMax : null,
-      radiusMonotonicViolationRms: Number.isFinite(radiusUnimodal.monotonicViolationRms) ? radiusUnimodal.monotonicViolationRms : null,
-      tangentLines,
-      startPoint: { x: control.p0.x, y: control.p0.y },
-      endPoint: { x: control.p4.x, y: control.p4.y }
-    };
-  }
-
-  function getReferenceLogFromRacingState() {
-    if (!racingLineState.referenceLogId) return null;
-    return logs.find(l => l.id === racingLineState.referenceLogId) || null;
-  }
-
-  function computeCurrentRacingLinePreview() {
-    const segment = getCurrentRacingLineSegment();
-    const log = getReferenceLogFromRacingState();
-    const lap = racingLineState.referenceLap;
-    if (!segment || !log || !Number.isFinite(Number(lap))) return null;
-    const weights = getRacingLineFitWeights();
-    return buildCornerBezierFit(
-      log,
-      lap,
-      segment,
-      racingLineState.cornerSegments,
-      racingLineState.currentIndex,
-      weights
-    );
-  }
-
-  function getAcceptedRacingLineFits() {
-    const fits = [];
-    if (!Array.isArray(racingLineState.cornerSegments)) return fits;
-    racingLineState.cornerSegments.forEach((segment) => {
-      const key = getRacingLineSegmentKey(segment);
-      const decision = racingLineState.decisions.get(key);
-      if (!decision || decision.status !== 'accepted' || !decision.fit) return;
-      fits.push(decision.fit);
-    });
-    return fits;
-  }
-
-  function racingLineProgressSummary() {
-    const total = Array.isArray(racingLineState.cornerSegments) ? racingLineState.cornerSegments.length : 0;
-    let accepted = 0;
-    let rejected = 0;
-    racingLineState.decisions.forEach((decision) => {
-      if (!decision || !decision.status) return;
-      if (decision.status === 'accepted') accepted += 1;
-      else if (decision.status === 'rejected') rejected += 1;
-    });
-    const pending = Math.max(0, total - accepted - rejected);
-    return { total, accepted, rejected, pending };
-  }
-
-  function updateRacingLineWizardUI() {
-    if (!racingLineWizard || !racingLineStatus || !fitRacingLineBtn) return;
-
-    if (!racingLineState.active && !racingLineState.complete) {
-      racingLineWizard.hidden = true;
-      fitRacingLineBtn.textContent = 'Fit Racing Line';
-      return;
-    }
-
-    racingLineWizard.hidden = false;
-    const progress = racingLineProgressSummary();
-    const current = getCurrentRacingLineSegment();
-
-    if (racingLineState.active && current) {
-      const cornerLabel = current.number ? `Corner ${current.number}` : `Corner ${racingLineState.currentIndex + 1}`;
-      if (racingLineState.preview && Number.isFinite(racingLineState.preview.pointCount)) {
-        const speedAnchorText = racingLineState.preview.speedAnchor && Number.isFinite(racingLineState.preview.speedAnchor.speed)
-          ? ` Min-speed ${racingLineState.preview.speedAnchor.speed.toFixed(2)}.`
-          : '';
-        const speedMatchText = Number.isFinite(racingLineState.preview.speedCurvatureTError)
-          ? ` Speed-curvature dT=${racingLineState.preview.speedCurvatureTError.toFixed(3)}.`
-          : '';
-        const radiusFitText = Number.isFinite(racingLineState.preview.radiusFitRmse)
-          ? ` Radius RMSE ${racingLineState.preview.radiusFitRmse.toFixed(2)} m.`
-          : '';
-        const minCountText = Number.isFinite(racingLineState.preview.radiusMinimaCount)
-          ? ` Radius minima ${racingLineState.preview.radiusMinimaCount}.`
-          : '';
-        const monotonicText = Number.isFinite(racingLineState.preview.radiusMonotonicViolationMax)
-          ? ` Mono-viol ${racingLineState.preview.radiusMonotonicViolationMax.toFixed(3)}.`
-          : '';
-        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) | ${racingLineState.preview.pointCount} source points.${speedAnchorText}${speedMatchText}${radiusFitText}${minCountText}${monotonicText} Accept or reject to continue.`;
-      } else {
-        racingLineStatus.textContent = `${cornerLabel} (${racingLineState.currentIndex + 1}/${progress.total}) has too few valid Map X/Y points for a stable fit. Reject to continue.`;
-      }
-      fitRacingLineBtn.textContent = 'Restart Racing Line Fit';
-    } else {
-      racingLineStatus.textContent = `Racing line review complete. Accepted ${progress.accepted}, rejected ${progress.rejected}. Download JSON to export.`;
-      fitRacingLineBtn.textContent = 'Restart Racing Line Fit';
-    }
-
-    if (racingLineAcceptBtn) racingLineAcceptBtn.disabled = !(racingLineState.active && !!racingLineState.preview);
-    if (racingLineRejectBtn) racingLineRejectBtn.disabled = !racingLineState.active;
-    if (racingLinePrevBtn) racingLinePrevBtn.disabled = !racingLineState.active || racingLineState.currentIndex <= 0;
-    if (racingLineDownloadBtn) {
-      const hasReviewData = progress.accepted + progress.rejected > 0;
-      racingLineDownloadBtn.disabled = !hasReviewData;
-    }
+    if (xArr.length === 0) return null;
+    return { x: xArr, y: yArr };
   }
 
   function getRacingLineGeoContext(selFiles) {
@@ -3129,354 +2289,345 @@
     return [ll.lat, ll.lon];
   }
 
-  function clearRacingLineOverlay() {
-    if (!leafletMap || !Array.isArray(racingLineLeafletLayers)) return;
-    racingLineLeafletLayers.forEach((layer) => {
+  function clearWholeCircuitOverlay() {
+    if (!leafletMap || !Array.isArray(wholeCircuitLeafletLayers)) return;
+    wholeCircuitLeafletLayers.forEach((layer) => {
       if (leafletMap.hasLayer(layer)) leafletMap.removeLayer(layer);
     });
-    racingLineLeafletLayers = [];
+    wholeCircuitLeafletLayers = [];
   }
 
-  function renderRacingLineOverlay(mode = leafletMapMode) {
-    clearRacingLineOverlay();
+  // Shows the in-progress whole-circuit fit preview: the fitted curve plus every
+  // control point (dimmed), with the control points near the corner currently being
+  // inspected highlighted -- lets the user step corner-by-corner and see exactly which
+  // control points are shaping that corner before accepting the fit.
+  function renderWholeCircuitOverlay(mode = leafletMapMode) {
+    clearWholeCircuitOverlay();
     if (!leafletMap || !mode || (mode !== 'geo' && mode !== 'xy')) return;
+    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
 
-    const hasActiveWorkflow = racingLineState.active || racingLineState.complete;
-    if (!hasActiveWorkflow) return;
-
+    const { fit, cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
     const selFiles = getSelectedFiles();
     const geoCtx = getRacingLineGeoContext(selFiles);
-    const acceptedFits = getAcceptedRacingLineFits();
 
-    acceptedFits.forEach((fit) => {
-      const latlngs = fit.sampled
-        .map(pt => racingLinePointToLeafletLatLng(pt, mode, geoCtx))
-        .filter(pt => Array.isArray(pt));
-      if (latlngs.length < 2) return;
-      const line = L.polyline(latlngs, {
-        color: RACING_LINE_ACCEPTED_COLOR,
-        weight: 3,
-        opacity: 0.8
-      }).addTo(leafletMap);
-      racingLineLeafletLayers.push(line);
-
-      if (fit.tangentLines && fit.tangentLines.start) {
-        const s0 = racingLinePointToLeafletLatLng(fit.tangentLines.start.from, mode, geoCtx);
-        const s1 = racingLinePointToLeafletLatLng(fit.tangentLines.start.to, mode, geoCtx);
-        if (Array.isArray(s0) && Array.isArray(s1)) {
-          const sLine = L.polyline([s0, s1], {
-            color: '#6f87b6',
-            weight: 2,
-            opacity: 0.75,
-            dashArray: '6 5'
-          }).addTo(leafletMap);
-          racingLineLeafletLayers.push(sLine);
-        }
-      }
-      if (fit.tangentLines && fit.tangentLines.end) {
-        const e0 = racingLinePointToLeafletLatLng(fit.tangentLines.end.from, mode, geoCtx);
-        const e1 = racingLinePointToLeafletLatLng(fit.tangentLines.end.to, mode, geoCtx);
-        if (Array.isArray(e0) && Array.isArray(e1)) {
-          const eLine = L.polyline([e0, e1], {
-            color: '#6f87b6',
-            weight: 2,
-            opacity: 0.75,
-            dashArray: '6 5'
-          }).addTo(leafletMap);
-          racingLineLeafletLayers.push(eLine);
-        }
-      }
-    });
-
-    if (!racingLineState.preview) return;
-    const previewLatLng = racingLineState.preview.sampled
+    const curveLatLng = fit.sampled
       .map(pt => racingLinePointToLeafletLatLng(pt, mode, geoCtx))
       .filter(pt => Array.isArray(pt));
-    if (previewLatLng.length >= 2) {
-      const previewLine = L.polyline(previewLatLng, {
-        color: RACING_LINE_CURVE_COLOR,
-        weight: 4,
-        opacity: 0.95
+    if (curveLatLng.length >= 2) {
+      const line = L.polyline(curveLatLng, {
+        color: getRacingLineDisplayColor(),
+        weight: 3,
+        opacity: 0.9
       }).addTo(leafletMap);
-      racingLineLeafletLayers.push(previewLine);
+      wholeCircuitLeafletLayers.push(line);
     }
 
-    if (racingLineState.preview.tangentLines && racingLineState.preview.tangentLines.start) {
-      const s0 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.start.from, mode, geoCtx);
-      const s1 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.start.to, mode, geoCtx);
-      if (Array.isArray(s0) && Array.isArray(s1)) {
-        const sLine = L.polyline([s0, s1], {
-          color: '#2e4d89',
-          weight: 3,
-          opacity: 0.9,
-          dashArray: '8 5'
-        }).addTo(leafletMap);
-        racingLineLeafletLayers.push(sLine);
-      }
-    }
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || !Array.isArray(fit.entries) || typeof calc.periodicEntryDistances !== 'function') return;
+    const entryDistances = calc.periodicEntryDistances(fit.entries);
+    const currentSegment = (Array.isArray(cornerSegments) && currentCornerIndex >= 0)
+      ? cornerSegments[currentCornerIndex]
+      : null;
+    const highlightPadM = 20;
 
-    if (racingLineState.preview.tangentLines && racingLineState.preview.tangentLines.end) {
-      const e0 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.end.from, mode, geoCtx);
-      const e1 = racingLinePointToLeafletLatLng(racingLineState.preview.tangentLines.end.to, mode, geoCtx);
-      if (Array.isArray(e0) && Array.isArray(e1)) {
-        const eLine = L.polyline([e0, e1], {
-          color: '#2e4d89',
-          weight: 3,
-          opacity: 0.9,
-          dashArray: '8 5'
-        }).addTo(leafletMap);
-        racingLineLeafletLayers.push(eLine);
-      }
-    }
-
-    if (racingLineState.preview.leastCurvature) {
-      const markerLatLng = racingLinePointToLeafletLatLng(racingLineState.preview.leastCurvature, mode, geoCtx);
-      if (Array.isArray(markerLatLng)) {
-        const marker = L.circleMarker(markerLatLng, {
-          radius: 7,
-          color: '#163f92',
-          weight: 2,
-          fillColor: '#d9e6ff',
-          fillOpacity: 0.95
-        }).bindTooltip('Min radius point', { permanent: false, direction: 'top' }).addTo(leafletMap);
-        racingLineLeafletLayers.push(marker);
-      }
-    }
-
-    if (racingLineState.preview.speedAnchor) {
-      const speedAnchorLatLng = racingLinePointToLeafletLatLng(racingLineState.preview.speedAnchor, mode, geoCtx);
-      if (Array.isArray(speedAnchorLatLng)) {
-        const speedMarker = L.circleMarker(speedAnchorLatLng, {
-          radius: 6,
-          color: '#8b4a00',
-          weight: 2,
-          fillColor: '#ffd9a8',
-          fillOpacity: 0.95
-        }).bindTooltip('Min speed anchor', { permanent: false, direction: 'top' }).addTo(leafletMap);
-        racingLineLeafletLayers.push(speedMarker);
-      }
-    }
+    fit.entries.forEach((entry, i) => {
+      const approxDist = entryDistances[i];
+      const latlng = racingLinePointToLeafletLatLng(entry.point, mode, geoCtx);
+      if (!Array.isArray(latlng)) return;
+      const isCurrent = !!(currentSegment
+        && approxDist >= (Number(currentSegment.startDist) - highlightPadM)
+        && approxDist <= (Number(currentSegment.endDist) + highlightPadM));
+      const marker = L.circleMarker(latlng, {
+        radius: isCurrent ? 7 : 3,
+        color: isCurrent ? '#c0392b' : '#8892a6',
+        weight: isCurrent ? 2 : 1,
+        fillColor: isCurrent ? '#ffb3a8' : '#c7cedb',
+        fillOpacity: isCurrent ? 0.95 : 0.6
+      }).bindTooltip(`Control point ${i} — click to remove`, { permanent: false, direction: 'top' }).addTo(leafletMap);
+      marker.on('click', () => removeWholeCircuitControlPoint(i));
+      wholeCircuitLeafletLayers.push(marker);
+    });
   }
 
-  function startRacingLineFitWorkflow() {
+
+  // Builds a synthetic single-lap "log" from a whole-circuit fit so it can flow through
+  // all the existing files-list / laps-list / map / Y-channel machinery unchanged. The
+  // racing line's own Curvature/Radius are sampled directly (analytically) from the
+  // fitted spline -- not smoothed -- per the "don't smooth the race line's curvature
+  // when plotting" requirement; only the *fitting* step used smoothed curvature.
+  function buildRacingLineSyntheticLog(preview) {
+    const calc = getRacingLineCalculationsApi();
+    const { fit, referenceLog, referenceLap } = preview;
+    const sampled = fit.sampled;
+    const n = sampled.length;
+    const data = new Array(n);
+    const lapNum = new Array(n).fill(1);
+    const lapTime = new Array(n);
+    const lapRelDist = new Array(n);
+
+    for (let i = 0; i < n; i++) {
+      const pt = sampled[i];
+      const radius = calc.computePeriodicBSplineRadiusAtT(fit.control, pt.dist);
+      const curvature = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : 0;
+      data[i] = {
+        PosX: pt.x,
+        PosY: pt.y,
+        Curvature: curvature,
+        Radius: Number.isFinite(radius) ? radius : null,
+        'Lap Time': null,
+        'Lap Number': 1
+      };
+      lapTime[i] = null;
+      lapRelDist[i] = pt.dist;
+    }
+
+    const venueSource = referenceLog ? (getLogVenue(referenceLog) || referenceLog.name) : 'Track';
+    const stamp = Date.now();
+    return {
+      id: `racing-line-${stamp}`,
+      name: `Racing Line — ${venueSource}`,
+      data,
+      cols: ['PosX', 'PosY', 'Curvature', 'Radius', 'Lap Time', 'Lap Number'],
+      meta: {
+        lapNum,
+        lapTime,
+        lapRelDist,
+        units: { Curvature: '1/m', Radius: 'm', 'Lap Time': 's', 'Lap Number': '' },
+        format: '',
+        synthetic: true,
+        racingLine: true,
+        sourceLogId: referenceLog ? referenceLog.id : null,
+        sourceLap: referenceLap
+      },
+      rawRows: null
+    };
+  }
+
+  function startWholeCircuitFit() {
     const selFiles = getSelectedFiles();
     const selectedLaps = getSelectedLaps();
-    const cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
-    if (!cornerRef) {
-      if (racingLineStatus) racingLineStatus.textContent = 'Unable to start fit: select at least one lap with corner data.';
-      if (racingLineWizard) racingLineWizard.hidden = false;
+    const ref = getReferenceLapForCorners(selFiles, selectedLaps);
+    if (!ref) {
+      wholeCircuitFitPreview = null;
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Unable to start fit: select at least one lap with map data.';
+      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+      return;
+    }
+
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.buildWholeCircuitFit !== 'function') {
+      wholeCircuitFitPreview = null;
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fitting is unavailable (calculations module not loaded).';
+      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+      return;
+    }
+
+    const weights = getRacingLineFitWeights();
+    const fitOptions = {};
+    const fit = calc.buildWholeCircuitFit(
+      ref.log,
+      ref.lap,
+      weights,
+      fitOptions,
+      { resolveChannelForLog, computeWindowedAverage, getMapSourceForLog },
+      { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS }
+    );
+
+    if (!fit) {
+      wholeCircuitFitPreview = null;
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fit failed: not enough logged map/radius data on the selected lap.';
+      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
       return;
     }
 
     const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
-    const cornerData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+    const cornerData = computeCornerSegments(ref.log, ref.lap, swapLeftRight);
     const cornerSegments = (cornerData && Array.isArray(cornerData.segments))
       ? cornerData.segments.filter(seg => seg.type === 'left' || seg.type === 'right')
       : [];
 
-    if (cornerSegments.length === 0) {
-      if (racingLineStatus) racingLineStatus.textContent = 'No corners found to fit on the selected reference lap.';
-      if (racingLineWizard) racingLineWizard.hidden = false;
-      return;
-    }
-
-    racingLineState.active = true;
-    racingLineState.complete = false;
-    racingLineState.referenceLogId = cornerRef.log.id;
-    racingLineState.referenceLap = cornerRef.lap;
-    racingLineState.cornerSegments = cornerSegments;
-    racingLineState.currentIndex = 0;
-    racingLineState.decisions = new Map();
-    racingLineState.preview = computeCurrentRacingLinePreview();
-    const firstSegment = getCurrentRacingLineSegment();
-    if (firstSegment) zoomToCornerHeadingSegment(firstSegment);
-    updateRacingLineWizardUI();
-    renderRacingLineOverlay();
-  }
-
-  function stepRacingLineForward() {
-    if (!racingLineState.active) return;
-    const total = racingLineState.cornerSegments.length;
-    if (racingLineState.currentIndex < total - 1) {
-      racingLineState.currentIndex += 1;
-      racingLineState.preview = computeCurrentRacingLinePreview();
-      const nextSegment = getCurrentRacingLineSegment();
-      if (nextSegment) zoomToCornerHeadingSegment(nextSegment);
-    } else {
-      racingLineState.active = false;
-      racingLineState.complete = true;
-      racingLineState.preview = null;
-    }
-    updateRacingLineWizardUI();
-    renderRacingLineOverlay();
-  }
-
-  function stepRacingLineBackward() {
-    if (!racingLineState.active) return;
-    if (racingLineState.currentIndex <= 0) return;
-    racingLineState.currentIndex -= 1;
-    racingLineState.preview = computeCurrentRacingLinePreview();
-    const currentSegment = getCurrentRacingLineSegment();
-    if (currentSegment) zoomToCornerHeadingSegment(currentSegment);
-    updateRacingLineWizardUI();
-    renderRacingLineOverlay();
-  }
-
-  function acceptCurrentRacingLineFit() {
-    if (!racingLineState.active) return;
-    const segment = getCurrentRacingLineSegment();
-    if (!segment || !racingLineState.preview) return;
-
-    const enforceMonotonic = !!(racingLineState.preview.fitOptions && racingLineState.preview.fitOptions.enforceMonotonicRadius);
-    if (enforceMonotonic && Number.isFinite(racingLineState.preview.radiusMinimaCount) && racingLineState.preview.radiusMinimaCount > 1) {
-      if (racingLineStatus) {
-        racingLineStatus.textContent = `Corner ${segment.number || (racingLineState.currentIndex + 1)} rejected for acceptance: fitted radius has ${racingLineState.preview.radiusMinimaCount} minima. Tune weights and re-fit, or press Reject.`;
-      }
-      return;
-    }
-    if (enforceMonotonic
-      && Number.isFinite(racingLineState.preview.radiusMonotonicViolationMax)
-      && racingLineState.preview.radiusMonotonicViolationMax > 0.02) {
-      if (racingLineStatus) {
-        racingLineStatus.textContent = `Corner ${segment.number || (racingLineState.currentIndex + 1)} rejected for acceptance: monotonic-radius violation ${racingLineState.preview.radiusMonotonicViolationMax.toFixed(3)} is above threshold. Tune weights and re-fit, or press Reject.`;
-      }
-      return;
-    }
-
-    const key = getRacingLineSegmentKey(segment);
-    racingLineState.decisions.set(key, {
-      status: 'accepted',
-      segment,
-      fit: racingLineState.preview
-    });
-    stepRacingLineForward();
-  }
-
-  function rejectCurrentRacingLineFit() {
-    if (!racingLineState.active) return;
-    const segment = getCurrentRacingLineSegment();
-    if (!segment) return;
-
-    const key = getRacingLineSegmentKey(segment);
-    racingLineState.decisions.set(key, {
-      status: 'rejected',
-      segment,
-      fit: null
-    });
-    stepRacingLineForward();
-  }
-
-  function buildRacingLineExportObject() {
-    const log = getReferenceLogFromRacingState();
-    const lap = racingLineState.referenceLap;
-    const decisionList = [];
-    const acceptedFits = [];
-
-    racingLineState.cornerSegments.forEach((segment) => {
-      const key = getRacingLineSegmentKey(segment);
-      const decision = racingLineState.decisions.get(key);
-      const status = decision ? decision.status : 'pending';
-      let fitPayload = null;
-
-      if (decision && decision.status === 'accepted' && decision.fit) {
-        const fit = decision.fit;
-        acceptedFits.push(fit);
-        fitPayload = {
-          bezierOrder: 4,
-          speedSmoothingHalfWindowSec: RACING_LINE_SPEED_SMOOTH_HALF_WINDOW_SEC,
-          fitWeights: fit.fitWeights || getRacingLineFitWeights(),
-          fitOptions: fit.fitOptions || getRacingLineFitOptions(),
-          speedTargetT: Number.isFinite(fit.speedTargetT) ? fit.speedTargetT : null,
-          speedCurvatureTError: Number.isFinite(fit.speedCurvatureTError) ? fit.speedCurvatureTError : null,
-          radiusFitRmse: Number.isFinite(fit.radiusFitRmse) ? fit.radiusFitRmse : null,
-          radiusMinimaCount: Number.isFinite(fit.radiusMinimaCount) ? fit.radiusMinimaCount : null,
-          radiusMonotonicViolationMax: Number.isFinite(fit.radiusMonotonicViolationMax) ? fit.radiusMonotonicViolationMax : null,
-          radiusMonotonicViolationRms: Number.isFinite(fit.radiusMonotonicViolationRms) ? fit.radiusMonotonicViolationRms : null,
-          controlPoints: {
-            p0: { x: fit.control.p0.x, y: fit.control.p0.y },
-            p1: { x: fit.control.p1.x, y: fit.control.p1.y },
-            p2: { x: fit.control.p2.x, y: fit.control.p2.y },
-            p3: { x: fit.control.p3.x, y: fit.control.p3.y },
-            p4: { x: fit.control.p4.x, y: fit.control.p4.y }
-          },
-          tangentLines: fit.tangentLines || null,
-          minSpeedAnchorPoint: fit.speedAnchor
-            ? {
-              x: fit.speedAnchor.x,
-              y: fit.speedAnchor.y,
-              speed: fit.speedAnchor.speed,
-              rowIndex: fit.speedAnchor.rowIndex
-            }
-            : null,
-          radiusSamples: Array.isArray(fit.radiusSamples)
-            ? fit.radiusSamples.map(sample => ({ t: sample.t, radius: sample.radius }))
-            : [],
-          leastCurvaturePoint: fit.leastCurvature
-            ? {
-              x: fit.leastCurvature.x,
-              y: fit.leastCurvature.y,
-              t: fit.leastCurvature.t,
-              curvature: fit.leastCurvature.curvature
-            }
-            : null,
-          sampledPoints: fit.sampled.map(pt => ({ x: pt.x, y: pt.y, t: pt.t }))
-        };
-      }
-
-      decisionList.push({
-        number: segment.number || null,
-        type: segment.type,
-        startDist: segment.startDist,
-        endDist: segment.endDist,
-        status,
-        fit: fitPayload
-      });
-    });
-
-    const straightSegments = [];
-    if (acceptedFits.length >= 2) {
-      for (let i = 0; i < acceptedFits.length; i++) {
-        const curr = acceptedFits[i];
-        const next = acceptedFits[(i + 1) % acceptedFits.length];
-        straightSegments.push({
-          fromCorner: curr.segment.number || null,
-          toCorner: next.segment.number || null,
-          startPoint: { x: curr.endPoint.x, y: curr.endPoint.y },
-          endPoint: { x: next.startPoint.x, y: next.startPoint.y }
-        });
-      }
-    }
-
-    return {
-      generatedAt: new Date().toISOString(),
-      source: {
-        fileId: log ? log.id : null,
-        fileName: log ? log.name : null,
-        lap
-      },
-      fittedCorners: decisionList,
-      straightSegments
+    wholeCircuitFitPreview = {
+      fit,
+      referenceLog: ref.log,
+      referenceLap: ref.lap,
+      cornerSegments,
+      currentCornerIndex: cornerSegments.length > 0 ? 0 : -1
     };
+    updateWholeCircuitStatusText();
+    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = false;
+    // Auto-show the smoothed-curvature comparison so the fit quality is visible right away.
+    if (ySelect) {
+      const smoothedOption = Array.from(ySelect.options).find(o => o.value === CURVATURE_SMOOTHED_CHANNEL);
+      if (smoothedOption && !smoothedOption.selected) {
+        smoothedOption.selected = true;
+        renderSelectedChannelColorControls();
+      }
+    }
+    updatePlot();
+    if (cornerSegments.length > 0) {
+      focusWholeCircuitCorner(0);
+    } else {
+      renderWholeCircuitOverlay();
+    }
   }
 
-  function downloadRacingLineJson() {
-    const payload = buildRacingLineExportObject();
-    const text = JSON.stringify(payload, null, 2);
-    const venue = (log => {
-      const raw = log ? (getLogVenue(log) || 'track') : 'track';
-      return String(raw).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'track';
-    })(getReferenceLogFromRacingState());
-    const stamp = new Date().toISOString().replace(/[:]/g, '-').replace(/\..+$/, '');
-    const fileName = `${venue}-racing-line-${stamp}.json`;
-    const blob = new Blob([text], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = fileName;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Peak curvature within a corner's distance span, both for the fitted curve (sampled
+  // analytically) and for the logged data (using the precomputed smoothed-curvature
+  // channel) -- lets the user see directly whether the fit is under-shooting a tight
+  // corner (fit peak well below the logged peak) without needing to eyeball the plot.
+  function computeWholeCircuitCornerCurvaturePeaks(segment) {
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || !wholeCircuitFitPreview) return null;
+    const { fit, referenceLog, referenceLap } = wholeCircuitFitPreview;
+    if (!referenceLog || !referenceLog.meta || !Array.isArray(referenceLog.meta.lapNum) || !Array.isArray(referenceLog.meta.lapRelDist)) return null;
+
+    let loggedPeak = null;
+    for (let i = 0; i < referenceLog.meta.lapNum.length; i++) {
+      if (referenceLog.meta.lapNum[i] !== referenceLap) continue;
+      const d = Number(referenceLog.meta.lapRelDist[i]);
+      if (!Number.isFinite(d) || d < Number(segment.startDist) || d > Number(segment.endDist)) continue;
+      const v = Number(referenceLog.data[i][CURVATURE_SMOOTHED_CHANNEL]);
+      if (Number.isFinite(v) && (loggedPeak === null || v > loggedPeak)) loggedPeak = v;
+    }
+
+    let fittedPeak = null;
+    const startT = Number(segment.startDist) - fit.baseDist;
+    const endT = Number(segment.endDist) - fit.baseDist;
+    const steps = 24;
+    for (let s = 0; s <= steps; s++) {
+      const t = startT + (endT - startT) * (s / steps);
+      const radius = calc.computePeriodicBSplineRadiusAtT(fit.control, t);
+      if (Number.isFinite(radius) && radius > 0) {
+        const c = 1 / radius;
+        if (fittedPeak === null || c > fittedPeak) fittedPeak = c;
+      }
+    }
+
+    return { loggedPeak, fittedPeak };
+  }
+
+  function updateWholeCircuitStatusText() {
+    if (!racingLineWholeCircuitStatus || !wholeCircuitFitPreview) return;
+    const { fit, cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
+    let cornerText = '';
+    if (Array.isArray(cornerSegments) && cornerSegments.length > 0 && currentCornerIndex >= 0) {
+      const segment = cornerSegments[currentCornerIndex];
+      cornerText = ` Viewing corner ${currentCornerIndex + 1}/${cornerSegments.length}` + (segment.number ? ` (Corner ${segment.number})` : '') + '.';
+      const peaks = computeWholeCircuitCornerCurvaturePeaks(segment);
+      if (peaks && Number.isFinite(peaks.loggedPeak) && Number.isFinite(peaks.fittedPeak)) {
+        const pct = peaks.loggedPeak > 1e-9 ? ((peaks.fittedPeak - peaks.loggedPeak) / peaks.loggedPeak * 100) : 0;
+        const flag = Math.abs(pct) > 15 ? ' — consider adding a control point here.' : '';
+        cornerText += ` Peak curvature: fit ${peaks.fittedPeak.toFixed(4)} vs logged ${peaks.loggedPeak.toFixed(4)} 1/m (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%).${flag}`;
+      }
+    }
+    racingLineWholeCircuitStatus.textContent = `Whole-circuit fit ready: ${fit.control.numControlPoints} control points, `
+      + `${fit.pointCount} source points, ${fit.extremaCount} curvature-guided anchors, `
+      + `position RMSE ${fit.positionRmse.toFixed(2)} m over a ${fit.totalLapDistance.toFixed(0)} m lap.${cornerText} `
+      + `Accept to add it as a lap on the map, or discard and try again.`;
+  }
+
+  function focusWholeCircuitCorner(index) {
+    if (!wholeCircuitFitPreview || !Array.isArray(wholeCircuitFitPreview.cornerSegments)) return;
+    const total = wholeCircuitFitPreview.cornerSegments.length;
+    if (total === 0) return;
+    const clamped = Math.max(0, Math.min(total - 1, index));
+    wholeCircuitFitPreview.currentCornerIndex = clamped;
+    const segment = wholeCircuitFitPreview.cornerSegments[clamped];
+    if (segment) zoomToCornerHeadingSegment(segment);
+    updateWholeCircuitStatusText();
+    renderWholeCircuitOverlay();
+  }
+
+  function stepWholeCircuitCorner(delta) {
+    if (!wholeCircuitFitPreview) return;
+    focusWholeCircuitCorner(wholeCircuitFitPreview.currentCornerIndex + delta);
+  }
+
+  function refitWholeCircuitPreviewWithEntries(newEntries) {
+    if (!wholeCircuitFitPreview || !Array.isArray(newEntries)) return false;
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.refitWholeCircuitFromEntries !== 'function') return false;
+    const { fit, referenceLog, referenceLap } = wholeCircuitFitPreview;
+    const weights = getRacingLineFitWeights();
+    const fitOptions = {};
+    const refit = calc.refitWholeCircuitFromEntries(
+      referenceLog,
+      referenceLap,
+      newEntries,
+      fit.baseDist,
+      weights,
+      fitOptions,
+      { resolveChannelForLog, computeWindowedAverage, getMapSourceForLog },
+      { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS }
+    );
+    if (!refit) return false;
+    wholeCircuitFitPreview.fit = refit;
+    updateWholeCircuitStatusText();
+    renderWholeCircuitOverlay();
+    updatePlot();
+    return true;
+  }
+
+  function addWholeCircuitControlPointAtCurrentCorner() {
+    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
+    const { cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
+    const segment = (Array.isArray(cornerSegments) && currentCornerIndex >= 0) ? cornerSegments[currentCornerIndex] : null;
+    if (!segment) {
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Navigate to a corner first (Prev/Next Corner) before adding a control point.';
+      return;
+    }
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.insertPeriodicControlPoint !== 'function') return;
+    const midDist = (Number(segment.startDist) + Number(segment.endDist)) / 2 - wholeCircuitFitPreview.fit.baseDist;
+    const newEntries = calc.insertPeriodicControlPoint(wholeCircuitFitPreview.fit.entries, midDist);
+    if (!newEntries) {
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Could not add a control point there (too close to an existing one, or at the maximum count).';
+      return;
+    }
+    refitWholeCircuitPreviewWithEntries(newEntries);
+  }
+
+  function removeWholeCircuitControlPoint(index) {
+    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
+    const calc = getRacingLineCalculationsApi();
+    if (!calc || typeof calc.removePeriodicControlPoint !== 'function') return;
+    const newEntries = calc.removePeriodicControlPoint(wholeCircuitFitPreview.fit.entries, index);
+    if (!newEntries) {
+      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Could not remove that control point (already at the minimum count).';
+      return;
+    }
+    refitWholeCircuitPreviewWithEntries(newEntries);
+  }
+
+  function acceptWholeCircuitFit() {
+    if (!wholeCircuitFitPreview) return;
+    const newLog = buildRacingLineSyntheticLog(wholeCircuitFitPreview);
+    const existingIdx = logs.findIndex(l => l.meta && l.meta.racingLine);
+    if (existingIdx >= 0) logs.splice(existingIdx, 1, newLog);
+    else logs.push(newLog);
+
+    wholeCircuitFitPreview = null;
+    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = true;
+
+    renderFilesList();
+    populateYSelect();
+    populateXCustomSelect();
+    populateMapColorSelect();
+    renderLapsList();
+    updatePlot();
+  }
+
+  function discardWholeCircuitFit() {
+    wholeCircuitFitPreview = null;
+    if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Fit discarded.';
+    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
+    renderWholeCircuitOverlay();
+    updatePlot();
   }
 
   // Linear interpolation over a sorted X array.
@@ -5196,7 +4347,7 @@
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
     updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig, mapColorMode);
-    renderRacingLineOverlay(mode);
+    renderWholeCircuitOverlay(mode);
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
@@ -5279,103 +4430,6 @@
       }
     }
     return bestIdx;
-  }
-
-  function buildRacingLineRadiusComparisonTraces(xMode, customXCol) {
-    if (!racingLineState.active || !racingLineState.preview) return { traces: [], yRange: null };
-    if (xMode !== 'distance') return { traces: [], yRange: null };
-
-    const log = getReferenceLogFromRacingState();
-    const segment = getCurrentRacingLineSegment();
-    const lap = racingLineState.referenceLap;
-    if (!log || !segment || !Number.isFinite(Number(lap))) return { traces: [], yRange: null };
-
-    const radiusCol = getRadiusColumnForLog(log);
-    if (!radiusCol || !Array.isArray(racingLineState.preview.radiusSamples) || racingLineState.preview.radiusSamples.length === 0) {
-      return { traces: [], yRange: null };
-    }
-
-    const xData = [];
-    const yData = [];
-    for (let i = 0; i < log.meta.lapNum.length; i++) {
-      if (log.meta.lapNum[i] !== lap) continue;
-      const dist = Number(log.meta.lapRelDist[i]);
-      if (!Number.isFinite(dist) || dist < Number(segment.startDist) || dist > Number(segment.endDist)) continue;
-      const radius = Number(log.data[i][radiusCol]);
-      if (!Number.isFinite(radius) || radius <= 0) continue;
-      xData.push(dist);
-      yData.push(radius);
-    }
-    if (xData.length < 2) return { traces: [], yRange: null };
-
-    const xFit = [];
-    const yFit = [];
-    const denom = Math.max(1e-9, Number(segment.endDist) - Number(segment.startDist));
-    racingLineState.preview.sampled.forEach((pt) => {
-      const t = Number(pt.t);
-      if (!Number.isFinite(t)) return;
-      const radiusCurve = computeRadiusAtT(racingLineState.preview.control, t);
-      if (!Number.isFinite(radiusCurve) || radiusCurve <= 0) return;
-      xFit.push(Number(segment.startDist) + denom * t);
-      yFit.push(radiusCurve);
-    });
-    if (xFit.length < 2) return { traces: [], yRange: null };
-
-    const unit = getUnitForChannel('Radius') || 'm';
-    const yLabel = `Radius [${unit}]`;
-    const dataTrace = {
-      x: xData,
-      y: yData,
-      yaxis: 'y',
-      name: 'Corner Data Radius',
-      mode: 'lines',
-      line: { color: '#8a95a6', width: 2, dash: 'dot' },
-      hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
-    };
-    const fitTrace = {
-      x: xFit,
-      y: yFit,
-      yaxis: 'y',
-      name: 'Fitted Line Radius (1/curvature)',
-      mode: 'lines',
-      line: { color: '#2b6de9', width: 3 },
-      hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
-    };
-
-    const startRadius = yData.length > 0 ? Number(yData[0]) : null;
-    const endRadius = yData.length > 0 ? Number(yData[yData.length - 1]) : null;
-    let speedRadius = null;
-    if (racingLineState.preview.speedAnchor && Number.isFinite(racingLineState.preview.speedAnchor.rowIndex)) {
-      const idx = Number(racingLineState.preview.speedAnchor.rowIndex);
-      const speedDist = Number(log.meta.lapRelDist[idx]);
-      speedRadius = Number(log.data[idx][radiusCol]);
-      if (Number.isFinite(speedDist) && Number.isFinite(speedRadius) && speedRadius > 0) {
-        const speedMarker = {
-          x: [speedDist],
-          y: [speedRadius],
-          yaxis: 'y',
-          name: 'Min Speed Radius Point',
-          mode: 'markers',
-          marker: { color: '#8b4a00', size: 8, symbol: 'diamond' },
-          hovertemplate: buildHoverTemplate('Lap Distance (m)', yLabel)
-        };
-        const anchors = [startRadius, endRadius, speedRadius].filter(v => Number.isFinite(v) && v > 0);
-        const aMin = anchors.length > 0 ? Math.min(...anchors) : null;
-        const aMax = anchors.length > 0 ? Math.max(...anchors) : null;
-        const yRange = (Number.isFinite(aMin) && Number.isFinite(aMax))
-          ? [Math.max(0, aMin - Math.max(5, (aMax - aMin) * 0.3)), aMax + Math.max(5, (aMax - aMin) * 0.3)]
-          : null;
-        return { traces: [dataTrace, fitTrace, speedMarker], yRange };
-      }
-    }
-
-    const anchors = [startRadius, endRadius, speedRadius].filter(v => Number.isFinite(v) && v > 0);
-    const aMin = anchors.length > 0 ? Math.min(...anchors) : null;
-    const aMax = anchors.length > 0 ? Math.max(...anchors) : null;
-    const yRange = (Number.isFinite(aMin) && Number.isFinite(aMax))
-      ? [Math.max(0, aMin - Math.max(5, (aMax - aMin) * 0.3)), aMax + Math.max(5, (aMax - aMin) * 0.3)]
-      : null;
-    return { traces: [dataTrace, fitTrace], yRange };
   }
 
   function buildSortedNumericSeries(xArr, yArr) {
@@ -5538,11 +4592,7 @@
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const selectedYChannels = getSelectedY();
-    const radiusCompareMode = !!(racingLineState.active && racingLineState.preview);
     let ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
-    if (radiusCompareMode) {
-      ycols = ['Radius'];
-    }
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const xRangeSignature = `${xMode}|${xMode === 'custom' ? (customXCol || '') : ''}`;
@@ -5556,7 +4606,7 @@
     const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
     const singleLapSelected = totalSelectedLaps === 1;
     syncSelectedChannelColors(ycols);
-    const channelColors = new Map(ycols.map((y) => [y, radiusCompareMode ? '#2b6de9' : getChannelColor(y)]));
+    const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
@@ -5660,30 +4710,29 @@
       });
     });
 
-    if (radiusCompareMode) {
-      const radiusPlot = buildRacingLineRadiusComparisonTraces(xMode, customXCol);
-      traces = Array.isArray(radiusPlot.traces) ? radiusPlot.traces : [];
-      if (radiusPlot.yRange && Array.isArray(radiusPlot.yRange) && Number.isFinite(radiusPlot.yRange[0]) && Number.isFinite(radiusPlot.yRange[1])) {
-        layout.yaxis = {
-          ...(layout.yaxis || {}),
-          range: radiusPlot.yRange,
-          autorange: false
-        };
-      }
-      const currSeg = getCurrentRacingLineSegment();
-      if (currSeg && Number.isFinite(Number(currSeg.startDist)) && Number.isFinite(Number(currSeg.endDist))) {
-        const width = Number(currSeg.endDist) - Number(currSeg.startDist);
-        const pad = Math.max(2, width * 0.08);
-        const x0 = Math.max(0, Number(currSeg.startDist) - pad);
-        const x1 = Number(currSeg.endDist) + pad;
-        mainPlotXRange = [x0, x1];
-        layout.xaxis.range = [x0, x1];
-        layout.xaxis.autorange = false;
+    // Overlay the race lap's own curvature (unsmoothed, since it's already a fitted
+    // curve) against whichever curvature channel is selected -- during review this is
+    // the live fit preview; once accepted, it's the racing-line lap's own data.
+    if (xMode === 'distance' && (ycols.includes('Curvature') || ycols.includes(CURVATURE_SMOOTHED_CHANNEL))) {
+      const raceLapSeries = wholeCircuitFitPreview
+        ? buildWholeCircuitPreviewCurvatureSeries()
+        : buildAcceptedRacingLineCurvatureSeries();
+      if (raceLapSeries) {
+        const axisChannel = ycols.includes(CURVATURE_SMOOTHED_CHANNEL) ? CURVATURE_SMOOTHED_CHANNEL : 'Curvature';
+        traces.push({
+          x: raceLapSeries.x,
+          y: raceLapSeries.y,
+          yaxis: channelToRef.get(axisChannel) || 'y',
+          name: wholeCircuitFitPreview ? 'Fitted Lap Curvature (preview)' : 'Race Lap Curvature',
+          mode: 'lines',
+          line: { color: getRacingLineDisplayColor(), width: 2 },
+          hovertemplate: buildHoverTemplate(mainXTitle, 'Race Lap Curvature [1/m]')
+        });
       }
     }
 
     // if shading requested and plotting by lap, compute envelope per Y channel
-    if (!radiusCompareMode && shadeLaps && ycols.length>0) {
+    if (shadeLaps && ycols.length>0) {
       // for each y channel compute global union x grid across all selected files/laps
       ycols.forEach(y => {
         const allLapSeries = [];
@@ -5739,16 +4788,6 @@
     bindMainPlotRelayoutSync();
     bindCornerStripZoom();
 
-    if (racingLineState.active) {
-      const referenceLog = getReferenceLogFromRacingState();
-      if (!referenceLog) {
-        resetRacingLineState();
-      } else {
-        racingLineState.preview = computeCurrentRacingLinePreview();
-        updateRacingLineWizardUI();
-      }
-    }
-
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
 
@@ -5789,43 +4828,58 @@
   if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
   if (fitRacingLineBtn) {
     fitRacingLineBtn.addEventListener('click', () => {
-      startRacingLineFitWorkflow();
+      startWholeCircuitFit();
     });
   }
-  if (racingLineAcceptBtn) {
-    racingLineAcceptBtn.addEventListener('click', () => {
-      acceptCurrentRacingLineFit();
+  if (racingLineWholeCircuitAcceptBtn) {
+    racingLineWholeCircuitAcceptBtn.addEventListener('click', () => {
+      acceptWholeCircuitFit();
     });
   }
-  if (racingLineRejectBtn) {
-    racingLineRejectBtn.addEventListener('click', () => {
-      rejectCurrentRacingLineFit();
+  if (racingLineWholeCircuitDiscardBtn) {
+    racingLineWholeCircuitDiscardBtn.addEventListener('click', () => {
+      discardWholeCircuitFit();
     });
   }
-  if (racingLinePrevBtn) {
-    racingLinePrevBtn.addEventListener('click', () => {
-      stepRacingLineBackward();
+  if (racingLineWholeCircuitPrevCornerBtn) {
+    racingLineWholeCircuitPrevCornerBtn.addEventListener('click', () => {
+      stepWholeCircuitCorner(-1);
     });
   }
-  if (racingLineDownloadBtn) {
-    racingLineDownloadBtn.addEventListener('click', () => {
-      downloadRacingLineJson();
+  if (racingLineWholeCircuitNextCornerBtn) {
+    racingLineWholeCircuitNextCornerBtn.addEventListener('click', () => {
+      stepWholeCircuitCorner(1);
     });
   }
+  if (racingLineWholeCircuitAddPointBtn) {
+    racingLineWholeCircuitAddPointBtn.addEventListener('click', () => {
+      addWholeCircuitControlPointAtCurrentCorner();
+    });
+  }
+  // Weight sliders re-fit the live preview in place (same control points, new weights)
+  // so tuning is immediately visible without losing any manual add/remove edits.
   const onRacingLineWeightChanged = () => {
     updateRacingLineWeightLabels();
-    if (!racingLineState.active) return;
-    racingLineState.preview = computeCurrentRacingLinePreview();
-    updateRacingLineWizardUI();
-    renderRacingLineOverlay();
-    updatePlot();
+    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
+    refitWholeCircuitPreviewWithEntries(wholeCircuitFitPreview.fit.entries);
   };
-  if (racingLineSpeedWeightInput) racingLineSpeedWeightInput.addEventListener('input', onRacingLineWeightChanged);
-  if (racingLinePositionWeightInput) racingLinePositionWeightInput.addEventListener('input', onRacingLineWeightChanged);
-  if (racingLineTangentStartWeightInput) racingLineTangentStartWeightInput.addEventListener('input', onRacingLineWeightChanged);
-  if (racingLineTangentEndWeightInput) racingLineTangentEndWeightInput.addEventListener('input', onRacingLineWeightChanged);
-  if (racingLineRadiusWeightInput) racingLineRadiusWeightInput.addEventListener('input', onRacingLineWeightChanged);
-  if (racingLineEnforceMonotonicRadiusInput) racingLineEnforceMonotonicRadiusInput.addEventListener('change', onRacingLineWeightChanged);
+
+  const bindSliderAndNumber = (slider, numeric, decimals = 1) => {
+    if (!slider || !numeric) return;
+    slider.addEventListener('input', () => {
+      const v = Number(slider.value);
+      numeric.value = Number.isFinite(v) ? v.toFixed(decimals) : slider.value;
+      onRacingLineWeightChanged();
+    });
+    numeric.addEventListener('input', () => {
+      const n = Number(numeric.value);
+      if (!Number.isFinite(n)) return;
+      slider.value = String(n);
+      onRacingLineWeightChanged();
+    });
+  };
+  bindSliderAndNumber(racingLinePositionWeightInput, racingLinePositionWeightNumberInput, 1);
+  bindSliderAndNumber(racingLineRadiusWeightInput, racingLineRadiusWeightNumberInput, 1);
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();
@@ -5914,7 +4968,7 @@
       const idx = logs.findIndex(l=>l.id===id);
       if (idx>=0) {
         logs.splice(idx,1);
-        resetRacingLineState();
+        resetWholeCircuitFitState();
         mapOffsetManuallyAdjusted = false;
         lastAutoOffsetSignature = '';
         lastTrackDefaultSignature = '';
@@ -5989,7 +5043,7 @@
 
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
-    resetRacingLineState();
+    resetWholeCircuitFitState();
     mapOffsetManuallyAdjusted = false;
     mapCenterManuallyAdjusted = false;
     lastAutoOffsetSignature = '';
@@ -6064,7 +5118,6 @@
 
   setMapDisplayMode('none');
   updateRacingLineWeightLabels();
-  updateRacingLineWizardUI();
 
   // Math channel UI handlers
   function showMathChError(msg) {
