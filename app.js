@@ -20,12 +20,12 @@
   const racingLineWholeCircuitPrevCornerBtn = document.getElementById('racingLineWholeCircuitPrevCornerBtn');
   const racingLineWholeCircuitNextCornerBtn = document.getElementById('racingLineWholeCircuitNextCornerBtn');
   const racingLineWholeCircuitAddPointBtn = document.getElementById('racingLineWholeCircuitAddPointBtn');
-  const racingLinePositionWeightInput = document.getElementById('racingLinePositionWeight');
-  const racingLinePositionWeightNumberInput = document.getElementById('racingLinePositionWeightNumber');
-  const racingLineRadiusWeightInput = document.getElementById('racingLineRadiusWeight');
-  const racingLineRadiusWeightNumberInput = document.getElementById('racingLineRadiusWeightNumber');
-  const racingLinePositionWeightValue = document.getElementById('racingLinePositionWeightValue');
-  const racingLineRadiusWeightValue = document.getElementById('racingLineRadiusWeightValue');
+  const racingLineBetaWeightInput = document.getElementById('racingLineBetaWeight');
+  const racingLineBetaWeightNumberInput = document.getElementById('racingLineBetaWeightNumber');
+  const racingLineAlphaWeightInput = document.getElementById('racingLineAlphaWeight');
+  const racingLineAlphaWeightNumberInput = document.getElementById('racingLineAlphaWeightNumber');
+  const racingLineBetaWeightValue = document.getElementById('racingLineBetaWeightValue');
+  const racingLineAlphaWeightValue = document.getElementById('racingLineAlphaWeightValue');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -131,11 +131,11 @@
   const CORNER_LEFT_COLOR = COLORS[4]; // purple
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
-  const CURVATURE_SMOOTH_HALF_WINDOW_M = 35; // matches WHOLE_CIRCUIT_CURVATURE_SMOOTH_HALF_WINDOW_M in racing-line-calculations.js
+  const CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
   const CURVATURE_SMOOTHED_CHANNEL = 'Curvature (Smoothed 35m)';
   const RACING_LINE_DEFAULT_WEIGHTS = {
-    position: 1.0,
-    radiusFit: 2.0
+    alpha: 1.0, // curvature-smoothness weight
+    beta: 1.0   // data-fidelity weight
   };
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
@@ -2204,23 +2204,23 @@
   }
 
   function getRacingLineFitWeights() {
-    const position = normalizeFitWeight(
-      racingLinePositionWeightInput ? racingLinePositionWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.position,
-      RACING_LINE_DEFAULT_WEIGHTS.position
+    const beta = normalizeFitWeight(
+      racingLineBetaWeightInput ? racingLineBetaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.beta,
+      RACING_LINE_DEFAULT_WEIGHTS.beta
     );
-    const radiusFit = normalizeFitWeight(
-      racingLineRadiusWeightInput ? racingLineRadiusWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.radiusFit,
-      RACING_LINE_DEFAULT_WEIGHTS.radiusFit
+    const alpha = normalizeFitWeight(
+      racingLineAlphaWeightInput ? racingLineAlphaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.alpha,
+      RACING_LINE_DEFAULT_WEIGHTS.alpha
     );
-    return { position, radiusFit };
+    return { alpha, beta };
   }
 
   function updateRacingLineWeightLabels() {
     const w = getRacingLineFitWeights();
-    if (racingLinePositionWeightValue) racingLinePositionWeightValue.textContent = w.position.toFixed(1);
-    if (racingLinePositionWeightNumberInput) racingLinePositionWeightNumberInput.value = w.position.toFixed(1);
-    if (racingLineRadiusWeightValue) racingLineRadiusWeightValue.textContent = w.radiusFit.toFixed(1);
-    if (racingLineRadiusWeightNumberInput) racingLineRadiusWeightNumberInput.value = w.radiusFit.toFixed(1);
+    if (racingLineBetaWeightValue) racingLineBetaWeightValue.textContent = w.beta.toFixed(1);
+    if (racingLineBetaWeightNumberInput) racingLineBetaWeightNumberInput.value = w.beta.toFixed(1);
+    if (racingLineAlphaWeightValue) racingLineAlphaWeightValue.textContent = w.alpha.toFixed(1);
+    if (racingLineAlphaWeightNumberInput) racingLineAlphaWeightNumberInput.value = w.alpha.toFixed(1);
   }
 
   // Curvature of the in-progress whole-circuit fit preview (before it's been accepted
@@ -2525,7 +2525,7 @@
       }
     }
     racingLineWholeCircuitStatus.textContent = `Whole-circuit fit ready: ${fit.control.numControlPoints} control points, `
-      + `${fit.pointCount} source points, ${fit.extremaCount} curvature-guided anchors, `
+      + `${fit.pointCount} source points, `
       + `position RMSE ${fit.positionRmse.toFixed(2)} m over a ${fit.totalLapDistance.toFixed(0)} m lap.${cornerText} `
       + `Accept to add it as a lap on the map, or discard and try again.`;
   }
@@ -4878,8 +4878,8 @@
       onRacingLineWeightChanged();
     });
   };
-  bindSliderAndNumber(racingLinePositionWeightInput, racingLinePositionWeightNumberInput, 1);
-  bindSliderAndNumber(racingLineRadiusWeightInput, racingLineRadiusWeightNumberInput, 1);
+  bindSliderAndNumber(racingLineBetaWeightInput, racingLineBetaWeightNumberInput, 1);
+  bindSliderAndNumber(racingLineAlphaWeightInput, racingLineAlphaWeightNumberInput, 1);
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();

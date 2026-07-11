@@ -1,6 +1,44 @@
 (function () {
   'use strict';
 
+  // =======================================================================
+  // Module overview
+  // =======================================================================
+  // This module fits a single closed-loop (periodic) quintic B-spline to a
+  // lap of logged (x, y) position data. It is a two-stage pipeline:
+  //
+  //   Stage 1 (fitPeriodicPositionLSQ): an ordinary least-squares fit of the
+  //   spline to the raw logged points, ignoring curvature entirely. This
+  //   gives a "reference" curve -- already reasonably close to the data,
+  //   but with no explicit smoothness guarantee on its curvature.
+  //
+  //   Stage 2 (solveQuinticCurvatureQP): a quadratic program over the same
+  //   control points that minimizes
+  //     J = alpha * integral( kappa'(s)^2 ) ds  +  beta * sum( |T(s_i) - data_i|^2 )
+  //   i.e. a weighted blend of "smooth curvature change" (alpha) and
+  //   "stay close to the logged data" (beta). Because curvature is a
+  //   nonlinear (ratio) function of the control points, it is linearized
+  //   around the Stage 1 reference curve -- the same technique used by
+  //   Xue, Yue & Dolan, "Spline-Based Minimum-Curvature Trajectory
+  //   Optimization for Autonomous Racing" (2023): the curve's first
+  //   derivatives (the denominator of the curvature ratio) are frozen at
+  //   their Stage-1 reference values, while the second derivatives (which
+  //   are *linear* in the control points) remain live decision variables.
+  //   This turns the otherwise-nonlinear curvature objective into a genuine
+  //   quadratic form solvable by a single dense linear solve -- no
+  //   iterative QP solver (e.g. OSQP) is required, because the problem as
+  //   specified has no inequality constraints (no track-width bounds), so
+  //   minimizing an unconstrained quadratic reduces to solving H*z = -g
+  //   directly (the same closed-form point any iterative QP solver would
+  //   converge to for this unconstrained case).
+  //
+  // The spline itself is degree 5 (quintic), giving C4 continuity -- i.e.
+  // curvature itself is guaranteed continuous, and this pipeline further
+  // asks the *rate of change* of curvature to be smooth, which is what
+  // gives the fitted path a natural, vehicle-like feel instead of jagged
+  // steering transitions.
+  // =======================================================================
+
   function normalizeFitWeight(value, fallback) {
     const n = Number(value);
     return Number.isFinite(n) && n >= 0 ? n : fallback;
@@ -21,8 +59,10 @@
   }
 
   // ---------------------------------------------------------------------
-  // General (non-uniform) cubic B-spline core: de Boor evaluation and basis
-  // functions. Shared by the periodic whole-circuit representation below.
+  // General (non-uniform, arbitrary-degree) B-spline core: de Boor
+  // evaluation and basis functions, plus the recursive derivative-control-
+  // point construction (Piegl & Tiller). Degree-agnostic -- used here at
+  // degree 5, but makes no assumption about degree anywhere.
   // ---------------------------------------------------------------------
 
   function findKnotSpan(t, degree, knots, numPoints) {
@@ -144,44 +184,25 @@
     return x;
   }
 
-  function getRadiusColumnForLog(log, deps) {
-    const resolved = deps.resolveChannelForLog('Radius', log);
-    if (resolved && Array.isArray(log.cols) && log.cols.includes(resolved)) return resolved;
-    const fallbacks = ['GPS Radius', 'Radius', 'Track Radius'];
-    for (const name of fallbacks) {
-      if (Array.isArray(log.cols) && log.cols.includes(name)) return name;
-    }
-    return '';
-  }
-
   // ---------------------------------------------------------------------
-  // Whole-circuit fit: a single periodic (closed-loop) cubic B-spline fit
-  // across the entire lap distance, guided by a forward/backward-smoothed
-  // curvature profile of the logged data. Every control point is free --
-  // there is no start/end to clamp on a closed loop -- and C2 continuity
-  // across the wrap-around seam falls out of the standard B-spline
-  // construction automatically, so no tangent constraints are needed
-  // anywhere.
-  //
-  // The spline is represented as an ordered ring of "entries", each pairing
-  // a control point with the along-track knot span (distance) to the next
-  // entry. This directly supports local knot insertion/removal -- adding or
-  // removing a control point in just one corner, without disturbing the
-  // knot spacing anywhere else -- by reusing the general (non-uniform) de
-  // Boor machinery above, just extended periodically instead of clamped.
-  // Any change to the entries ring is always followed by a fresh
-  // least-squares re-solve against the logged data, so there's no need for
-  // shape-preserving insertion/removal math.
+  // Periodic (closed-loop) representation: an ordered ring of "entries",
+  // each pairing a control point with the along-track knot span (distance,
+  // i.e. arc length between consecutive knots) to the next entry. This is
+  // the non-uniform, arc-length-based knot vector the spline is built on.
+  // Extending it into the flat {points, knots, degree} form the de Boor
+  // evaluator above expects just wraps `degree` entries past each end of
+  // one period.
   // ---------------------------------------------------------------------
 
-  const WHOLE_CIRCUIT_DEGREE = 3;
+  const SPLINE_DEGREE = 5; // quintic: C4 continuous, so curvature itself is always continuous
   const WHOLE_CIRCUIT_TARGET_SPACING_M = 20;
   const WHOLE_CIRCUIT_MIN_CONTROL_POINTS = 24;
   const WHOLE_CIRCUIT_MAX_CONTROL_POINTS = 220;
-  const WHOLE_CIRCUIT_ABSOLUTE_MIN_CONTROL_POINTS = 8;
+  const WHOLE_CIRCUIT_ABSOLUTE_MIN_CONTROL_POINTS = 12; // must stay > SPLINE_DEGREE + 1
   const WHOLE_CIRCUIT_MIN_SPAN_M = 2;
-  const WHOLE_CIRCUIT_CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
-  const WHOLE_CIRCUIT_EXTREMA_MIN_SPACING_M = 20;
+  const QP_SAMPLE_MIN = 150;
+  const QP_SAMPLE_MAX = 400;
+  const QP_SAMPLE_SPACING_M = 8;
 
   function buildUniformPeriodicEntries(controlPoints, period) {
     const S = controlPoints.length;
@@ -189,9 +210,6 @@
     return controlPoints.map((p) => ({ point: { x: p.x, y: p.y }, span }));
   }
 
-  // Extends the compact "entries" ring (S control points + S knot spans) into the flat
-  // {points, knots, degree} form the generic de Boor evaluator expects, by wrapping
-  // `degree` entries past each end of one period.
   function buildPeriodicRepFromEntries(entries, degree) {
     const S = entries.length;
     const primary = [0];
@@ -259,8 +277,8 @@
 
   // Inserts a new control point at along-track distance `tInsert`, splitting whichever
   // knot span currently contains it. The new point is seeded at the midpoint of its two
-  // new neighbors -- just a starting guess, since the caller always re-runs the
-  // least-squares fit immediately afterward.
+  // new neighbors -- just a starting guess, since the caller always re-runs the fit
+  // pipeline immediately afterward.
   function insertPeriodicControlPoint(entries, tInsert) {
     const S = entries.length;
     if (S >= WHOLE_CIRCUIT_MAX_CONTROL_POINTS) return null;
@@ -325,139 +343,43 @@
     return deduped;
   }
 
-  // Curvature (1/radius) of the logged data at every collected point, plus a
-  // forward/backward-smoothed version (same windowed-average technique used
-  // elsewhere in the app, e.g. the Quick Modify filter) over a 35 m half-window.
-  function buildWholeLapCurvatureProfile(log, points, deps) {
-    const radiusCol = getRadiusColumnForLog(log, deps);
-    if (!radiusCol) return null;
-    const curvatureArr = points.map((pt) => {
-      const radius = Number(log.data[pt.rowIndex][radiusCol]);
-      return (Number.isFinite(radius) && radius > 0) ? (1 / radius) : null;
-    });
-    const validCount = curvatureArr.filter((v) => Number.isFinite(v)).length;
-    if (validCount < 8) return null;
+  // =======================================================================
+  // Stage 1: plain position least-squares fit (no curvature term at all).
+  // Produces the reference curve that Stage 2 linearizes around. This is
+  // exactly the same normal-equations technique used throughout this
+  // module: for every logged point, the (degree+1) nonzero basis function
+  // values at that point's arc-length parameter contribute a weighted row
+  // to the least-squares system; solved once via the dense linear solver.
+  // =======================================================================
 
-    const distArr = points.map((pt) => pt.dist);
-    const smoothed = deps.computeWindowedAverage(curvatureArr, distArr, WHOLE_CIRCUIT_CURVATURE_SMOOTH_HALF_WINDOW_M);
-    return points.map((pt, i) => ({
-      rowIndex: pt.rowIndex,
-      dist: pt.dist,
-      x: pt.x,
-      y: pt.y,
-      curvature: curvatureArr[i],
-      smoothedCurvature: Number.isFinite(smoothed[i]) ? smoothed[i] : null
-    }));
-  }
-
-  // Local minima of the smoothed-curvature-derived radius (i.e. apex points of
-  // every corner around the whole lap), non-max-suppressed by along-track
-  // spacing so nearby noisy candidates collapse to the single tightest point.
-  function findCurvatureExtrema(profile, minSpacingM) {
-    const n = profile.length;
-    if (n < 5) return [];
-    const smoothedRadius = profile.map((p) => (
-      Number.isFinite(p.smoothedCurvature) && p.smoothedCurvature > 1e-6 ? (1 / p.smoothedCurvature) : null
-    ));
-    const valid = smoothedRadius.filter((r) => Number.isFinite(r));
-    if (valid.length < 5) return [];
-    const rMin = Math.min(...valid);
-    const rMax = Math.max(...valid);
-    const range = Math.max(1, rMax - rMin);
-    const slopeSlack = 0.01 * range;
-
-    // Compare each point against neighbors a meaningful distance away rather than the
-    // literal adjacent array entry: with dense per-row logging (samples every fraction
-    // of a meter) and a wide 35 m smoothing window, immediately-adjacent samples are
-    // visually identical, so an adjacent-index slope test almost never registers.
-    const compareSpacingM = Math.max(5, minSpacingM * 0.5);
-    const findNeighbor = (i, dir) => {
-      let j = i;
-      while (j + dir >= 0 && j + dir < n) {
-        j += dir;
-        if (Math.abs(profile[j].dist - profile[i].dist) >= compareSpacingM) return j;
-      }
-      return null;
-    };
-
-    const candidates = [];
-    for (let i = 0; i < n; i++) {
-      const r = smoothedRadius[i];
-      if (!Number.isFinite(r)) continue;
-      const prevIdx = findNeighbor(i, -1);
-      const nextIdx = findNeighbor(i, 1);
-      if (prevIdx === null || nextIdx === null) continue;
-      const rPrev = smoothedRadius[prevIdx];
-      const rNext = smoothedRadius[nextIdx];
-      if (!Number.isFinite(rPrev) || !Number.isFinite(rNext)) continue;
-      if (r <= rPrev - slopeSlack && r <= rNext - slopeSlack) {
-        candidates.push({ index: i, radius: r });
-      }
-    }
-    candidates.sort((a, b) => a.radius - b.radius);
-    const accepted = [];
-    candidates.forEach((cand) => {
-      const candDist = profile[cand.index].dist;
-      const tooClose = accepted.some((acc) => Math.abs(profile[acc.index].dist - candDist) < minSpacingM);
-      if (!tooClose) accepted.push(cand);
-    });
-    accepted.sort((a, b) => profile[a.index].dist - profile[b.index].dist);
-    return accepted.map((a) => profile[a.index]);
-  }
-
-  // curvatureByRowIndex/maxSmoothedCurvature (optional): when supplied, the position
-  // weight for each logged point is boosted in proportion to how tight the smoothed
-  // curvature is there (scaled by the radiusFit weight), so the fit tracks the smoothed
-  // curvature profile throughout every corner -- not just at each corner's single
-  // extrema anchor.
-  function fitPeriodicBSplineControlPoints(entries, points, extremaAnchors, fitWeights, constants, curvatureByRowIndex, maxSmoothedCurvature) {
-    const degree = WHOLE_CIRCUIT_DEGREE;
+  function fitPeriodicPositionLSQ(entries, points, positionWeight) {
+    const degree = SPLINE_DEGREE;
     const S = entries.length;
     const rep = buildPeriodicRepFromEntries(entries, degree);
-
-    const weights = fitWeights || constants.defaultWeights;
-    const positionWeight = normalizeFitWeight(weights.position, constants.defaultWeights.position);
-    const radiusWeight = normalizeFitWeight(weights.radiusFit, constants.defaultWeights.radiusFit);
-    const effectivePositionWeight = positionWeight > 0 ? positionWeight : 1e-6;
-    const hasCurvatureWeighting = !!(curvatureByRowIndex && maxSmoothedCurvature > 1e-9);
+    const w = positionWeight > 0 ? positionWeight : 1e-6;
 
     const M = Array.from({ length: S }, () => new Array(S).fill(0));
     const rhsX = new Array(S).fill(0);
     const rhsY = new Array(S).fill(0);
 
-    const addEquation = (t, targetX, targetY, w) => {
-      if (!(w > 0)) return;
-      const tc = ((t % rep.period) + rep.period) % rep.period;
+    points.forEach((pt) => {
+      const tc = ((pt.dist % rep.period) + rep.period) % rep.period;
       const basis = computeBSplineBasisFuns(tc, degree, rep.knots, rep.points.length);
       for (let a = 0; a <= degree; a++) {
         const extA = basis.span - degree + a;
         const realA = ((extA % S) + S) % S;
-        rhsX[realA] += w * basis.values[a] * targetX;
-        rhsY[realA] += w * basis.values[a] * targetY;
+        rhsX[realA] += w * basis.values[a] * pt.x;
+        rhsY[realA] += w * basis.values[a] * pt.y;
         for (let b = 0; b <= degree; b++) {
           const extB = basis.span - degree + b;
           const realB = ((extB % S) + S) % S;
           M[realA][realB] += w * basis.values[a] * basis.values[b];
         }
       }
-    };
-
-    points.forEach((pt) => {
-      let w = effectivePositionWeight;
-      if (hasCurvatureWeighting && Number.isFinite(pt.rowIndex)) {
-        const c = curvatureByRowIndex.get(pt.rowIndex);
-        if (Number.isFinite(c)) {
-          const norm = Math.max(0, Math.min(1, c / maxSmoothedCurvature));
-          w = effectivePositionWeight * (1 + radiusWeight * norm);
-        }
-      }
-      addEquation(pt.dist, pt.x, pt.y, w);
     });
-    extremaAnchors.forEach((pt) => addEquation(pt.dist, pt.x, pt.y, radiusWeight));
 
-    // Light ridge purely for numerical safety -- the position term above, sampled from
-    // real logged data far denser than typical control-point spacing, already keeps
-    // this system well-conditioned on its own.
+    // Light ridge purely for numerical safety -- with real logged data far denser than
+    // typical control-point spacing, this system is already well-conditioned on its own.
     let diagSum = 0;
     for (let a = 0; a < S; a++) diagSum += M[a][a];
     const ridge = Math.max(1e-6, (diagSum / Math.max(1, S)) * 0.01);
@@ -469,32 +391,218 @@
     return entries.map((entry, i) => ({ point: { x: solvedX[i], y: solvedY[i] }, span: entry.span }));
   }
 
-  function finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants) {
-    const profile = buildWholeLapCurvatureProfile(log, points, deps);
-    const extrema = profile ? findCurvatureExtrema(profile, WHOLE_CIRCUIT_EXTREMA_MIN_SPACING_M) : [];
+  // =======================================================================
+  // Stage 2: the curvature-smoothness QP.
+  //
+  // Curvature: kappa(t) = (x'y'' - y'x'') / (x'^2+y'^2)^1.5
+  //
+  // This is nonlinear in the control points (the denominator depends on
+  // them too), so it isn't directly a quadratic objective. Following the
+  // reference-linearization technique: freeze the first derivatives
+  // (x', y') at their Stage-1 reference values -- call them x'_ref, y'_ref,
+  // and D_ref = x'_ref^2 + y'_ref^2 -- and let only the second derivatives
+  // (x'', y''), which are *linear* in the control points via the
+  // second-derivative basis functions, remain live:
+  //
+  //   kappa(t) =~ w(t) * [ x'_ref(t)*y''(t) - y'_ref(t)*x''(t) ],  w(t) = 1/D_ref(t)^1.5
+  //
+  // This kappa(t) is now a linear functional of the (stacked x,y) control
+  // point vector z. kappa'(s) (derivative with respect to *arc length*,
+  // not the spline parameter) is approximated by a central finite
+  // difference of this linearized kappa across neighboring samples,
+  // converted from parameter-spacing to arc-length spacing via the
+  // reference speed (ds/dt = |T'_ref(t)|). A finite difference of linear
+  // functionals is itself linear, so kappa'(s) is linear in z too, and
+  // squaring it (as the objective requires) gives a proper quadratic form:
+  //
+  //   integral( kappa'(s)^2 ) ds =~ sum_j  kappa'_j(z)^2 * ds_j
+  //                              =  z^T [ sum_j ds_j * v_j v_j^T ] z
+  //
+  // where v_j is the (sparse) coefficient vector of kappa'_j as a linear
+  // function of z. That quadratic form is exactly what gets accumulated
+  // into the H matrix below, alongside the (already-quadratic) data-
+  // fidelity term, and the whole unconstrained QP is solved by setting its
+  // gradient to zero -- i.e. one dense linear solve, no iterative solver.
+  // =======================================================================
 
-    const fitWeightsResolved = {
-      position: normalizeFitWeight(fitWeights && fitWeights.position, constants.defaultWeights.position),
-      radiusFit: normalizeFitWeight(fitWeights && fitWeights.radiusFit, constants.defaultWeights.radiusFit)
-    };
+  // Sparse second-derivative basis contribution at parameter t: returns the (at most
+  // degree+1) real (periodic-wrapped) control point indices whose value affects x''(t)/
+  // y''(t), and by how much (x''(t) = sum(values[k] * x[indices[k]]), same for y).
+  // Computed via unit-impulse evaluation of the already-validated derivative machinery
+  // above, rather than a hand-derived closed form -- keeps this in lockstep with
+  // evalBSplineDerivatives by construction, at the cost of (degree+1) extra evaluations
+  // per sample (cheap: degree is fixed at 5, so 6 unit evaluations per sample point).
+  function secondDerivativeBasisAt(rep, tc) {
+    const { knots, degree, points } = rep;
+    const numPoints = points.length;
+    const S = rep.numControlPoints;
+    const span = findKnotSpan(tc, degree, knots, numPoints);
+    const merged = new Map();
+    for (let k = 0; k <= degree; k++) {
+      const extIdx = span - degree + k;
+      const unitPoints = points.map((p, i) => ({ x: (i === extIdx) ? 1 : 0, y: 0 }));
+      const d = evalBSplineDerivatives(unitPoints, knots, degree, tc);
+      const realIdx = ((extIdx % S) + S) % S;
+      merged.set(realIdx, (merged.get(realIdx) || 0) + d.second.x);
+    }
+    return { indices: Array.from(merged.keys()), values: Array.from(merged.values()) };
+  }
 
-    let curvatureByRowIndex = null;
-    let maxSmoothedCurvature = 0;
-    if (profile) {
-      curvatureByRowIndex = new Map();
-      profile.forEach((p) => {
-        if (Number.isFinite(p.smoothedCurvature)) {
-          curvatureByRowIndex.set(p.rowIndex, p.smoothedCurvature);
-          if (p.smoothedCurvature > maxSmoothedCurvature) maxSmoothedCurvature = p.smoothedCurvature;
+  // Builds and solves the joint (2S-dimensional, z = [x_1..x_S, y_1..y_S]) QP described
+  // above. `referenceRep` is the Stage-1 fit, used only to supply frozen first-derivative
+  // values for the curvature linearization -- the actual decision variables are the
+  // (fresh) control points being solved for, sharing the same knot structure.
+  function solveQuinticCurvatureQP(entries, points, referenceRep, weights, constants) {
+    const degree = SPLINE_DEGREE;
+    const S = entries.length;
+    const N = 2 * S;
+    const alpha = normalizeFitWeight(weights.alpha, constants.defaultWeights.alpha);
+    const betaRaw = normalizeFitWeight(weights.beta, constants.defaultWeights.beta);
+    const beta = betaRaw > 0 ? betaRaw : 1e-6;
+
+    const Hdata = Array.from({ length: N }, () => new Array(N).fill(0));
+    const gdata = new Array(N).fill(0);
+
+    // ---- Data fidelity term: beta * sum ||T(t_i) - data_i||^2 ----
+    // x and y are decoupled here (fitting x doesn't depend on y or vice versa), so this
+    // only ever touches the x-block [0..S) or the y-block [S..2S) of the joint system.
+    points.forEach((pt) => {
+      const tc = ((pt.dist % referenceRep.period) + referenceRep.period) % referenceRep.period;
+      const basis = computeBSplineBasisFuns(tc, degree, referenceRep.knots, referenceRep.points.length);
+      for (let a = 0; a <= degree; a++) {
+        const extA = basis.span - degree + a;
+        const realA = ((extA % S) + S) % S;
+        gdata[realA] += basis.values[a] * pt.x;
+        gdata[S + realA] += basis.values[a] * pt.y;
+        for (let b = 0; b <= degree; b++) {
+          const extB = basis.span - degree + b;
+          const realB = ((extB % S) + S) % S;
+          Hdata[realA][realB] += basis.values[a] * basis.values[b];
+          Hdata[S + realA][S + realB] += basis.values[a] * basis.values[b];
         }
-      });
+      }
+    });
+
+    // ---- Curvature-smoothness term: alpha * integral(kappa'(s)^2) ds ----
+    const Hsmooth = Array.from({ length: N }, () => new Array(N).fill(0));
+    const sampleCount = Math.max(QP_SAMPLE_MIN, Math.min(QP_SAMPLE_MAX, Math.round(referenceRep.period / QP_SAMPLE_SPACING_M)));
+    const dt = referenceRep.period / sampleCount;
+
+    // Precompute, at every sample, the linearized kappa(t) as a sparse coefficient
+    // vector over z (indices into the x-block and y-block of the joint system).
+    const kappaCoeffs = new Array(sampleCount);
+    for (let j = 0; j < sampleCount; j++) {
+      const t = j * dt;
+      const d = evalBSplineDerivatives(referenceRep.points, referenceRep.knots, degree, t);
+      const speedSq = Math.max(1e-6, d.first.x * d.first.x + d.first.y * d.first.y);
+      const w = 1 / Math.pow(speedSq, 1.5); // 1 / D_ref^1.5
+      const basis = secondDerivativeBasisAt(referenceRep, t);
+      // kappa(t) =~ w * [ x'_ref*y''(z) - y'_ref*x''(z) ]
+      //   contribution to y-block (from y''): +w * x'_ref * Bpp_k(t)
+      //   contribution to x-block (from x''): -w * y'_ref * Bpp_k(t)
+      const idx = basis.indices;
+      const xCoef = basis.values.map((v) => -w * d.first.y * v);
+      const yCoef = basis.values.map((v) => w * d.first.x * v);
+      kappaCoeffs[j] = { idx, xCoef, yCoef, speed: Math.sqrt(speedSq) };
     }
 
-    const solvedEntries = fitPeriodicBSplineControlPoints(
-      entries, points, extrema, fitWeightsResolved, constants,
-      curvatureByRowIndex, maxSmoothedCurvature
-    );
-    const rep = buildPeriodicRepFromEntries(solvedEntries, WHOLE_CIRCUIT_DEGREE);
+    for (let j = 0; j < sampleCount; j++) {
+      const jPrev = (j - 1 + sampleCount) % sampleCount;
+      const jNext = (j + 1) % sampleCount;
+      const arcStep = Math.max(1e-6, kappaCoeffs[j].speed * dt);
+      const denom = 2 * arcStep; // approx (s_{j+1} - s_{j-1})
+
+      const v = new Map();
+      const accumulate = (sample, sign) => {
+        sample.idx.forEach((realIdx, k) => {
+          const gx = realIdx;
+          const gy = S + realIdx;
+          v.set(gx, (v.get(gx) || 0) + (sign * sample.xCoef[k]) / denom);
+          v.set(gy, (v.get(gy) || 0) + (sign * sample.yCoef[k]) / denom);
+        });
+      };
+      accumulate(kappaCoeffs[jNext], 1);
+      accumulate(kappaCoeffs[jPrev], -1);
+
+      const nz = Array.from(v.entries()).filter(([, val]) => Math.abs(val) > 1e-14);
+      if (nz.length === 0) continue;
+      const arcWeight = arcStep; // ds measure for this sample's contribution to the integral
+      for (let p = 0; p < nz.length; p++) {
+        const [gi, vi] = nz[p];
+        for (let q = 0; q < nz.length; q++) {
+          const [gj, vj] = nz[q];
+          Hsmooth[gi][gj] += arcWeight * vi * vj;
+        }
+      }
+    }
+
+    // Auto-scale alpha's contribution relative to beta's so the two sliders operate on
+    // comparable magnitudes regardless of the raw (very different) physical units of a
+    // position-squared term (m^2) versus a curvature-derivative-squared term (1/m^3) --
+    // without this, alpha=1 would be either imperceptible or would blow out the fit
+    // depending on track scale.
+    const avgDiag = (mat) => {
+      let sum = 0;
+      let count = 0;
+      for (let i = 0; i < N; i++) {
+        if (mat[i][i] > 1e-12) { sum += mat[i][i]; count += 1; }
+      }
+      return count > 0 ? sum / count : 0;
+    };
+    const dataDiagAvg = avgDiag(Hdata);
+    const smoothDiagAvg = avgDiag(Hsmooth);
+    const alphaScale = smoothDiagAvg > 1e-12 ? (dataDiagAvg / smoothDiagAvg) : 0;
+
+    const H = Array.from({ length: N }, () => new Array(N).fill(0));
+    const g = new Array(N).fill(0);
+    for (let i = 0; i < N; i++) {
+      g[i] = beta * gdata[i];
+      for (let j = 0; j < N; j++) {
+        H[i][j] = beta * Hdata[i][j] + alpha * alphaScale * Hsmooth[i][j];
+      }
+    }
+
+    let diagSum = 0;
+    for (let i = 0; i < N; i++) diagSum += H[i][i];
+    const ridge = Math.max(1e-6, (diagSum / Math.max(1, N)) * 0.001);
+    for (let i = 0; i < N; i++) H[i][i] += ridge;
+
+    const z = solveLinearSystem(H, g);
+    return entries.map((entry, i) => ({ point: { x: z[i], y: z[S + i] }, span: entry.span }));
+  }
+
+  function finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants) {
+    const fitWeightsResolved = {
+      alpha: normalizeFitWeight(fitWeights && fitWeights.alpha, constants.defaultWeights.alpha),
+      beta: normalizeFitWeight(fitWeights && fitWeights.beta, constants.defaultWeights.beta)
+    };
+
+    // Stage 1: reference curve for linearizing the curvature term (see module doc).
+    const referenceEntries = fitPeriodicPositionLSQ(entries, points, 1.0);
+    let referenceRep = buildPeriodicRepFromEntries(referenceEntries, SPLINE_DEGREE);
+
+    // Stage 2: QP refinement, re-linearized a few times around its own previous result.
+    // A single linearization pass is only accurate near the Stage-1 reference; for larger
+    // alpha the solution can move far enough from that reference that the frozen first-
+    // derivative terms stop being a good approximation, so curvature smoothness actually
+    // *worsens* rather than improves as alpha grows past a certain point. Re-solving with
+    // the previous solution as the new reference (a small sequential-convexification loop)
+    // corrects this, converging in just a couple of iterations for realistic weights.
+    const QP_RELINEARIZE_ITERATIONS = 4;
+    let solvedEntries = referenceEntries;
+    for (let iter = 0; iter < QP_RELINEARIZE_ITERATIONS; iter++) {
+      solvedEntries = solveQuinticCurvatureQP(entries, points, referenceRep, fitWeightsResolved, constants);
+      const nextRep = buildPeriodicRepFromEntries(solvedEntries, SPLINE_DEGREE);
+      let maxMove = 0;
+      for (let i = 0; i < solvedEntries.length; i++) {
+        const dx = solvedEntries[i].point.x - referenceRep.points[i].x;
+        const dy = solvedEntries[i].point.y - referenceRep.points[i].y;
+        maxMove = Math.max(maxMove, Math.hypot(dx, dy));
+      }
+      referenceRep = nextRep;
+      if (maxMove < 0.01) break; // converged
+    }
+    const rep = referenceRep;
 
     const sampleCount = Math.max(200, Math.min(1400, Math.round(totalLapDistance / 3)));
     const sampled = samplePeriodicBSpline(rep, sampleCount);
@@ -518,7 +626,6 @@
       totalLapDistance,
       baseDist,
       pointCount: points.length,
-      extremaCount: extrema.length,
       positionRmse,
       fitWeights: fitWeightsResolved,
       fitOptions
@@ -554,9 +661,9 @@
   }
 
   // Re-fits an already-built whole-circuit fit after the user has added/removed a
-  // control point while navigating corners -- reuses the same reference lap and
-  // baseDist coordinate system, just re-solving the least-squares system for the
-  // (possibly locally denser) entries ring.
+  // control point while navigating corners, or changed alpha/beta -- reuses the same
+  // reference lap and baseDist coordinate system, just re-running both fit stages for
+  // the (possibly locally denser) entries ring.
   function refitWholeCircuitFromEntries(log, lap, entries, baseDist, fitWeights, fitOptions, deps, constants) {
     const rawPoints = collectWholeLapMapPoints(log, lap, deps);
     if (rawPoints.length < 20) return null;
