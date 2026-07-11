@@ -43,15 +43,15 @@
         <button id="fitRacingLineBtn" type="button">Fit Racing Line</button>
         <div id="racingLineWholeCircuitPanel" class="racing-line-whole-circuit-panel" hidden>
           <div class="racing-line-weight-controls">
-            <label>Map X/Y Fit Weight
-              <input id="racingLinePositionWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-              <span id="racingLinePositionWeightValue">1.0</span>
-              <input id="racingLinePositionWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
+            <label>Data Fidelity (β)
+              <input id="racingLineBetaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
+              <span id="racingLineBetaWeightValue">1.0</span>
+              <input id="racingLineBetaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
             </label>
-            <label>Curvature Anchor Weight
-              <input id="racingLineRadiusWeight" type="range" min="0" max="10" step="0.1" value="2.0" />
-              <span id="racingLineRadiusWeightValue">2.0</span>
-              <input id="racingLineRadiusWeightNumber" type="number" min="0" max="10" step="0.1" value="2.0" />
+            <label>Curvature Smoothness (α)
+              <input id="racingLineAlphaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
+              <span id="racingLineAlphaWeightValue">1.0</span>
+              <input id="racingLineAlphaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
             </label>
           </div>
           <div id="racingLineWholeCircuitStatus" class="racing-line-status" aria-live="polite"></div>
@@ -59,8 +59,12 @@
             <button id="racingLineWholeCircuitPrevCornerBtn" type="button">◀ Prev Corner</button>
             <button id="racingLineWholeCircuitNextCornerBtn" type="button">Next Corner ▶</button>
           </div>
-          <div class="racing-line-actions">
-            <button id="racingLineWholeCircuitAddPointBtn" type="button">+ Add Control Point Here</button>
+          <div id="racingLineCornerGammaRow" class="racing-line-weight-controls" hidden>
+            <label>Minimize Curvature (γ) — this corner only
+              <input id="racingLineGammaWeight" type="range" min="0" max="10" step="0.1" value="0" />
+              <span id="racingLineGammaWeightValue">0.0</span>
+              <input id="racingLineGammaWeightNumber" type="number" min="0" max="10" step="0.1" value="0" />
+            </label>
           </div>
           <div class="racing-line-hint">Click a control point on the map to remove it.</div>
           <div class="racing-line-actions">
@@ -185,7 +189,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-07-11d</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-07-11j</div>
     </section>
 
     <section class="plot">
