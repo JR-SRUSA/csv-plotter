@@ -34,6 +34,7 @@
   const vehicleSimPowerKwInput = document.getElementById('vehicleSimPowerKw');
   const vehicleSimCdaInput = document.getElementById('vehicleSimCda');
   const vehicleSimMassInput = document.getElementById('vehicleSimMass');
+  const vehicleSimUseElevationInput = document.getElementById('vehicleSimUseElevation');
   const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
   const vehicleSimStatus = document.getElementById('vehicleSimStatus');
   const clearBtn = document.getElementById('clearBtn');
@@ -101,6 +102,8 @@
     { displayName: 'LatAcc', piboso: 'LatAcc', aim: 'GPS LatAcc', motec: 'G Force Lat' },
     { displayName: 'LongAcc', piboso: 'LonAcc', aim: 'GPS LonAcc', motec: 'G Force Long' },
     { displayName: 'Total Acceleration (calc)', piboso: 'Total Acceleration (calc)', aim: 'Total Acceleration (calc)', motec: 'Total Acceleration (calc)' },
+    { displayName: 'Altitude', piboso: 'PosY_3D', aim: 'GPS Altitude', motec: 'Altitude' },
+    { displayName: 'Slope', piboso: '', aim: 'GPS Slope', motec: 'Slope' },
   ];
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
@@ -1919,22 +1922,50 @@
     return mapping.displayName || mapping.piboso;
   }
 
-  // Adds a general "Curvature" (1/Radius) channel to any log that has a resolvable
-  // Radius column, so it can be plotted like any other channel, plus a precomputed
-  // "Curvature (Smoothed 35m)" channel using the same forward/backward windowed-average
-  // technique (and the same 35m half-window) the whole-circuit racing-line fit uses
-  // internally to find each corner's apex -- so that exact signal is directly plottable
-  // rather than only reproducible by hand via Quick Modify.
+  const CURVATURE_FROM_LATACC_MIN_SPEED_MPS = 2; // guards the |a_lat|/v^2 blowup as v -> 0 (parked/pit-lane rows)
+
+  // Adds a general "Curvature" channel to any log that has a resolvable Radius column
+  // (Curvature = 1/Radius), so it can be plotted like any other channel, plus a
+  // precomputed "Curvature (Smoothed 35m)" channel using the same forward/backward
+  // windowed-average technique (and the same 35m half-window) the whole-circuit
+  // racing-line fit uses internally to find each corner's apex -- so that exact signal
+  // is directly plottable rather than only reproducible by hand via Quick Modify.
+  //
+  // Falls back to deriving curvature from logged LatAcc/Speed (curvature = |a_lat| / v^2,
+  // the standard circular-motion identity: radius = v^2 / a_lat) when no native Radius
+  // channel is present -- e.g. some GP Bikes exports omit it. This gives a raw-data
+  // curvature signal that can be directly compared against a fitted racing line's own
+  // (spline-derived) Curvature channel, which otherwise has nothing logged to check
+  // against. LatAcc/Speed are assumed to be in this app's standard vendor units for a
+  // mapped channel (g, km/h) -- the same assumption every other calc channel here makes.
   function addCurvatureChannel(data, cols, meta) {
     if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
     const mappingContext = { meta };
     const radiusCol = resolveChannelForLog('Radius', mappingContext);
-    if (!radiusCol || !cols.includes(radiusCol)) return;
+    const hasRadius = !!radiusCol && cols.includes(radiusCol);
+
+    const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, mappingContext);
+    const speedCol = resolveChannelForLog('Speed', mappingContext);
+    const hasLatAccSpeed = !hasRadius && latAccCol && cols.includes(latAccCol) && speedCol && cols.includes(speedCol);
+
+    if (!hasRadius && !hasLatAccSpeed) return;
     if (!cols.includes('Curvature')) cols.push('Curvature');
-    data.forEach((row) => {
-      const radius = Number(row[radiusCol]);
-      row['Curvature'] = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : null;
-    });
+
+    if (hasRadius) {
+      data.forEach((row) => {
+        const radius = Number(row[radiusCol]);
+        row['Curvature'] = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : null;
+      });
+    } else {
+      data.forEach((row) => {
+        const latAccG = Number(row[latAccCol]);
+        const speedKmh = Number(row[speedCol]);
+        const speedMps = speedKmh / 3.6;
+        row['Curvature'] = (Number.isFinite(latAccG) && Number.isFinite(speedMps) && speedMps >= CURVATURE_FROM_LATACC_MIN_SPEED_MPS)
+          ? Math.abs(latAccG) * 9.81 / (speedMps * speedMps)
+          : null;
+      });
+    }
     if (!meta.units || typeof meta.units !== 'object') meta.units = {};
     meta.units['Curvature'] = '1/m';
 
@@ -2450,7 +2481,11 @@
         sourceLap: referenceLap,
         // Retained so a vehicle simulation can be (re-)run later against the exact
         // analytic curve, rather than re-estimating curvature from the flattened rows.
-        splineControl: fit.control
+        splineControl: fit.control,
+        // lapRelDist above is in the fit's own local (0..period) frame; add this back to
+        // translate a sample's dist into the source log's original lapRelDist frame, e.g.
+        // to look up track grade (Altitude/Slope) from the source log at that position.
+        sourceBaseDist: fit.baseDist
       },
       rawRows: null
     };
@@ -2462,11 +2497,11 @@
       return Number.isFinite(n) && n > 0 ? n : fallback;
     };
     return {
-      maxLatG: num(vehicleSimMaxLatGInput, 1.3),
-      maxLongG: num(vehicleSimMaxLongGInput, 1.0),
+      maxLatG: num(vehicleSimMaxLatGInput, 1.0),
+      maxLongG: num(vehicleSimMaxLongGInput, 0.7),
       powerKw: num(vehicleSimPowerKwInput, 32),
-      cda: num(vehicleSimCdaInput, 0.35),
-      massKg: num(vehicleSimMassInput, 215)
+      cda: num(vehicleSimCdaInput, 0.5),
+      massKg: num(vehicleSimMassInput, 235)
     };
   }
 
@@ -2477,6 +2512,84 @@
     const secs = Math.floor((totalMs % 60000) / 1000);
     const ms = totalMs % 1000;
     return `${mins}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+  }
+
+  const GRADE_SMOOTH_HALF_WINDOW_M = 20;
+
+  // Builds a signed slope-angle-in-degrees array parallel to `sampled` (positive =
+  // uphill in the direction of increasing dist), for the vehicle simulation's grade
+  // term. Prefers a logged Slope channel (e.g. AiM's "GPS Slope", already an angle)
+  // over deriving it from Altitude, since differentiating raw GPS altitude is far
+  // noisier than a purpose-built slope channel. Falls back to Altitude if Slope isn't
+  // present, using the same "several-meter chord baseline" idea used elsewhere in this
+  // app to keep a discrete estimate from a noisy sensor from swamping the real signal --
+  // here via a fixed *sample* radius rather than a distance search, since log rows are
+  // usually close to evenly time-spaced. Returns null if neither channel is available,
+  // so the caller can fall back to a flat-track simulation.
+  // A channel-map "Standard Name" only counts as available when: the map resolves it to
+  // a real column name for this log's format (vendors that don't have the channel are
+  // mapped to '' in channel-map.json, e.g. PiBoSo/GP Bikes has no Slope channel), that
+  // column is actually present in this log's cols, AND at least one row in the lap has a
+  // finite value in it -- a column can be present in the header but blank for an entire
+  // session (e.g. no GPS lock). Checking only the resolved name's truthiness or only
+  // cols.includes(...) would silently accept either failure mode; this is the same
+  // "resolve, then verify real data backs it" rule populateYSelect uses to decide
+  // whether a Standard Name is actually selectable.
+  function resolveAvailableChannel(displayName, log, lapRows) {
+    const col = resolveChannelForLog(displayName, log);
+    if (!col || !log.cols.includes(col)) return null;
+    const hasData = lapRows.some((i) => Number.isFinite(Number(log.data[i][col])));
+    return hasData ? col : null;
+  }
+
+  function buildGradeDegForSampled(referenceLog, referenceLap, sourceBaseDist, sampled) {
+    if (!referenceLog || !referenceLog.meta || !Array.isArray(referenceLog.meta.lapNum) || !Array.isArray(referenceLog.meta.lapRelDist)) return null;
+    const meta = referenceLog.meta;
+    const lapRowIndices = [];
+    for (let i = 0; i < meta.lapNum.length; i++) {
+      if (meta.lapNum[i] === referenceLap) lapRowIndices.push(i);
+    }
+    if (lapRowIndices.length < 10) return null;
+
+    const slopeCol = resolveAvailableChannel('Slope', referenceLog, lapRowIndices);
+    const altCol = slopeCol ? null : resolveAvailableChannel('Altitude', referenceLog, lapRowIndices);
+    const hasSlope = !!slopeCol;
+    const hasAlt = !!altCol;
+    if (!hasSlope && !hasAlt) return null;
+
+    const rows = [];
+    for (const i of lapRowIndices) {
+      const d = Number(meta.lapRelDist[i]);
+      if (!Number.isFinite(d)) continue;
+      const row = { dist: d };
+      if (hasSlope) row.slopeDeg = Number(referenceLog.data[i][slopeCol]);
+      if (hasAlt) row.altitude = Number(referenceLog.data[i][altCol]);
+      rows.push(row);
+    }
+    if (rows.length < 10) return null;
+    rows.sort((a, b) => a.dist - b.dist);
+
+    let rawSeries;
+    if (hasSlope) {
+      rawSeries = rows.map((r) => Number.isFinite(r.slopeDeg) ? r.slopeDeg : 0);
+    } else {
+      rawSeries = rows.map((r, i) => {
+        const lo = Math.max(0, i - 3), hi = Math.min(rows.length - 1, i + 3);
+        const dAlt = rows[hi].altitude - rows[lo].altitude;
+        const dDist = rows[hi].dist - rows[lo].dist;
+        if (!(dDist > 0.5) || !Number.isFinite(dAlt)) return 0;
+        return Math.atan2(dAlt, dDist) * 180 / Math.PI;
+      });
+    }
+
+    const distArr = rows.map((r) => r.dist);
+    const smoothed = computeWindowedAverage(rawSeries, distArr, GRADE_SMOOTH_HALF_WINDOW_M);
+
+    return sampled.map((pt) => {
+      const targetDist = pt.dist + sourceBaseDist;
+      const v = interpAt(distArr, smoothed, targetDist);
+      return Number.isFinite(v) ? v : 0;
+    });
   }
 
   // Runs the quasi-steady-state lap simulation against the accepted racing-line lap's
@@ -2505,7 +2618,14 @@
     const n = log.data.length;
     const sampled = calc.samplePeriodicBSpline(rep, n);
     const params = getVehicleSimParams();
-    const result = calc.simulateVehicleSpeed(rep, sampled, params);
+
+    const referenceLog = log.meta.sourceLogId ? logs.find(l => l.id === log.meta.sourceLogId) : null;
+    const useElevation = !vehicleSimUseElevationInput || vehicleSimUseElevationInput.checked;
+    const gradeDeg = useElevation
+      ? buildGradeDegForSampled(referenceLog, log.meta.sourceLap, log.meta.sourceBaseDist, sampled)
+      : null;
+
+    const result = calc.simulateVehicleSpeed(rep, sampled, params, gradeDeg);
     if (!result) {
       if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation failed on this racing line.';
       return;
@@ -2522,6 +2642,14 @@
       log.data[i]['Lap Time'] = result.time[i];
       log.meta.lapTime[i] = result.time[i];
     }
+    // result.time[] deliberately excludes the final closing segment back to the
+    // start/finish line (see simulateVehicleSpeed's own doc comment), so the per-row max
+    // that getLapDuration() falls back to would under-report the lap by that last
+    // segment. Recording the true total here keeps the laps-list time in sync with the
+    // one shown below the Simulate Vehicle button. This synthetic log always has a
+    // single lap numbered 1.
+    if (!Array.isArray(log.meta.lapDurations)) log.meta.lapDurations = [];
+    log.meta.lapDurations[1] = result.lapTime;
     if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
     log.meta.units[speedCol] = 'km/h';
     log.meta.units[latAccCol] = 'g';
@@ -2529,8 +2657,11 @@
     addCalculatedCommonChannels(log.data, log.cols, log.meta);
 
     if (vehicleSimStatus) {
+      const gradeNote = !useElevation
+        ? ' Elevation/altitude effect disabled -- simulated as flat.'
+        : (result.usedGrade ? ' Track grade (Slope/Altitude) factored in.' : ' No Slope/Altitude data found on the source lap -- simulated as flat.');
       vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
-        + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h). `
+        + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${gradeNote} `
         + `${speedCol}, ${latAccCol}, ${longAccCol} added to the racing line lap.`;
     }
 
@@ -4960,6 +5091,14 @@
   if (vehicleSimulateBtn) {
     vehicleSimulateBtn.addEventListener('click', () => {
       simulateVehicle();
+    });
+  }
+  // Toggling the elevation effect live-updates an already-simulated lap in place, rather
+  // than requiring the user to hit "Simulate Vehicle" again to see the effect of the change.
+  if (vehicleSimUseElevationInput) {
+    vehicleSimUseElevationInput.addEventListener('change', () => {
+      const log = logs.find(l => l.meta && l.meta.racingLine);
+      if (log && log.meta.splineControl) simulateVehicle();
     });
   }
   if (racingLineWholeCircuitDiscardBtn) {

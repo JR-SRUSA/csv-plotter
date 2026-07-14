@@ -995,6 +995,9 @@
   // Longitudinal/lateral grip combine via an elliptical friction circle: using some
   // fraction of available lateral grip for cornering proportionally reduces the
   // longitudinal grip left over for accelerating or braking.
+  //
+  // Track grade (uphill/downhill), when available, adds gravity's component along the
+  // direction of travel to both passes -- see the gradeDeg parameter below.
   // =======================================================================
 
   const GRAVITY_MS2 = 9.81;
@@ -1012,7 +1015,15 @@
   // baseline chord spanning across a corner/straight boundary can substantially
   // over- or under-estimate curvature right at that boundary, which is exactly where
   // this simulation is most sensitive to it (a corner's braking point).
-  function simulateVehicleSpeed(rep, sampled, params) {
+  //
+  // `gradeDeg` (optional): track grade at each sample, as a signed slope angle in
+  // degrees in the direction of increasing dist (positive = uphill, negative =
+  // downhill) -- e.g. from a logged GPS Slope channel, or derived from Altitude.
+  // Gravity's component along the direction of travel is g*sin(gradeDeg): this reduces
+  // available forward acceleration and adds "free" deceleration when climbing, and does
+  // the reverse when descending (reduces effective braking, can add to acceleration).
+  // Omit it (or pass null) to simulate a flat track, unchanged from before.
+  function simulateVehicleSpeed(rep, sampled, params, gradeDeg) {
     const n = sampled.length;
     const period = rep.period;
     if (n < 3 || !(period > 0)) return null;
@@ -1022,6 +1033,8 @@
     const powerW = Math.max(0, Number(params.powerKw) || 0) * 1000;
     const cda = Math.max(0.01, Number(params.cda) || 0.35);
     const mass = Math.max(1, Number(params.massKg) || 215);
+    const hasGrade = Array.isArray(gradeDeg) && gradeDeg.length === n;
+    const gradeAccel = (i) => hasGrade ? GRAVITY_MS2 * Math.sin(gradeDeg[i] * Math.PI / 180) : 0;
 
     const kappaSigned = new Array(n);
     const kappaAbs = new Array(n);
@@ -1064,7 +1077,7 @@
         const aTraction = tractionAvail(aLatDemand);
         const aPower = powerW > 0 ? (powerW / (mass * Math.max(1, vFwd[prev]))) : Infinity;
         const aEngine = Math.min(aTraction, aPower);
-        const aNet = aEngine - dragDecel(vFwd[prev]);
+        const aNet = aEngine - dragDecel(vFwd[prev]) - gradeAccel(prev);
         const vReach = Math.sqrt(Math.max(0, vFwd[prev] * vFwd[prev] + 2 * aNet * ds[prev]));
         vFwd[i] = Math.min(vEnvelope[i], vReach);
       }
@@ -1076,7 +1089,8 @@
         const next = (i + 1) % n;
         const aLatDemand = vBwd[next] * vBwd[next] * kappaAbs[next];
         const aTraction = tractionAvail(aLatDemand);
-        const aBrakeTotal = aTraction + dragDecel(vBwd[next]); // drag assists braking
+        // drag and an uphill grade both assist braking; a downhill grade fights it.
+        const aBrakeTotal = aTraction + dragDecel(vBwd[next]) + gradeAccel(next);
         const vReach = Math.sqrt(Math.max(0, vBwd[next] * vBwd[next] + 2 * aBrakeTotal * ds[i]));
         vBwd[i] = Math.min(vEnvelope[i], vReach);
       }
@@ -1092,7 +1106,11 @@
       const nextI = (i + 1) % n;
       const dsCentral = ds[prevI] + ds[i];
       ax[i] = dsCentral > 1e-9 ? (speed[nextI] * speed[nextI] - speed[prevI] * speed[prevI]) / (2 * dsCentral) : 0;
-      ay[i] = speed[i] * speed[i] * kappaSigned[i];
+      // Negated: kappaSigned's sign follows the PosX/PosY math convention (positive =
+      // counter-clockwise curve), which is the opposite of logged LatAcc's convention
+      // (positive = right-hand turn) in both GP Bikes and AiM telemetry -- verified
+      // against real logged LatAcc at several corners of known turn direction.
+      ay[i] = -speed[i] * speed[i] * kappaSigned[i];
     }
 
     // Cumulative time since the start/finish line to reach each point; index 0 is
@@ -1108,7 +1126,7 @@
     const vAvgClose = Math.max(0.5, (speed[n - 1] + speed[0]) / 2);
     const lapTime = acc + ds[n - 1] / vAvgClose;
 
-    return { speed, ax, ay, time, lapTime, topSpeedFromPower };
+    return { speed, ax, ay, time, lapTime, topSpeedFromPower, usedGrade: hasGrade };
   }
 
   window.RacingLineCalculations = {
