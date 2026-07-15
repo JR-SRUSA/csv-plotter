@@ -36,183 +36,209 @@
       </div>
       <label class="file-label">Select CSV files
         <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel" multiple />
-        
+
       </label>
 
       <div id="filesList" class="files-list"></div>
 
-      <div class="racing-line-controls">
-        <strong>Racing Line Fit</strong>
-        <button id="fitRacingLineBtn" type="button">Fit Racing Line</button>
-        <div id="racingLineWholeCircuitPanel" class="racing-line-whole-circuit-panel" hidden>
-          <div class="racing-line-weight-controls">
-            <label>Data Fidelity (β)
-              <input id="racingLineBetaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-              <span id="racingLineBetaWeightValue">1.0</span>
-              <input id="racingLineBetaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
-            </label>
-            <label>Curvature Smoothness (α)
-              <input id="racingLineAlphaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-              <span id="racingLineAlphaWeightValue">1.0</span>
-              <input id="racingLineAlphaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
-            </label>
-          </div>
-          <div id="racingLineWholeCircuitStatus" class="racing-line-status" aria-live="polite"></div>
-          <div class="racing-line-actions">
-            <button id="racingLineWholeCircuitPrevCornerBtn" type="button">◀ Prev Corner</button>
-            <button id="racingLineWholeCircuitNextCornerBtn" type="button">Next Corner ▶</button>
-          </div>
-          <div id="racingLineCornerGammaRow" class="racing-line-weight-controls" hidden>
-            <label>Minimize Curvature (γ) — this corner only
-              <input id="racingLineGammaWeight" type="range" min="0" max="10" step="0.1" value="0" />
-              <span id="racingLineGammaWeightValue">0.0</span>
-              <input id="racingLineGammaWeightNumber" type="number" min="0" max="10" step="0.1" value="0" />
-            </label>
-          </div>
-          <div class="racing-line-hint">Click a control point on the map to remove it.</div>
-          <div class="racing-line-actions">
-            <button id="racingLineWholeCircuitAcceptBtn" type="button" disabled>Accept &amp; Add as Lap</button>
-            <button id="racingLineWholeCircuitDiscardBtn" type="button">Discard</button>
-          </div>
-        </div>
-
-        <div class="vehicle-sim-controls">
-          <strong>Vehicle Simulation</strong>
-          <div class="racing-line-weight-controls">
-            <label>Max Lateral (g)
-              <input id="vehicleSimMaxLatG" type="number" min="0.1" step="0.05" value="1.0" />
-            </label>
-            <label>Max Longitudinal (g)
-              <input id="vehicleSimMaxLongG" type="number" min="0.1" step="0.05" value="0.7" />
-            </label>
-            <label>Power (kW)
-              <input id="vehicleSimPowerKw" type="number" min="0.1" step="1" value="32" />
-            </label>
-            <label>CdA (m²)
-              <input id="vehicleSimCda" type="number" min="0.01" step="0.01" value="0.5" />
-            </label>
-            <label>Mass (kg)
-              <input id="vehicleSimMass" type="number" min="1" step="1" value="235" />
-            </label>
-          </div>
-          <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
-          <button id="vehicleSimulateBtn" type="button">Simulate Vehicle</button>
-          <div id="vehicleSimStatus" class="racing-line-status" aria-live="polite"></div>
-        </div>
-      </div>
-
       <div id="lapsList" class="files-list" style="margin-top:8px"></div>
 
-      <div style="margin-top:6px">
-        <label><input type="checkbox" id="shadeLaps" /> Shaded area between all laps</label>
-      </div>
+      <details class="collapsible-action" open>
+        <summary class="collapsible-action-summary">
+          <span class="collapsible-action-label">Plots</span>
+          <span class="collapsible-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="collapsible-action-body plots-body">
+          <div>
+            <strong>X Axis:</strong>
+            <label><input type="radio" name="xaxis" value="time" /> Time</label>
+            <label><input type="radio" name="xaxis" value="distance" checked /> Distance</label>
+            <label><input type="radio" name="xaxis" value="custom" /> Channel</label>
+            <select id="xCustomSelect"></select>
+          </div>
 
-      <div class="corner-detect-controls">
-        <label><input type="checkbox" id="showCorners" checked /> Show Corners</label>
-        <!-- <label>Shading opacity (%)
-          <input id="cornerShadeOpacity" type="number" min="0" max="100" step="1" value="5" />
-        </label>
-        <label><input type="checkbox" id="cornerSwapLR" /> Swap left/right</label> -->
-        <div id="cornerTrackInfo" class="corner-track-info" aria-live="polite"></div>
-      </div>
+          <div>
+            <strong>Y Channels:</strong>
+            <select id="ySelect" multiple size="6"></select>
+            <div id="selectedYColors" class="selected-y-colors"></div>
 
-      <div class="axis-controls">
-        <div>
-          <strong>X Axis:</strong>
-          <label><input type="radio" name="xaxis" value="time" /> Time</label>
-          <label><input type="radio" name="xaxis" value="distance" checked /> Distance</label>
-          <label><input type="radio" name="xaxis" value="custom" /> Channel</label>
-          <select id="xCustomSelect"></select>
-        </div>
-
-        <div>
-          <strong>Y Channels:</strong>
-          <select id="ySelect" multiple size="6"></select>
-          <div id="selectedYColors" class="selected-y-colors"></div>
-
-          <div id="quickModSection" class="quick-modify-section" hidden>
-            <div class="quick-mod-header">
-              <strong>Quick Modify:</strong>
-              <span id="quickModChannelName" class="quick-mod-channel-name"></span>
+            <div id="quickModSection" class="quick-modify-section" hidden>
+              <div class="quick-mod-header">
+                <strong>Quick Modify:</strong>
+                <span id="quickModChannelName" class="quick-mod-channel-name"></span>
+              </div>
+              <div class="quick-mod-options">
+                <label><input type="checkbox" id="quickModNegate" /> ×(−1) Negate</label>
+                <label><input type="checkbox" id="quickModReciprocal" /> 1/x Reciprocal</label>
+                <label><input type="checkbox" id="quickModFilter" /> Forward/Back Filter</label>
+                <div id="quickModFilterControls" class="quick-mod-filter-controls" hidden>
+                  <label>Window: <input id="quickModFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
+                  <select id="quickModFilterMode">
+                    <option value="time">seconds (time)</option>
+                    <option value="distance">meters (dist)</option>
+                  </select>
+                </div>
+              </div>
+              <button id="quickModCreateBtn" type="button" class="quick-mod-create-btn" disabled>Create Math Channel from Mods</button>
             </div>
-            <div class="quick-mod-options">
-              <label><input type="checkbox" id="quickModNegate" /> ×(−1) Negate</label>
-              <label><input type="checkbox" id="quickModReciprocal" /> 1/x Reciprocal</label>
-              <label><input type="checkbox" id="quickModFilter" /> Forward/Back Filter</label>
-              <div id="quickModFilterControls" class="quick-mod-filter-controls" hidden>
-                <label>Window: <input id="quickModFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
-                <select id="quickModFilterMode">
-                  <option value="time">seconds (time)</option>
-                  <option value="distance">meters (dist)</option>
-                </select>
+          </div>
+
+          <div class="math-channels-controls">
+            <div class="math-channels-header">
+              <strong>Math Channels:</strong>
+              <button id="addMathChannelBtn" type="button" class="math-ch-add-btn">+ Add</button>
+            </div>
+            <div id="mathChannelsList"></div>
+            <div id="mathChannelForm" hidden>
+              <div class="math-ch-field">
+                <label>Name</label>
+                <input id="mathChName" type="text" placeholder="e.g. Speed km/h" />
+              </div>
+              <div class="math-ch-field math-ch-expr-field">
+                <label>Expression (use {Channel Name})</label>
+                <input id="mathChExpr" type="text" placeholder="e.g. {Speed} * 3.6" autocomplete="off" />
+                <div id="mathChSuggestions" class="math-ch-suggestions" hidden></div>
+              </div>
+              <div id="mathChPreview" class="math-ch-preview" hidden></div>
+              <div class="math-ch-field">
+                <label>Unit (optional)</label>
+                <input id="mathChUnit" type="text" placeholder="e.g. km/h" style="width:50%" />
+              </div>
+              <div id="mathChError" class="math-ch-error" hidden></div>
+              <div class="math-ch-btns">
+                <button id="mathChSave" type="button">Add Channel</button>
+                <button id="mathChCancel" type="button">Cancel</button>
               </div>
             </div>
-            <button id="quickModCreateBtn" type="button" class="quick-mod-create-btn" disabled>Create Math Channel from Mods</button>
+          </div>
+
+          <div>
+            <label><input type="checkbox" id="shadeLaps" /> Shaded area between all laps</label>
+          </div>
+
+          <div class="corner-detect-controls">
+            <label><input type="checkbox" id="showCorners" checked /> Show Corners</label>
+            <!-- <label>Shading opacity (%)
+              <input id="cornerShadeOpacity" type="number" min="0" max="100" step="1" value="5" />
+            </label>
+            <label><input type="checkbox" id="cornerSwapLR" /> Swap left/right</label> -->
+            <div id="cornerTrackInfo" class="corner-track-info" aria-live="polite"></div>
           </div>
         </div>
+      </details>
 
-        <div class="math-channels-controls">
-          <div class="math-channels-header">
-            <strong>Math Channels:</strong>
-            <button id="addMathChannelBtn" type="button" class="math-ch-add-btn">+ Add</button>
+      <details class="collapsible-action">
+        <summary class="collapsible-action-summary">
+          <span class="collapsible-action-label">Map Controls</span>
+          <span class="collapsible-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="collapsible-action-body">
+          <label><input type="checkbox" id="showMap" checked /> Show Map</label>
+
+          <div class="map-color-controls">
+            <label><input type="checkbox" id="mapColorEnabled" checked /> Map Color</label>
+            <select id="mapColorSelect" checked></select>
+            <label>Map Render
+              <select id="mapDrawMode">
+                <option value="lines" selected>Lines</option>
+                <option value="scatter">Scatter (points)</option>
+              </select>
+            </label>
+            <label>Colormap
+              <select id="mapColorMode">
+                <option value="continuous">Continuous (Viridis)</option>
+                <option value="divergent" selected>Divergent</option>
+              </select>
+            </label>
           </div>
-          <div id="mathChannelsList"></div>
-          <div id="mathChannelForm" hidden>
-            <div class="math-ch-field">
-              <label>Name</label>
-              <input id="mathChName" type="text" placeholder="e.g. Speed km/h" />
+
+          <div class="map-align-controls">
+            <strong>Map Alignment (Lat/Lon to X/Y)</strong>
+            <div class="xy-row">
+              <label>X Offset (m): <input id="mapXOffset" type="number" step="0.1" value="0" /></label>
+              <label>Y Offset (m): <input id="mapYOffset" type="number" step="0.1" value="0" /></label>
             </div>
-            <div class="math-ch-field math-ch-expr-field">
-              <label>Expression (use {Channel Name})</label>
-              <input id="mathChExpr" type="text" placeholder="e.g. {Speed} * 3.6" autocomplete="off" />
-              <div id="mathChSuggestions" class="math-ch-suggestions" hidden></div>
+            <div class="xy-row">
+              <label>Center Lat (deg): <input id="mapCenterLat" type="number" step="0.000001" placeholder="e.g. 40.123456" /></label>
+              <label>Center Lng (deg): <input id="mapCenterLon" type="number" step="0.000001" placeholder="e.g. -79.123456" /></label>
             </div>
-            <div id="mathChPreview" class="math-ch-preview" hidden></div>
-            <div class="math-ch-field">
-              <label>Unit (optional)</label>
-              <input id="mathChUnit" type="text" placeholder="e.g. km/h" style="width:50%" />
-            </div>
-            <div id="mathChError" class="math-ch-error" hidden></div>
-            <div class="math-ch-btns">
-              <button id="mathChSave" type="button">Add Channel</button>
-              <button id="mathChCancel" type="button">Cancel</button>
-            </div>
+            <div id="mapFitInfo" class="map-fit-info" aria-live="polite"></div>
+            <button id="mapFitBtn" type="button">Fit X,Y to Lat/Lng</button>
+          </div>
+
+          <div>
+            <button id="clearBtn">Clear All</button>
           </div>
         </div>
+      </details>
 
-        <div class="map-color-controls">
-          <label><input type="checkbox" id="mapColorEnabled" checked /> Map Color</label>
-          <select id="mapColorSelect" checked></select>
-          <label>Map Render
-            <select id="mapDrawMode">
-              <option value="lines" selected>Lines</option>
-              <option value="scatter">Scatter (points)</option>
-            </select>
-          </label>
-          <label>Colormap
-            <select id="mapColorMode">
-              <option value="continuous">Continuous (Viridis)</option>
-              <option value="divergent" selected>Divergent</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="map-align-controls">
-          <strong>Map Alignment (Lat/Lon to X/Y)</strong>
-          <div class="xy-row">
-            <label>X Offset (m): <input id="mapXOffset" type="number" step="0.1" value="0" /></label>
-            <label>Y Offset (m): <input id="mapYOffset" type="number" step="0.1" value="0" /></label>
+      <div class="racing-line-controls">
+        <details id="racingLineDetails" class="collapsible-action">
+          <summary class="collapsible-action-summary">
+            <button id="fitRacingLineBtn" type="button" class="collapsible-action-btn">Fit Racing Line</button>
+            <span class="collapsible-caret" aria-hidden="true"></span>
+          </summary>
+          <div id="racingLineWholeCircuitPanel" class="racing-line-whole-circuit-panel collapsible-action-body">
+            <div class="racing-line-weight-controls">
+              <label>Data Fidelity (β)
+                <input id="racingLineBetaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
+                <span id="racingLineBetaWeightValue">1.0</span>
+                <input id="racingLineBetaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
+              </label>
+              <label>Curvature Smoothness (α)
+                <input id="racingLineAlphaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
+                <span id="racingLineAlphaWeightValue">1.0</span>
+                <input id="racingLineAlphaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
+              </label>
+            </div>
+            <div id="racingLineWholeCircuitStatus" class="racing-line-status" aria-live="polite"></div>
+            <div class="racing-line-actions">
+              <button id="racingLineWholeCircuitPrevCornerBtn" type="button">◀ Prev Corner</button>
+              <button id="racingLineWholeCircuitNextCornerBtn" type="button">Next Corner ▶</button>
+            </div>
+            <div id="racingLineCornerGammaRow" class="racing-line-weight-controls" hidden>
+              <label>Minimize Curvature (γ) — this corner only
+                <input id="racingLineGammaWeight" type="range" min="0" max="10" step="0.1" value="0" />
+                <span id="racingLineGammaWeightValue">0.0</span>
+                <input id="racingLineGammaWeightNumber" type="number" min="0" max="10" step="0.1" value="0" />
+              </label>
+            </div>
+            <div class="racing-line-hint">Click a control point on the map to remove it.</div>
+            <div class="racing-line-actions">
+              <button id="racingLineWholeCircuitAcceptBtn" type="button" disabled>Accept &amp; Add as Lap</button>
+              <button id="racingLineWholeCircuitDiscardBtn" type="button">Discard</button>
+            </div>
           </div>
-          <div class="xy-row">
-            <label>Center Lat (deg): <input id="mapCenterLat" type="number" step="0.000001" placeholder="e.g. 40.123456" /></label>
-            <label>Center Lng (deg): <input id="mapCenterLon" type="number" step="0.000001" placeholder="e.g. -79.123456" /></label>
-          </div>
-          <div id="mapFitInfo" class="map-fit-info" aria-live="polite"></div>
-          <button id="mapFitBtn" type="button">Fit X,Y to Lat/Lng</button>
-        </div>
+        </details>
 
-        <div>
-          <button id="clearBtn">Clear All</button>
+        <div class="vehicle-sim-controls">
+          <details id="vehicleSimDetails" class="collapsible-action">
+            <summary class="collapsible-action-summary">
+              <button id="vehicleSimulateBtn" type="button" class="collapsible-action-btn">Simulate Vehicle</button>
+              <span class="collapsible-caret" aria-hidden="true"></span>
+            </summary>
+            <div class="collapsible-action-body">
+              <div class="racing-line-weight-controls">
+                <label>Max Lateral (g)
+                  <input id="vehicleSimMaxLatG" type="number" min="0.1" step="0.05" value="1.0" />
+                </label>
+                <label>Max Longitudinal (g)
+                  <input id="vehicleSimMaxLongG" type="number" min="0.1" step="0.05" value="0.7" />
+                </label>
+                <label>Power (kW)
+                  <input id="vehicleSimPowerKw" type="number" min="0.1" step="1" value="32" />
+                </label>
+                <label>CdA (m²)
+                  <input id="vehicleSimCda" type="number" min="0.01" step="0.01" value="0.5" />
+                </label>
+                <label>Mass (kg)
+                  <input id="vehicleSimMass" type="number" min="1" step="1" value="235" />
+                </label>
+              </div>
+              <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
+            </div>
+          </details>
+          <div id="vehicleSimStatus" class="racing-line-status" aria-live="polite"></div>
         </div>
       </div>
 

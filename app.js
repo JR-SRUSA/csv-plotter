@@ -4,6 +4,7 @@
   const ySelect = document.getElementById('ySelect');
   const selectedYColors = document.getElementById('selectedYColors');
   const xCustomSelect = document.getElementById('xCustomSelect');
+  const showMapInput = document.getElementById('showMap');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
   const mapDrawModeSelect = document.getElementById('mapDrawMode');
@@ -13,7 +14,7 @@
   const cornerSwapLRInput = document.getElementById('cornerSwapLR');
   const cornerTrackInfoDiv = document.getElementById('cornerTrackInfo');
   const fitRacingLineBtn = document.getElementById('fitRacingLineBtn');
-  const racingLineWholeCircuitPanel = document.getElementById('racingLineWholeCircuitPanel');
+  const racingLineDetails = document.getElementById('racingLineDetails');
   const racingLineWholeCircuitStatus = document.getElementById('racingLineWholeCircuitStatus');
   const racingLineWholeCircuitAcceptBtn = document.getElementById('racingLineWholeCircuitAcceptBtn');
   const racingLineWholeCircuitDiscardBtn = document.getElementById('racingLineWholeCircuitDiscardBtn');
@@ -156,6 +157,9 @@
   let isApplyingAutoCenter = false;
   let mapOffsetManuallyAdjusted = false;
   let mapCenterManuallyAdjusted = false;
+  // Once the user explicitly checks/unchecks "Show Map", stop auto-deciding its
+  // state from whether the loaded data has map info -- respect their choice.
+  let showMapManuallyToggled = false;
   let lastAutoOffsetSignature = '';
   let lastTrackDefaultSignature = '';
   let mapViewState = null;
@@ -2227,7 +2231,7 @@
   // to a log that may no longer exist doesn't linger.
   function resetWholeCircuitFitState() {
     wholeCircuitFitPreview = null;
-    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = true;
+    if (racingLineDetails) racingLineDetails.open = false;
     if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
     if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = '';
     renderWholeCircuitOverlay();
@@ -2677,7 +2681,7 @@
     if (!ref) {
       wholeCircuitFitPreview = null;
       if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Unable to start fit: select at least one lap with map data.';
-      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineDetails) racingLineDetails.open = true;
       if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
       return;
     }
@@ -2686,7 +2690,7 @@
     if (!calc || typeof calc.buildWholeCircuitFit !== 'function') {
       wholeCircuitFitPreview = null;
       if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fitting is unavailable (calculations module not loaded).';
-      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineDetails) racingLineDetails.open = true;
       if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
       return;
     }
@@ -2705,7 +2709,7 @@
     if (!fit) {
       wholeCircuitFitPreview = null;
       if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fit failed: not enough logged map/radius data on the selected lap.';
-      if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+      if (racingLineDetails) racingLineDetails.open = true;
       if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
       return;
     }
@@ -2725,7 +2729,7 @@
       cornerGammaOverrides: new Array(cornerSegments.length).fill(0)
     };
     updateWholeCircuitStatusText();
-    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = false;
+    if (racingLineDetails) racingLineDetails.open = true;
     if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = false;
     // Auto-show the smoothed-curvature comparison so the fit quality is visible right away.
     if (ySelect) {
@@ -2863,7 +2867,7 @@
 
     wholeCircuitFitPreview = null;
     if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-    if (racingLineWholeCircuitPanel) racingLineWholeCircuitPanel.hidden = true;
+    if (racingLineDetails) racingLineDetails.open = false;
 
     renderFilesList();
     populateYSelect();
@@ -4410,6 +4414,19 @@
     return false;
   }
 
+  // Defaults the "Show Map" checkbox to whether the currently loaded data actually
+  // has renderable map info, unless the user has already made an explicit choice.
+  function syncShowMapDefault(hasAnyMapData) {
+    if (showMapInput && !showMapManuallyToggled) showMapInput.checked = hasAnyMapData;
+  }
+
+  // Gives the plot's grid column back to the plot itself when no map is being shown,
+  // rather than leaving an empty reserved column in its place.
+  function applyMapColumnLayout(showingMap) {
+    const plotSection = document.querySelector('.plot');
+    if (plotSection) plotSection.classList.toggle('no-map-column', !showingMap);
+  }
+
   function setMapDisplayMode(mode) {
     const mapsContainer = document.querySelector('.maps-container');
     if (mapsContainer) {
@@ -5042,12 +5059,16 @@
 
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
+    const hasAnyMapData = hasLeafletData || hasXYData;
+    syncShowMapDefault(hasAnyMapData);
+    const showMap = !showMapInput || showMapInput.checked;
+    applyMapColumnLayout(showMap && hasAnyMapData);
 
-    if (hasLeafletData) {
+    if (showMap && hasLeafletData) {
       setMapDisplayMode('leaflet');
       clearXYMapPlot();
       updateLeafletMap(selFiles, selectedLaps, 'geo');
-    } else if (hasXYData) {
+    } else if (showMap && hasXYData) {
       setMapDisplayMode('leaflet');
       clearXYMapPlot();
       updateLeafletMap(selFiles, selectedLaps, 'xy');
@@ -5079,7 +5100,11 @@
   if (cornerShadeOpacityInput) cornerShadeOpacityInput.addEventListener('input', ()=> updatePlot());
   if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
   if (fitRacingLineBtn) {
-    fitRacingLineBtn.addEventListener('click', () => {
+    fitRacingLineBtn.addEventListener('click', (event) => {
+      // The button lives inside a <summary>; without this the click would also
+      // toggle the <details> open/closed via the browser's default disclosure
+      // behavior, fighting with the open=true it's about to be set to below.
+      event.preventDefault();
       startWholeCircuitFit();
     });
   }
@@ -5089,7 +5114,10 @@
     });
   }
   if (vehicleSimulateBtn) {
-    vehicleSimulateBtn.addEventListener('click', () => {
+    vehicleSimulateBtn.addEventListener('click', (event) => {
+      // Same reasoning as the racing-line fit button: stop the click from also
+      // toggling the surrounding <details>, since this button is a pure action.
+      event.preventDefault();
       simulateVehicle();
     });
   }
@@ -5182,6 +5210,12 @@
     updatePlot();
   });
   if (mapFitBtn) mapFitBtn.addEventListener('click', () => runManualFit());
+  if (showMapInput) {
+    showMapInput.addEventListener('change', () => {
+      showMapManuallyToggled = true;
+      updatePlot();
+    });
+  }
   if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorEnabledInput) {
     mapColorEnabledInput.addEventListener('change', () => {
@@ -5331,6 +5365,7 @@
     resetWholeCircuitFitState();
     mapOffsetManuallyAdjusted = false;
     mapCenterManuallyAdjusted = false;
+    showMapManuallyToggled = false;
     lastAutoOffsetSignature = '';
     lastTrackDefaultSignature = '';
     mainPlotXRange = null;
@@ -5358,6 +5393,8 @@
     clearXYMapPlot();
     clearLeafletMapPlot();
     setMapDisplayMode('none');
+    syncShowMapDefault(false);
+    applyMapColumnLayout(false);
     if (window.innerWidth <= 980) setControlsOpen(true);
   });
 
@@ -5402,6 +5439,8 @@
   }
 
   setMapDisplayMode('none');
+  syncShowMapDefault(false);
+  applyMapColumnLayout(false);
   updateRacingLineWeightLabels();
 
   // Math channel UI handlers
