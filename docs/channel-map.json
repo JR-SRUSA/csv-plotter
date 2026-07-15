@@ -28,5 +28,17 @@
     "piboso": "Total Acceleration (calc)",
     "aim": "Total Acceleration (calc)",
     "motec": "Total Acceleration (calc)"
+  },
+  {
+    "displayName": "Altitude",
+    "piboso": "PosY_3D",
+    "aim": "GPS Altitude",
+    "motec": "Altitude"
+  },
+  {
+    "displayName": "Slope",
+    "piboso": "",
+    "aim": "GPS Slope",
+    "motec": "Slope"
   }
 ]

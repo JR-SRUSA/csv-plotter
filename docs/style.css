@@ -29,9 +29,8 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .file-decoder-edit:hover{background:#deeaff}
 .file-decoder-selector{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .file-decoder-select{font-size:0.82em;padding:2px 4px;max-width:160px}
-.axis-controls{margin-top:12px;display:flex;flex-direction:column;gap:8px}
-.axis-controls select{width:100%}
-.axis-controls #xCustomSelect{margin-top:6px}
+.plots-body select{width:100%}
+.plots-body #xCustomSelect{margin-top:6px}
 .selected-y-colors{display:flex;flex-direction:column;gap:6px;margin-top:8px}
 .selected-y-color-item{display:flex;align-items:center;gap:8px;font-size:0.92em}
 .selected-y-color-item input[type=color]{width:28px;height:24px;padding:0;border:none;background:transparent;cursor:pointer}
@@ -82,7 +81,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .corner-track-info{font-size:12px;color:#5a6b82;min-height:16px}
 .racing-line-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .racing-line-controls button{width:100%}
-.racing-line-whole-circuit-panel{padding:8px;border:1px solid #dce7f4;background:#f6faff;border-radius:4px;display:flex;flex-direction:column;gap:8px}
+.racing-line-whole-circuit-panel{display:flex;flex-direction:column;gap:8px}
 .racing-line-status{font-size:12px;color:#1a3c6b;line-height:1.35;min-height:16px}
 .racing-line-hint{font-size:11px;color:#5a6b82;font-style:italic}
 .racing-line-weight-controls{display:flex;flex-direction:column;gap:6px;padding:6px;border:1px dashed #c9d9ef;border-radius:4px;background:#fbfdff}
@@ -93,7 +92,28 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .racing-line-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .vehicle-sim-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
 .vehicle-sim-controls button{width:100%}
-.map-color-controls{padding-top:6px;border-top:1px dashed #e7edf5;display:flex;flex-direction:column;gap:6px}
+
+/* Button-with-caret "details" pattern: the summary looks like a normal button, but
+   the action button and the caret are separate click targets. The caret toggles the
+   <details> open/closed like a native disclosure triangle; the button's own click
+   handler calls preventDefault() so activating it runs the action instead of toggling. */
+/* flex-shrink:0 matters here: .controls is a flex column meant to scroll (not squish)
+   when its content overflows, but overflow:hidden resets a flex item's automatic
+   min-height to 0, making it freely shrinkable -- without this it gets crushed to
+   near-zero height instead of the sidebar scrolling once e.g. the laps list grows tall. */
+.collapsible-action{border:1px solid #cbd6e2;border-radius:4px;overflow:hidden;flex-shrink:0}
+.collapsible-action-summary{display:flex;align-items:stretch;list-style:none;cursor:pointer;background:#f1f6fb}
+.collapsible-action-summary::-webkit-details-marker{display:none}
+.collapsible-action-summary::marker{content:''}
+.collapsible-action-btn{flex:1;width:auto;min-width:0;border:none;border-radius:0;background:transparent;text-align:left;padding:6px 10px}
+.collapsible-action-btn:hover{background:#e6f0fb}
+.collapsible-action-label{flex:1;padding:6px 10px;font-weight:600;color:#0b2545}
+.collapsible-caret{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:30px;border-left:1px solid #dce7f4;color:#5a6b82}
+.collapsible-caret:hover{background:#e6f0fb}
+.collapsible-caret::before{content:'▸';font-size:11px;transition:transform 0.15s}
+.collapsible-action[open] > .collapsible-action-summary .collapsible-caret::before{transform:rotate(90deg)}
+.collapsible-action-body{padding:8px;border-top:1px solid #dce7f4;background:#f6faff;display:flex;flex-direction:column;gap:8px}
+.map-color-controls{display:flex;flex-direction:column;gap:6px}
 .map-color-controls select{width:100%}
 .map-align-controls{padding-top:6px;border-top:1px dashed #e7edf5}
 .map-align-controls input{width:100%}
@@ -101,6 +121,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .controls-version{margin-top:16px;padding-top:12px;border-top:1px solid #e7edf5;font-size:12px;color:#5a6b82}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 4px rgba(10,20,40,0.04)}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:#fff;padding:12px;border-radius:6px;box-shadow:0 1px 4px rgba(10,20,40,0.04);display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,20%);grid-template-areas:"plot maps";column-gap:12px;align-items:stretch}
+.plot.no-map-column{grid-template-columns:minmax(0,1fr)}
 #plotDiv{height:640px;width:100%;max-width:100%}
 .maps-container{display:block;margin-top:0;width:100%;grid-area:maps;align-self:stretch}
 .map-panel{min-width:0;height:100%;min-height:160px}
