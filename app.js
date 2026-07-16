@@ -924,25 +924,35 @@
       return false;
     }
 
+    let processed, builtRecord;
     try {
-      const processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
+      processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
       if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
         console.error('Decoder reprocess returned invalid data for log:', log.name, 'decoder:', decoderName);
         return false;
       }
+      builtRecord = buildLogRecord(log.id, log.name, processed, log.rawRows, decoderName);
+    } catch (err) {
+      console.error('Decoder reprocess threw an error for log:', log.name, 'decoder:', decoderName, err);
+      return false;
+    }
 
-      logs[logIdx] = buildLogRecord(log.id, log.name, processed, log.rawRows, decoderName);
-
+    // Decoding succeeded once we reach here. logs[logIdx] is only reassigned now, so a
+    // failure past this point is a rendering-pipeline problem, not a decode failure -- it
+    // shouldn't be reported as "could not reprocess" or cause handleDecoderSelectionChange
+    // to revert the dropdown back to the previous decoder while the underlying log data has
+    // in fact already switched to the new one.
+    logs[logIdx] = builtRecord;
+    try {
       populateYSelect();
       populateXCustomSelect();
       populateMapColorSelect();
       renderLapsList();
       updatePlot();
-      return true;
     } catch (err) {
-      console.error('Decoder reprocess threw an error for log:', log.name, 'decoder:', decoderName, err);
-      return false;
+      console.error('Rendering failed after reprocessing log with decoder:', log.name, 'decoder:', decoderName, err);
     }
+    return true;
   }
 
   function handleDecoderSelectionChange(selectEl, fileId, decoderName) {
@@ -1000,9 +1010,21 @@
     // Falls back to handing PapaParse the raw File directly (its normal auto-detect) if
     // the browser lacks file.text() or the processors module isn't loaded yet.
     const processors = window.LogFileProcessors;
+    const forceTsv = /\.dat$/i.test(file.name || '');
     if (typeof file.text === 'function' && processors && typeof processors.detectFieldDelimiter === 'function') {
+      // Two-argument .then(onFulfilled, onRejected) rather than .then(onFulfilled).catch(...):
+      // onFulfilled below runs Papa.parse synchronously, whose `complete` callback drives all
+      // downstream rendering (buildLogRecord, updatePlot, etc.). With .catch() chained after,
+      // any exception thrown anywhere in that rendering chain -- not just a failed file.text()
+      // read -- would be swallowed and misread as "reading failed", triggering the raw-File
+      // fallback below and silently re-parsing (and re-adding) the same file a second time.
+      // The two-argument form only invokes onRejected for a genuine file.text() rejection.
       file.text().then((text) => {
-        const delimiter = processors.detectFieldDelimiter(text);
+        // .dat logs are treated as tab/whitespace-delimited outright rather than
+        // sniffed -- they're never a comma CSV in practice, and content-sniffing a
+        // short or metadata-heavy file can be less reliable than just knowing from
+        // the extension.
+        const delimiter = forceTsv ? 'whitespace' : processors.detectFieldDelimiter(text);
         if (delimiter === 'whitespace') {
           Papa.parse(processors.normalizeWhitespaceDelimitedText(text), Object.assign({}, parseConfig, { delimiter: '\t' }));
         } else if (delimiter === 'tab') {
@@ -1010,7 +1032,7 @@
         } else {
           Papa.parse(text, parseConfig);
         }
-      }).catch(() => {
+      }, () => {
         Papa.parse(file, parseConfig);
       });
     } else {
