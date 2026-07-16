@@ -13,6 +13,45 @@
     return row.map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
   }
 
+  // Sniffs the raw file text (before Papa.parse tokenizes it) to tell whitespace-column
+  // logs apart from ordinary comma CSVs -- PapaParse's own delimiter auto-detection
+  // already covers comma/tab/semicolon/pipe, but can't express "one or more spaces" as
+  // a delimiter, so that case needs to be caught here and pre-normalized.
+  // Returns 'comma' | 'tab' | 'whitespace' | 'auto' (let Papa.parse's own guess run).
+  function detectFieldDelimiter(text) {
+    const lines = String(text || '')
+      .split(/\r\n|\r|\n/)
+      .map(l => l.trim())
+      .filter(l => l !== '')
+      .slice(0, 40);
+    if (lines.length === 0) return 'auto';
+
+    let commaLines = 0, tabLines = 0, wsLines = 0;
+    lines.forEach(line => {
+      if (line.indexOf(',') >= 0) commaLines += 1;
+      if (line.indexOf('\t') >= 0) tabLines += 1;
+      if (line.split(/\s+/).length >= 2) wsLines += 1;
+    });
+
+    const n = lines.length;
+    if (commaLines / n >= 0.5) return 'auto'; // comma CSV -- untouched, existing behavior
+    if (tabLines / n >= 0.5) return 'tab';
+    if (wsLines / n >= 0.5) return 'whitespace';
+    return 'auto';
+  }
+
+  // Collapses each line's whitespace runs (spaces and/or tabs) into a single tab so
+  // Papa.parse can tokenize a whitespace-column file with delimiter:'\t'. A metadata
+  // line's multi-word value (e.g. "Format Piboso CSV File") ends up split into several
+  // cells same as any other field -- extractMetadata()/getMetadataValueFromRows()
+  // rejoin multi-cell values with a single space, so that reassembles correctly.
+  function normalizeWhitespaceDelimitedText(text) {
+    return String(text || '')
+      .split(/\r\n|\r|\n/)
+      .map(line => line.trim().split(/\s+/).join('\t'))
+      .join('\n');
+  }
+
   function isDataLikeCell(value) {
     if (!value) return false;
     if (!isNaN(Number(value))) return true;
@@ -40,7 +79,14 @@
       const afterNextCells = normalizedCells(rows[i + 2]);
       const nextDataLike = nextCells.filter(isDataLikeCell).length;
       const afterNextDataLike = afterNextCells.filter(isDataLikeCell).length;
-      if (nextDataLike >= 2 || afterNextDataLike >= 2) {
+      // A genuine "header, units row, data" layout has the units row's cell count
+      // match the header's (one unit per column). A metadata row that happens to pass
+      // isHeaderRow too -- e.g. a whitespace-delimited file where a multi-word value
+      // like "Venue Laguna Seca" tokenized into several cells -- usually won't line up
+      // in width with the real header row that follows it. Use that mismatch to keep
+      // looking instead of locking onto the metadata row here.
+      const nextLooksLikeRealHeader = isHeaderRow(nextCells) && nextCells.length !== cells.length;
+      if (nextDataLike >= 2 || (afterNextDataLike >= 2 && !nextLooksLikeRealHeader)) {
         return i;
       }
     }
@@ -78,7 +124,10 @@
       let value = '';
       if (row.length > 1) {
         const values = row.slice(1).map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
-        value = values.join(', ');
+        // A single space, not ", " -- so a multi-word value that a whitespace-delimited
+        // file tokenized into several cells (e.g. "Piboso CSV File") reassembles exactly,
+        // matching the same format strings a comma CSV would produce in one cell.
+        value = values.join(' ');
       }
 
       if (value) {
@@ -116,7 +165,7 @@
       if (rowKey !== keyNorm) continue;
 
       const values = row.slice(1).map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
-      return values.join(', ');
+      return values.join(' ');
     }
     return '';
   }
@@ -1211,6 +1260,8 @@
     isStandardFormat,
     isScanMyTeslaFormat,
     isVIGradeFormat,
-    addTotalAccelerationCalculatedChannel
+    addTotalAccelerationCalculatedChannel,
+    detectFieldDelimiter,
+    normalizeWhitespaceDelimitedText
   };
 })();

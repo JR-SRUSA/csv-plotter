@@ -966,7 +966,7 @@
   }
 
   function parseFile(file) {
-    Papa.parse(file, {
+    const parseConfig = {
       header: false,
       dynamicTyping: true,
       skipEmptyLines: true,
@@ -992,7 +992,30 @@
         renderLapsList();
         updatePlot();
       }
-    });
+    };
+
+    // PapaParse's own delimiter guessing covers comma/tab/semicolon/pipe already, but
+    // can't express "one or more spaces" as a delimiter -- so a plain whitespace-column
+    // log (metadata lines and all) needs sniffing + pre-normalizing to tabs first.
+    // Falls back to handing PapaParse the raw File directly (its normal auto-detect) if
+    // the browser lacks file.text() or the processors module isn't loaded yet.
+    const processors = window.LogFileProcessors;
+    if (typeof file.text === 'function' && processors && typeof processors.detectFieldDelimiter === 'function') {
+      file.text().then((text) => {
+        const delimiter = processors.detectFieldDelimiter(text);
+        if (delimiter === 'whitespace') {
+          Papa.parse(processors.normalizeWhitespaceDelimitedText(text), Object.assign({}, parseConfig, { delimiter: '\t' }));
+        } else if (delimiter === 'tab') {
+          Papa.parse(text, Object.assign({}, parseConfig, { delimiter: '\t' }));
+        } else {
+          Papa.parse(text, parseConfig);
+        }
+      }).catch(() => {
+        Papa.parse(file, parseConfig);
+      });
+    } else {
+      Papa.parse(file, parseConfig);
+    }
   }
 
   function renderFilesList() {
