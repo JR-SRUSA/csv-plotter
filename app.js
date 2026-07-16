@@ -343,6 +343,7 @@
       // X axis reset — restore full-data Y range
       if (Object.prototype.hasOwnProperty.call(eventData, 'xaxis.autorange') && eventData['xaxis.autorange']) {
         mainPlotXRange = null;
+        resetLeafletMapToFullTrack();
 
         if (currentTsTraces.length === 0) return;
         let yMin = null, yMax = null;
@@ -593,6 +594,17 @@
       leafletViewState = { center: [center.lat, center.lng], zoom };
       leafletViewStateUserSet = true;
     }
+  }
+
+  // Clears any saved/manual map pan-zoom so the next render re-fits the map to the
+  // whole track, mirroring the main plot's x-axis reset (double-click / Home button).
+  function resetLeafletMapToFullTrack() {
+    if (!leafletMap || !leafletMapMode) return;
+    leafletViewState = null;
+    leafletViewStateUserSet = false;
+    leafletXYViewState = null;
+    leafletXYViewStateUserSet = false;
+    updateLeafletMap(getSelectedFiles(), getSelectedLaps(), leafletMapMode);
   }
 
   function computeMainYAxisRangesForXWindow(x0, x1) {
@@ -4425,6 +4437,12 @@
   function applyMapColumnLayout(showingMap) {
     const plotSection = document.querySelector('.plot');
     if (plotSection) plotSection.classList.toggle('no-map-column', !showingMap);
+    // Desktop drag-resize (resize-panels.js) sets an inline grid-template-columns that
+    // outranks the CSS class above, so it must be told directly and synchronously —
+    // before Leaflet measures the map container a few lines below this call.
+    if (typeof window.__csvPlotterSetMapVisible === 'function') {
+      window.__csvPlotterSetMapVisible(showingMap);
+    }
   }
 
   function setMapDisplayMode(mode) {
@@ -5214,6 +5232,7 @@
     showMapInput.addEventListener('change', () => {
       showMapManuallyToggled = true;
       updatePlot();
+      scheduleVisualizationResize();
     });
   }
   if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());

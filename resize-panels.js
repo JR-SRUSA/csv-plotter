@@ -1,5 +1,7 @@
 // Drag-to-resize panel handles — desktop only (min-width: 981px).
-// Self-contained: injects its own CSS, no coupling to app internals.
+// Self-contained: injects its own CSS, no coupling to app internals except the
+// window.__csvPlotterSetMapVisible(visible) hook app.js calls synchronously when
+// it toggles the "no-map-column" class (see note by setMapVisible below).
 // Dispatches window 'resize' on drag-end so Plotly/Leaflet redraw.
 (function () {
   'use strict';
@@ -7,6 +9,12 @@
   var STORAGE_KEY = 'csv-plotter-panel-sizes';
   var mq = window.matchMedia('(min-width: 981px)');
   var ready = false;
+  var savedMapsWidth = null;
+
+  // Populated once init() runs.
+  var plotSec = null;
+  var mapsEl = null;
+  var gapDiv = null;
 
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -45,14 +53,46 @@
     });
   }
 
+  function setMapsCols(w) {
+    plotSec.style.gridTemplateColumns = 'minmax(0,1fr) 8px ' + w + 'px';
+    plotSec.style.gridTemplateAreas   = '"plot resizer maps"';
+    plotSec.style.columnGap           = '0';
+  }
+
+  // Exposed so app.js can call it synchronously, in the same tick it toggles the
+  // "no-map-column" class. This MUST be synchronous (not a MutationObserver reacting
+  // to the class change): app.js measures/creates the Leaflet map right after toggling
+  // visibility, and if the grid columns haven't been restored yet at that moment,
+  // Leaflet bakes in a wrong container size (map overlaps the plot, wrong zoom level),
+  // which persists until another manual resize.
+  function setMapVisible(visible) {
+    if (!ready) return;
+    if (!visible) {
+      // Capture the current (pre-hide) width so we can restore it later — but only if
+      // the map column is actually currently showing, otherwise we'd overwrite the
+      // saved width with 0/garbage from an already-collapsed layout.
+      if (gapDiv.style.display !== 'none') {
+        var w = Math.round(mapsEl.getBoundingClientRect().width);
+        if (w) savedMapsWidth = w;
+      }
+      gapDiv.style.display = 'none';
+      plotSec.style.gridTemplateColumns = 'minmax(0,1fr)';
+      plotSec.style.gridTemplateAreas = '"plot"';
+    } else {
+      gapDiv.style.display = '';
+      setMapsCols(savedMapsWidth || 280);
+    }
+  }
+  window.__csvPlotterSetMapVisible = setMapVisible;
+
   function init() {
     if (ready) return;
 
     var controls = document.querySelector('.controls');
-    var plotSec  = document.querySelector('section.plot');
     var plotDiv  = document.getElementById('plotDiv');
-    var mapsEl   = document.querySelector('.maps-container');
-    if (!controls || !plotSec || !plotDiv || !mapsEl) return;
+    plotSec = document.querySelector('section.plot');
+    mapsEl  = document.querySelector('.maps-container');
+    if (!controls || !plotSec || !plotDiv || !mapsEl) { plotSec = null; mapsEl = null; return; }
 
     ready = true;
     injectStyles();
@@ -79,21 +119,19 @@
     );
 
     // 2. Plot/Maps column split — insert a drag handle between the two grid cells
-    var gapDiv = document.createElement('div');
+    gapDiv = document.createElement('div');
     gapDiv.className = 'rs-gap';
     gapDiv.style.cssText = 'grid-area:resizer;width:8px;min-width:8px';
     plotSec.insertBefore(gapDiv, mapsEl);
 
-    function setMapsCols(w) {
-      plotSec.style.gridTemplateColumns = 'minmax(0,1fr) 8px ' + w + 'px';
-      plotSec.style.gridTemplateAreas   = '"plot resizer maps"';
-      plotSec.style.columnGap           = '0';
-    }
     setMapsCols(Math.round(mapsEl.getBoundingClientRect().width) || 280);
 
     makeDrag(gapDiv, 'col-resize',
       function () { return Math.round(mapsEl.getBoundingClientRect().width); },
-      function (dx, _, w0) { setMapsCols(clamp(w0 - dx, 180, 700)); },
+      function (dx, _, w0) {
+        setMapsCols(clamp(w0 - dx, 180, 700));
+        savedMapsWidth = Math.round(mapsEl.getBoundingClientRect().width) || savedMapsWidth;
+      },
       saveSizes
     );
 
@@ -118,6 +156,12 @@
         if (sizes.plotHeight) plotDiv.style.height = sizes.plotHeight + 'px';
       }
     } catch (e) {}
+    savedMapsWidth = Math.round(mapsEl.getBoundingClientRect().width) || 280;
+
+    // Sync to whatever visibility state app.js already applied to .plot before we
+    // finished initializing (e.g. map hidden by default before this script's
+    // DOMContentLoaded handler ran).
+    setMapVisible(!plotSec.classList.contains('no-map-column'));
   }
 
   function teardown() {
