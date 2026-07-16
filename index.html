@@ -114,12 +114,30 @@
           </div>
 
           <div class="corner-detect-controls">
-            <label><input type="checkbox" id="showCorners" checked /> Show Corners</label>
+            <div class="corner-header-row">
+              <label><input type="checkbox" id="showCorners" checked /> Show Corners</label>
+              <button id="cornerEditToggleBtn" type="button" class="corner-edit-toggle-btn">Edit</button>
+            </div>
             <!-- <label>Shading opacity (%)
               <input id="cornerShadeOpacity" type="number" min="0" max="100" step="1" value="5" />
             </label>
             <label><input type="checkbox" id="cornerSwapLR" /> Swap left/right</label> -->
             <div id="cornerTrackInfo" class="corner-track-info" aria-live="polite"></div>
+
+            <div id="cornerEditorPanel" class="corner-editor-panel" hidden>
+              <div id="cornerEditorStatus" class="corner-editor-status" aria-live="polite"></div>
+              <div id="cornerEditorList" class="corner-editor-list"></div>
+              <div class="corner-editor-hint">Click "Combine From" on one segment, then "Combine To" on another to select everything between them, then merge them as one type below. Renumber a segment or give it a nickname directly in its row. Split by entering a fraction of the way through the segment (0.5 = halfway).</div>
+              <div class="corner-editor-merge-row">
+                <span>Merge selected as:</span>
+                <button id="cornerEditorMergeStraight" type="button" data-type="straight">Straight</button>
+                <button id="cornerEditorMergeLeft" type="button" data-type="left">Left</button>
+                <button id="cornerEditorMergeRight" type="button" data-type="right">Right</button>
+              </div>
+              <div class="corner-editor-footer-row">
+                <button id="cornerEditorResetBtn" type="button" class="corner-editor-reset-btn">Reset to Auto-Detected</button>
+              </div>
+            </div>
           </div>
         </div>
       </details>
@@ -239,7 +257,7 @@
         </div>
       </div>
 
-  <div class="controls-version" aria-label="Application version">Version 2026-07-16a</div>
+  <div class="controls-version" aria-label="Application version">Version 2026-07-16b</div>
     </section>
 
     <section class="plot">

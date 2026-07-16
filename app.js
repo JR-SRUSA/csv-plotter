@@ -13,6 +13,14 @@
   const cornerShadeOpacityInput = document.getElementById('cornerShadeOpacity');
   const cornerSwapLRInput = document.getElementById('cornerSwapLR');
   const cornerTrackInfoDiv = document.getElementById('cornerTrackInfo');
+  const cornerEditToggleBtn = document.getElementById('cornerEditToggleBtn');
+  const cornerEditorPanel = document.getElementById('cornerEditorPanel');
+  const cornerEditorList = document.getElementById('cornerEditorList');
+  const cornerEditorStatus = document.getElementById('cornerEditorStatus');
+  const cornerEditorMergeStraightBtn = document.getElementById('cornerEditorMergeStraight');
+  const cornerEditorMergeLeftBtn = document.getElementById('cornerEditorMergeLeft');
+  const cornerEditorMergeRightBtn = document.getElementById('cornerEditorMergeRight');
+  const cornerEditorResetBtn = document.getElementById('cornerEditorResetBtn');
   const fitRacingLineBtn = document.getElementById('fitRacingLineBtn');
   const racingLineDetails = document.getElementById('racingLineDetails');
   const racingLineWholeCircuitStatus = document.getElementById('racingLineWholeCircuitStatus');
@@ -143,6 +151,7 @@
   const CORNER_STRAIGHT_COLOR = COLORS[2]; // green
   const CORNER_RIGHT_COLOR = COLORS[1]; // orange
   const CORNER_LEFT_COLOR = COLORS[4]; // purple
+  const CORNER_TYPE_LABELS = { straight: 'Straight', left: 'Left', right: 'Right' };
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
   const CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
@@ -160,6 +169,7 @@
   // Once the user explicitly checks/unchecks "Show Map", stop auto-deciding its
   // state from whether the loaded data has map info -- respect their choice.
   let showMapManuallyToggled = false;
+  let lastAppliedShowMapColumn = null; // tracks whether the map grid column was shown last render
   let lastAutoOffsetSignature = '';
   let lastTrackDefaultSignature = '';
   let mapViewState = null;
@@ -179,6 +189,11 @@
   let isSyncingPlotHover = false;
   let lastLinkedHoverKey = null;
   let activeCornerHeadingSegments = []; // clickable corner/straight strip segments for current plot
+  let cornerEditMode = false;
+  let cornerEditorSegments = null; // in-memory {type,startDist,endDist}[] being edited
+  let cornerEditorSelected = new Set(); // selected row indices into cornerEditorSegments, for merging
+  let cornerEditorCombineFromIndex = null; // row index pinned as the "combine from" endpoint, or null
+  let cornerEditorVenueKey = ''; // normalizeVenueKey() of the venue the editor is currently bound to
   let activeCornerDataForFitting = null;
   let activeCornerReferenceForFitting = null;
   let wholeCircuitLeafletLayers = [];
@@ -2222,20 +2237,88 @@
       }
     }
     segments.push({ startDist: segStart, endDist: rows[rows.length - 1].dist, type: segType });
+    renumberCornerSegments(segments);
 
+    return { segments, trackLength: rows[rows.length - 1].dist };
+  }
+
+  // Assigns sequential corner/straight numbers to a segments array (mutates in place,
+  // matching the numbering computeCornerSegments produces) and returns it.
+  function renumberCornerSegments(segments) {
     let cornerNum = 0;
     let straightNum = 0;
     segments.forEach(seg => {
       if (seg.type === 'left' || seg.type === 'right') {
         cornerNum += 1;
         seg.number = cornerNum;
+        delete seg.straightNumber;
       } else {
         straightNum += 1;
         seg.straightNumber = straightNum;
+        delete seg.number;
       }
     });
+    return segments;
+  }
 
-    return { segments, trackLength: rows[rows.length - 1].dist };
+  // Wraps a raw {type,startDist,endDist,label?,nickname?}[] (e.g. from manual corner
+  // edits) into the same {segments, trackLength} shape computeCornerSegments returns,
+  // with default sequential numbers assigned (label/nickname, if set, override the
+  // default number for display -- see cornerSegmentDisplayNumber()).
+  function buildCornerDataFromSegments(segments, trackLength) {
+    const cloned = segments.map(s => ({
+      type: s.type, startDist: s.startDist, endDist: s.endDist,
+      label: s.label || '', nickname: s.nickname || ''
+    }));
+    renumberCornerSegments(cloned);
+    return { segments: cloned, trackLength };
+  }
+
+  // Clips a saved override's segments to the live reference lap's trackLength (and
+  // stretches the last segment to reach it), so small lap-to-lap distance variation
+  // doesn't leave a gap or overhang at the end of the corner strip.
+  function clampSegmentsToTrackLength(segments, trackLength) {
+    if (!Array.isArray(segments) || segments.length === 0 || !Number.isFinite(trackLength) || trackLength <= 0) {
+      return [];
+    }
+    const clipped = [];
+    segments.forEach(seg => {
+      const start = Math.max(0, Number(seg.startDist));
+      const end = Math.min(trackLength, Number(seg.endDist));
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+      clipped.push({ type: seg.type, startDist: start, endDist: end, label: seg.label || '', nickname: seg.nickname || '' });
+    });
+    if (clipped.length === 0) return [];
+    clipped[0].startDist = 0;
+    clipped[clipped.length - 1].endDist = trackLength;
+    return clipped;
+  }
+
+  // The number/id shown for a segment: the user's manual renumber ("label"), if set,
+  // otherwise the auto-assigned sequential default (per-type via renumberCornerSegments).
+  function cornerSegmentDisplayNumber(seg) {
+    const custom = seg.label != null ? String(seg.label).trim() : '';
+    if (custom !== '') return custom;
+    return String(seg.type === 'straight' ? seg.straightNumber : seg.number);
+  }
+
+  // Extracts the leading integer from a number/label like "6" or "6a" -> 6, or null if
+  // it doesn't start with a digit (used to compute a renumber cascade's shift amount).
+  function parseLeadingSegmentNumber(value) {
+    const match = /^(\d+)/.exec(String(value == null ? '' : value).trim());
+    return match ? parseInt(match[1], 10) : null;
+  }
+
+  // Compact "T3"/"S2" form used in the narrow corner strip on the main plot.
+  function formatCornerSegmentShortLabel(seg) {
+    return (seg.type === 'straight' ? 'S' : 'T') + cornerSegmentDisplayNumber(seg);
+  }
+
+  // Fuller "T3 (Left)"/"S2" form used in the corner editor list.
+  function formatCornerSegmentFullLabel(seg) {
+    const num = cornerSegmentDisplayNumber(seg);
+    if (seg.type === 'straight') return `S${num}`;
+    return `T${num} (${CORNER_TYPE_LABELS[seg.type]})`;
   }
 
   // Resets any in-progress whole-circuit fit preview and its map overlay -- called when
@@ -4786,19 +4869,38 @@
         fillcolor: color, opacity: 1, line: { width: 0.5, color: '#fff' }, layer: 'above'
       });
 
-      if (seg.type === 'left' || seg.type === 'right') {
+      const cx = (seg.startDist + seg.endDist) / 2;
+      const stripSpan = CORNER_STRIP_DOMAIN[1] - CORNER_STRIP_DOMAIN[0];
+      // Two fixed rows shared by every segment, so T1/T2/S1/... line up across the whole
+      // strip regardless of which segments happen to have a nickname: the nickname row
+      // is simply left blank (annotation omitted) when there isn't one.
+      // Symmetric about the strip's vertical center (0.5) so the pair reads as centered
+      // rather than pinned toward either edge.
+      const NICKNAME_ROW_Y = CORNER_STRIP_DOMAIN[0] + stripSpan * 0.64;
+      const NUMBER_ROW_Y = CORNER_STRIP_DOMAIN[0] + stripSpan * 0.36;
+
+      if (seg.nickname) {
         annotations.push({
-          x: (seg.startDist + seg.endDist) / 2, xref: 'x',
-          y: (CORNER_STRIP_DOMAIN[0] + CORNER_STRIP_DOMAIN[1]) / 2, yref: 'paper',
-          text: String(seg.number),
+          x: cx, xref: 'x',
+          y: NICKNAME_ROW_Y, yref: 'paper',
+          text: seg.nickname,
           showarrow: false,
-          font: { color: '#fff', size: 11 }
+          font: { color: '#fff', size: 8 }
         });
       }
+      annotations.push({
+        x: cx, xref: 'x',
+        y: NUMBER_ROW_Y, yref: 'paper',
+        text: formatCornerSegmentShortLabel(seg),
+        showarrow: false,
+        font: { color: '#fff', size: 10 }
+      });
       clickTargets.push({
         type: seg.type,
         number: seg.number,
         straightNumber: seg.straightNumber,
+        label: formatCornerSegmentFullLabel(seg),
+        nickname: seg.nickname || '',
         startDist: seg.startDist,
         endDist: seg.endDist
       });
@@ -4876,6 +4978,380 @@
     try { localStorage.setItem(TRACK_CORNER_METADATA_STORAGE_KEY, JSON.stringify(store)); } catch {}
   }
 
+  // Manual corner-boundary overrides made in the corner editor -- unlike the write-only
+  // snapshot above, this store IS read back (see updatePlot()) and takes priority over
+  // auto-detection for a venue once the user has edited its corners.
+  const TRACK_CORNER_OVERRIDES_STORAGE_KEY = 'trackCornerOverrides';
+
+  function loadTrackCornerOverridesStore() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(TRACK_CORNER_OVERRIDES_STORAGE_KEY) || '{}');
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function getCornerOverrideForVenue(venue) {
+    const venueKey = normalizeVenueKey(venue);
+    if (!venueKey) return null;
+    const entry = loadTrackCornerOverridesStore()[venueKey];
+    if (!entry || !Array.isArray(entry.segments) || entry.segments.length === 0) return null;
+    return entry;
+  }
+
+  function setCornerOverrideForVenue(venue, segments, trackLength) {
+    const venueKey = normalizeVenueKey(venue);
+    if (!venueKey || !Array.isArray(segments) || segments.length === 0) return;
+    const store = loadTrackCornerOverridesStore();
+    store[venueKey] = {
+      venue,
+      trackLength,
+      segments: segments.map(s => ({ type: s.type, startDist: s.startDist, endDist: s.endDist, label: s.label || '', nickname: s.nickname || '' })),
+      savedAt: new Date().toISOString()
+    };
+    try { localStorage.setItem(TRACK_CORNER_OVERRIDES_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
+  function clearCornerOverrideForVenue(venue) {
+    const venueKey = normalizeVenueKey(venue);
+    if (!venueKey) return;
+    const store = loadTrackCornerOverridesStore();
+    if (!(venueKey in store)) return;
+    delete store[venueKey];
+    try { localStorage.setItem(TRACK_CORNER_OVERRIDES_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
+  // Saves the in-progress editor segments as this venue's override, using the actual
+  // (non-normalized) venue name from the current reference lap for display purposes.
+  function persistCornerEditorSegments() {
+    if (!cornerEditorVenueKey || !Array.isArray(cornerEditorSegments) || cornerEditorSegments.length === 0) return;
+    const ref = getReferenceLapForCorners(getSelectedFiles(), getSelectedLaps());
+    const venue = ref ? getLogVenue(ref.log) : cornerEditorVenueKey;
+    const trackLength = cornerEditorSegments[cornerEditorSegments.length - 1].endDist;
+    setCornerOverrideForVenue(venue, cornerEditorSegments, trackLength);
+  }
+
+  function closeCornerEditor() {
+    cornerEditMode = false;
+    cornerEditorSegments = null;
+    cornerEditorSelected = new Set();
+    cornerEditorCombineFromIndex = null;
+    cornerEditorVenueKey = '';
+    if (cornerEditorPanel) cornerEditorPanel.hidden = true;
+    if (cornerEditToggleBtn) {
+      cornerEditToggleBtn.classList.remove('is-active');
+      cornerEditToggleBtn.textContent = 'Edit';
+    }
+    if (cornerEditorStatus) cornerEditorStatus.textContent = '';
+  }
+
+  function openCornerEditor() {
+    if (cornerEditorPanel) cornerEditorPanel.hidden = false;
+    if (cornerEditorStatus) cornerEditorStatus.textContent = '';
+
+    const xModeInput = document.querySelector('input[name=xaxis]:checked');
+    const xMode = xModeInput ? xModeInput.value : null;
+    if (xMode !== 'distance') {
+      if (cornerEditorStatus) cornerEditorStatus.textContent = 'Switch X Axis to "Distance" to edit corners.';
+      return;
+    }
+
+    const ref = getReferenceLapForCorners(getSelectedFiles(), getSelectedLaps());
+    if (!ref) {
+      if (cornerEditorStatus) cornerEditorStatus.textContent = 'Select a lap with distance data to edit corners.';
+      return;
+    }
+
+    const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
+    const autoData = computeCornerSegments(ref.log, ref.lap, swapLeftRight);
+    if (!autoData || !Array.isArray(autoData.segments) || autoData.segments.length === 0) {
+      if (cornerEditorStatus) cornerEditorStatus.textContent = 'No corner data detected for this lap yet.';
+      return;
+    }
+
+    if (showCornersInput && !showCornersInput.checked) showCornersInput.checked = true;
+
+    const venue = getLogVenue(ref.log);
+    const override = getCornerOverrideForVenue(venue);
+
+    cornerEditMode = true;
+    cornerEditorVenueKey = normalizeVenueKey(venue);
+    cornerEditorSegments = override
+      ? clampSegmentsToTrackLength(override.segments, autoData.trackLength)
+      : autoData.segments.map(s => ({ type: s.type, startDist: s.startDist, endDist: s.endDist, label: '', nickname: '' }));
+    cornerEditorSelected = new Set();
+    cornerEditorCombineFromIndex = null;
+
+    if (cornerEditToggleBtn) {
+      cornerEditToggleBtn.classList.add('is-active');
+      cornerEditToggleBtn.textContent = 'Close';
+    }
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  function changeCornerEditorSegmentType(i, newType) {
+    if (!Array.isArray(cornerEditorSegments) || !cornerEditorSegments[i]) return;
+    if (newType !== 'straight' && newType !== 'left' && newType !== 'right') return;
+    cornerEditorSegments[i].type = newType;
+    persistCornerEditorSegments();
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  // fraction is 0–1, how far through the segment to place the split (0.5 = halfway).
+  function splitCornerEditorSegment(i, fraction) {
+    const seg = Array.isArray(cornerEditorSegments) ? cornerEditorSegments[i] : null;
+    if (!seg) return;
+    if (!Number.isFinite(fraction) || fraction <= 0 || fraction >= 1) {
+      if (cornerEditorStatus) cornerEditorStatus.textContent = 'Split fraction must be between 0 and 1 (e.g. 0.5 for the midpoint).';
+      return;
+    }
+
+    const MIN_GAP = 0.5; // meters -- avoid degenerate near-zero-length segments
+    const atDist = seg.startDist + fraction * (seg.endDist - seg.startDist);
+    if (atDist <= seg.startDist + MIN_GAP || atDist >= seg.endDist - MIN_GAP) {
+      if (cornerEditorStatus) {
+        cornerEditorStatus.textContent =
+          `That fraction lands too close to the edge of the segment (${seg.startDist.toFixed(1)}–${seg.endDist.toFixed(1)} m); pick one nearer the middle.`;
+      }
+      return;
+    }
+    if (cornerEditorStatus) cornerEditorStatus.textContent = '';
+
+    // Splitting invalidates any manual number/nickname on the original segment -- it no
+    // longer refers to one physical corner/straight, so both halves start fresh.
+    const second = { type: seg.type, startDist: atDist, endDist: seg.endDist, label: '', nickname: '' };
+    seg.endDist = atDist;
+    seg.label = '';
+    seg.nickname = '';
+    cornerEditorSegments.splice(i + 1, 0, second);
+    cornerEditorSelected = new Set(); // row indices shifted -- drop selection rather than point at the wrong rows
+    cornerEditorCombineFromIndex = null;
+    persistCornerEditorSegments();
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  function mergeCornerEditorSelected(newType) {
+    if (!Array.isArray(cornerEditorSegments) || cornerEditorSelected.size < 2) {
+      if (cornerEditorStatus) cornerEditorStatus.textContent = 'Select at least 2 adjacent segments to merge.';
+      return;
+    }
+    const indices = Array.from(cornerEditorSelected).sort((a, b) => a - b);
+    for (let k = 1; k < indices.length; k++) {
+      if (indices[k] !== indices[k - 1] + 1) {
+        if (cornerEditorStatus) cornerEditorStatus.textContent = 'Selected segments must be adjacent to merge.';
+        return;
+      }
+    }
+
+    const first = indices[0];
+    const last = indices[indices.length - 1];
+    // Merging combines multiple segments into one -- their individual numbers/nicknames
+    // no longer apply, so the result starts fresh (the user can renumber/rename it).
+    const merged = { type: newType, startDist: cornerEditorSegments[first].startDist, endDist: cornerEditorSegments[last].endDist, label: '', nickname: '' };
+    cornerEditorSegments.splice(first, last - first + 1, merged);
+    cornerEditorSelected = new Set();
+    cornerEditorCombineFromIndex = null;
+    if (cornerEditorStatus) cornerEditorStatus.textContent = '';
+    persistCornerEditorSegments();
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  // Renumbers segment i and, if the new number is a simple shift from the old one (e.g.
+  // T6 -> T7), cascades that same shift to every later segment of the same category
+  // (corners only shift corners, straights only shift straights) so the sequence stays
+  // consistent -- "T6 -> T7" pushes what was T7 to T8, T8 to T9, etc. Non-numeric labels
+  // like "2a" carry their leading number ("2") through the shift ("2a" -> "3a").
+  // A same-value edit (e.g. "6" -> "6a") has zero delta, so nothing else moves.
+  function setCornerEditorSegmentLabel(i, value) {
+    if (!Array.isArray(cornerEditorSegments) || !cornerEditorSegments[i]) return;
+    const seg = cornerEditorSegments[i];
+    const newLabel = String(value == null ? '' : value).trim();
+
+    // Snapshot of *pre-edit* effective numbers, to compute the shift and read every
+    // later segment's current number before any of them change.
+    const numbered = buildCornerDataFromSegments(cornerEditorSegments, 0).segments;
+    const oldNum = parseLeadingSegmentNumber(cornerSegmentDisplayNumber(numbered[i]));
+    const newNum = parseLeadingSegmentNumber(newLabel);
+
+    seg.label = newLabel;
+
+    if (Number.isFinite(oldNum) && Number.isFinite(newNum) && newNum !== oldNum) {
+      const delta = newNum - oldNum;
+      const category = seg.type === 'straight' ? 'straight' : 'corner';
+      for (let k = i + 1; k < cornerEditorSegments.length; k++) {
+        const otherType = cornerEditorSegments[k].type;
+        const otherCategory = otherType === 'straight' ? 'straight' : 'corner';
+        if (otherCategory !== category) continue;
+        const current = cornerSegmentDisplayNumber(numbered[k]);
+        const m = /^(\d+)(.*)$/.exec(current);
+        if (!m) continue; // no leading number to shift -- leave it as-is
+        cornerEditorSegments[k].label = String(parseInt(m[1], 10) + delta) + m[2];
+      }
+    }
+
+    persistCornerEditorSegments();
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  function setCornerEditorSegmentNickname(i, value) {
+    if (!Array.isArray(cornerEditorSegments) || !cornerEditorSegments[i]) return;
+    cornerEditorSegments[i].nickname = String(value == null ? '' : value).trim();
+    persistCornerEditorSegments();
+    updatePlot();
+  }
+
+  function resetCornerEditorToAutoDetected() {
+    const ref = getReferenceLapForCorners(getSelectedFiles(), getSelectedLaps());
+    if (!ref) return;
+    const venue = getLogVenue(ref.log);
+    clearCornerOverrideForVenue(venue);
+
+    const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
+    const autoData = computeCornerSegments(ref.log, ref.lap, swapLeftRight);
+    cornerEditorSegments = autoData
+      ? autoData.segments.map(s => ({ type: s.type, startDist: s.startDist, endDist: s.endDist, label: '', nickname: '' }))
+      : [];
+    cornerEditorSelected = new Set();
+    cornerEditorCombineFromIndex = null;
+    if (cornerEditorStatus) cornerEditorStatus.textContent = 'Reset to auto-detected corners.';
+    renderCornerEditorPanel();
+    updatePlot();
+  }
+
+  function renderCornerEditorPanel() {
+    if (!cornerEditorList || !Array.isArray(cornerEditorSegments)) return;
+
+    // Cloned + renumbered copy purely to compute default T#/S# numbers for display;
+    // indices line up 1:1 with cornerEditorSegments since it's built from the same order.
+    const numbered = buildCornerDataFromSegments(cornerEditorSegments, 0).segments;
+
+    cornerEditorList.innerHTML = '';
+    cornerEditorSegments.forEach((seg, i) => {
+      const row = document.createElement('div');
+      row.className = 'corner-editor-row'
+        + (cornerEditorSelected.has(i) ? ' is-selected' : '')
+        + (cornerEditorCombineFromIndex === i ? ' is-combine-from' : '');
+
+      // Range-pick a merge target: click "Combine From" on the start segment, then
+      // "Combine To" on the end segment -- every segment in between gets selected,
+      // avoiding a checkbox-per-row click-fest when jittery data produces many tiny
+      // segments in a row.
+      const combineBtn = document.createElement('button');
+      combineBtn.type = 'button';
+      combineBtn.className = 'corner-editor-combine-btn';
+      if (cornerEditorCombineFromIndex === i) {
+        combineBtn.textContent = 'Cancel';
+        combineBtn.classList.add('is-picking');
+        combineBtn.title = 'Cancel combining from this segment';
+        combineBtn.addEventListener('click', () => {
+          cornerEditorCombineFromIndex = null;
+          renderCornerEditorPanel();
+        });
+      } else if (cornerEditorCombineFromIndex !== null) {
+        combineBtn.textContent = 'Combine To';
+        combineBtn.addEventListener('click', () => {
+          const lo = Math.min(cornerEditorCombineFromIndex, i);
+          const hi = Math.max(cornerEditorCombineFromIndex, i);
+          const range = new Set();
+          for (let k = lo; k <= hi; k++) range.add(k);
+          cornerEditorSelected = range;
+          cornerEditorCombineFromIndex = null;
+          if (cornerEditorStatus) cornerEditorStatus.textContent = '';
+          renderCornerEditorPanel();
+        });
+      } else {
+        combineBtn.textContent = 'Combine From';
+        combineBtn.addEventListener('click', () => {
+          cornerEditorCombineFromIndex = i;
+          cornerEditorSelected = new Set();
+          renderCornerEditorPanel();
+        });
+      }
+      row.appendChild(combineBtn);
+
+      // Composite "T[2] (dropdown)" id: prefix letter, an inline renumber box, and the
+      // type dropdown standing in for the old "(Right)" text -- replaces what used to be
+      // a separate full-text label span plus a full-row type <select>.
+      const idWrap = document.createElement('span');
+      idWrap.className = 'corner-editor-id';
+
+      const prefix = document.createElement('span');
+      prefix.className = 'corner-editor-prefix';
+      prefix.textContent = seg.type === 'straight' ? 'S' : 'T';
+      idWrap.appendChild(prefix);
+
+      const numberInput = document.createElement('input');
+      numberInput.type = 'text';
+      numberInput.className = 'corner-editor-number-input';
+      numberInput.placeholder = '#';
+      numberInput.title = 'Renumber this segment -- later ones shift to stay sequential';
+      numberInput.value = cornerSegmentDisplayNumber(numbered[i]);
+      numberInput.addEventListener('change', () => setCornerEditorSegmentLabel(i, numberInput.value));
+      idWrap.appendChild(numberInput);
+
+      const openParen = document.createElement('span');
+      openParen.textContent = '(';
+      idWrap.appendChild(openParen);
+
+      const select = document.createElement('select');
+      select.className = 'corner-editor-type-select';
+      ['straight', 'left', 'right'].forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = CORNER_TYPE_LABELS[t];
+        if (seg.type === t) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', () => changeCornerEditorSegmentType(i, select.value));
+      idWrap.appendChild(select);
+
+      const closeParen = document.createElement('span');
+      closeParen.textContent = ')';
+      idWrap.appendChild(closeParen);
+
+      row.appendChild(idWrap);
+
+      const range = document.createElement('span');
+      range.className = 'corner-editor-row-range';
+      const len = seg.endDist - seg.startDist;
+      range.textContent = `${seg.startDist.toFixed(1)}–${seg.endDist.toFixed(1)} m (${len.toFixed(1)} m)`;
+      row.appendChild(range);
+
+      const nicknameInput = document.createElement('input');
+      nicknameInput.type = 'text';
+      nicknameInput.className = 'corner-editor-nickname-input';
+      nicknameInput.placeholder = 'nickname (optional)';
+      nicknameInput.value = seg.nickname || '';
+      nicknameInput.addEventListener('change', () => setCornerEditorSegmentNickname(i, nicknameInput.value));
+      row.appendChild(nicknameInput);
+
+      const splitWrap = document.createElement('span');
+      splitWrap.className = 'corner-editor-split';
+      const splitInput = document.createElement('input');
+      splitInput.type = 'number';
+      splitInput.min = '0.01';
+      splitInput.max = '0.99';
+      splitInput.step = '0.05';
+      splitInput.value = '0.5';
+      splitInput.title = 'Fraction of the way through this segment (0–1, e.g. 0.5 = halfway)';
+      const splitBtn = document.createElement('button');
+      splitBtn.type = 'button';
+      splitBtn.textContent = 'Split';
+      splitBtn.addEventListener('click', () => splitCornerEditorSegment(i, Number(splitInput.value)));
+      splitWrap.appendChild(splitInput);
+      splitWrap.appendChild(splitBtn);
+      row.appendChild(splitWrap);
+
+      cornerEditorList.appendChild(row);
+    });
+  }
+
   function updatePlot() {
     const selFiles = getSelectedFiles();
     const selectedYChannels = getSelectedY();
@@ -4902,12 +5378,35 @@
     const cornersEnabled = !!(showCornersInput && showCornersInput.checked);
     let cornerData = null;
     let cornerRef = null;
+    let cornerVenueKeyForRender = '';
     if (cornersEnabled && xMode === 'distance') {
       cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
       if (cornerRef) {
         const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
-        cornerData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+        const autoData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+        const venue = getLogVenue(cornerRef.log);
+        cornerVenueKeyForRender = normalizeVenueKey(venue);
+
+        if (cornerEditMode && cornerEditorSegments && cornerEditorVenueKey === cornerVenueKeyForRender) {
+          // Live preview of in-progress edits, not yet reflected in computeCornerSegments.
+          cornerData = buildCornerDataFromSegments(cornerEditorSegments, autoData ? autoData.trackLength : 0);
+        } else {
+          const override = getCornerOverrideForVenue(venue);
+          if (override) {
+            const trackLength = autoData ? autoData.trackLength : override.trackLength;
+            cornerData = buildCornerDataFromSegments(clampSegmentsToTrackLength(override.segments, trackLength), trackLength);
+          } else {
+            cornerData = autoData;
+          }
+        }
       }
+    }
+    // The editor is bound to one venue at a time; close it if the selection no longer
+    // resolves to that venue (different file/lap picked, corners toggled off, or X axis
+    // switched away from Distance) so it never shows stale segments against a mismatched
+    // track. Safe to call mid-render: cornerData above is already resolved correctly.
+    if (cornerEditMode && cornerVenueKeyForRender !== cornerEditorVenueKey) {
+      closeCornerEditor();
     }
     const showCornerStrip = !!(cornerData && cornerData.segments.length > 0);
     activeCornerDataForFitting = cornerData;
@@ -5080,7 +5579,19 @@
     const hasAnyMapData = hasLeafletData || hasXYData;
     syncShowMapDefault(hasAnyMapData);
     const showMap = !showMapInput || showMapInput.checked;
-    applyMapColumnLayout(showMap && hasAnyMapData);
+    const showingMapColumn = showMap && hasAnyMapData;
+    applyMapColumnLayout(showingMapColumn);
+    // Plotly's own responsive:true resize-detection doesn't reliably catch a container
+    // width change caused by *our* grid-column edit above -- most visibly the very first
+    // time the map appears (Plotly.react already drew the plot at the old, full width a
+    // few lines up, before we knew whether the map column would be reserved), leaving
+    // the map visually overlapping the plot until something else happens to trigger a
+    // resize. Explicitly resizing whenever this column's shown/hidden state changes
+    // closes that gap.
+    if (showingMapColumn !== lastAppliedShowMapColumn) {
+      lastAppliedShowMapColumn = showingMapColumn;
+      scheduleVisualizationResize();
+    }
 
     if (showMap && hasLeafletData) {
       setMapDisplayMode('leaflet');
@@ -5117,6 +5628,20 @@
   if (showCornersInput) showCornersInput.addEventListener('change', ()=> updatePlot());
   if (cornerShadeOpacityInput) cornerShadeOpacityInput.addEventListener('input', ()=> updatePlot());
   if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
+  if (cornerEditToggleBtn) {
+    cornerEditToggleBtn.addEventListener('click', () => {
+      if (cornerEditMode) {
+        closeCornerEditor();
+        updatePlot();
+      } else {
+        openCornerEditor();
+      }
+    });
+  }
+  if (cornerEditorMergeStraightBtn) cornerEditorMergeStraightBtn.addEventListener('click', () => mergeCornerEditorSelected('straight'));
+  if (cornerEditorMergeLeftBtn) cornerEditorMergeLeftBtn.addEventListener('click', () => mergeCornerEditorSelected('left'));
+  if (cornerEditorMergeRightBtn) cornerEditorMergeRightBtn.addEventListener('click', () => mergeCornerEditorSelected('right'));
+  if (cornerEditorResetBtn) cornerEditorResetBtn.addEventListener('click', () => resetCornerEditorToAutoDetected());
   if (fitRacingLineBtn) {
     fitRacingLineBtn.addEventListener('click', (event) => {
       // The button lives inside a <summary>; without this the click would also
