@@ -46,6 +46,8 @@
   const vehicleSimUseElevationInput = document.getElementById('vehicleSimUseElevation');
   const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
   const vehicleSimStatus = document.getElementById('vehicleSimStatus');
+  const uiPanel7 = document.getElementById('uiPanel7');
+  const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
@@ -5986,6 +5988,41 @@
   syncShowMapDefault(false);
   applyMapColumnLayout(false);
   updateRacingLineWeightLabels();
+
+  const PANEL7_FLAG_KEY = 'uiFlag7';
+  const PANEL7_TARGET = 7;
+  const PANEL7_TIMEOUT_MS = 1500;
+  let panel7Count = 0;
+  let panel7Timer = null;
+
+  if (uiPanel7) {
+    try {
+      if (localStorage.getItem(PANEL7_FLAG_KEY) === '1') uiPanel7.hidden = false;
+    } catch {}
+  }
+
+  if (appVersionLabel && uiPanel7) {
+    appVersionLabel.style.userSelect = 'none';
+    appVersionLabel.addEventListener('click', () => {
+      if (!uiPanel7.hidden) {
+        uiPanel7.hidden = true;
+        try { localStorage.removeItem(PANEL7_FLAG_KEY); } catch {}
+        panel7Count = 0;
+        clearTimeout(panel7Timer);
+        return;
+      }
+
+      clearTimeout(panel7Timer);
+      panel7Count += 1;
+      panel7Timer = setTimeout(() => { panel7Count = 0; }, PANEL7_TIMEOUT_MS);
+
+      if (panel7Count >= PANEL7_TARGET) {
+        panel7Count = 0;
+        uiPanel7.hidden = false;
+        try { localStorage.setItem(PANEL7_FLAG_KEY, '1'); } catch {}
+      }
+    });
+  }
 
   // Math channel UI handlers
   function showMathChError(msg) {

@@ -39,7 +39,7 @@ function incrementSuffix(suffix) {
   return chars.join('');
 }
 
-const versionPattern = /(<div class="controls-version" aria-label="Application version">)Version\s+(\d{4}-\d{2}-\d{2}|\d{8})([a-z]+)(<\/div>)/;
+const versionPattern = /(<div[^>]*\bclass="controls-version"[^>]*>)Version\s+(\d{4}-\d{2}-\d{2}|\d{8})([a-z]+)(<\/div>)/;
 const match = html.match(versionPattern);
 
 if (!match) {
