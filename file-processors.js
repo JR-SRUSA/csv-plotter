@@ -315,7 +315,11 @@
   }
 
   function processGenericRows(rows, headerRowIndex, details = {}) {
-    const source = details.source || 'Unknown';
+    // 'Generic' (not 'Unknown') so this matches the 'Generic' entry in AVAILABLE_DECODERS --
+    // otherwise resolveDecoderName() can't map the source back to a decoder, no <option>
+    // ends up marked selected, and the file list's decoder dropdown silently falls back to
+    // displaying its first entry (GP Bikes) regardless of what actually decoded the file.
+    const source = details.source || 'Generic';
     const format = details.format || 'Unknown';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
   }
