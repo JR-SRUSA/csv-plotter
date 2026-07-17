@@ -59,6 +59,11 @@
             <select id="ySelect" multiple size="6"></select>
             <div id="selectedYColors" class="selected-y-colors"></div>
 
+            <div class="color-axis-controls">
+              <label><input type="checkbox" id="colorAxisEnabled" /> Color Axis</label>
+              <select id="colorAxisSelect" disabled></select>
+            </div>
+
             <div id="quickModSection" class="quick-modify-section" hidden>
               <div class="quick-mod-header">
                 <strong>Quick Modify:</strong>
@@ -105,6 +110,34 @@
               <div class="math-ch-btns">
                 <button id="mathChSave" type="button">Add Channel</button>
                 <button id="mathChCancel" type="button">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="data-filters-controls">
+            <div class="data-filters-header">
+              <label><input type="checkbox" id="dataFiltersEnabled" checked /> <strong>Data Filters:</strong></label>
+              <button id="addDataFilterBtn" type="button" class="data-filter-add-btn">+ Add</button>
+            </div>
+            <div id="dataFiltersList"></div>
+            <div id="dataFilterForm" hidden>
+              <div class="data-filter-field">
+                <label>Channel</label>
+                <select id="dataFilterChannel"></select>
+              </div>
+              <div id="dataFilterRangeHint" class="data-filter-range-hint"></div>
+              <div id="dataFilterRangeField" class="data-filter-field data-filter-range-field">
+                <label>Min <input id="dataFilterMin" type="number" step="any" placeholder="no lower bound" /></label>
+                <label>Max <input id="dataFilterMax" type="number" step="any" placeholder="no upper bound" /></label>
+              </div>
+              <div id="dataFilterDiscreteField" class="data-filter-field" hidden>
+                <label>Values</label>
+                <select id="dataFilterValues" multiple size="6"></select>
+              </div>
+              <div id="dataFilterError" class="data-filter-error" hidden></div>
+              <div class="data-filter-btns">
+                <button id="dataFilterSave" type="button">Add Filter</button>
+                <button id="dataFilterCancel" type="button">Cancel</button>
               </div>
             </div>
           </div>
@@ -262,6 +295,7 @@
 
     <section class="plot">
       <div id="plotDiv"></div>
+      <div id="colorAxisLegend" class="color-axis-legend" hidden></div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>
         <div id="leafletMapDiv" class="map-panel"></div>

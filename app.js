@@ -3,6 +3,9 @@
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
   const selectedYColors = document.getElementById('selectedYColors');
+  const colorAxisEnabledInput = document.getElementById('colorAxisEnabled');
+  const colorAxisSelect = document.getElementById('colorAxisSelect');
+  const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
   const xCustomSelect = document.getElementById('xCustomSelect');
   const showMapInput = document.getElementById('showMap');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
@@ -72,6 +75,20 @@
   const mathChCancel = document.getElementById('mathChCancel');
   const mathChSuggestions = document.getElementById('mathChSuggestions');
   const mathChPreview = document.getElementById('mathChPreview');
+  const dataFiltersEnabledInput = document.getElementById('dataFiltersEnabled');
+  const addDataFilterBtn = document.getElementById('addDataFilterBtn');
+  const dataFiltersList = document.getElementById('dataFiltersList');
+  const dataFilterForm = document.getElementById('dataFilterForm');
+  const dataFilterChannelSelect = document.getElementById('dataFilterChannel');
+  const dataFilterRangeHint = document.getElementById('dataFilterRangeHint');
+  const dataFilterRangeField = document.getElementById('dataFilterRangeField');
+  const dataFilterMinInput = document.getElementById('dataFilterMin');
+  const dataFilterMaxInput = document.getElementById('dataFilterMax');
+  const dataFilterDiscreteField = document.getElementById('dataFilterDiscreteField');
+  const dataFilterValuesSelect = document.getElementById('dataFilterValues');
+  const dataFilterError = document.getElementById('dataFilterError');
+  const dataFilterSaveBtn = document.getElementById('dataFilterSave');
+  const dataFilterCancelBtn = document.getElementById('dataFilterCancel');
   const quickModSection = document.getElementById('quickModSection');
   const quickModChannelName = document.getElementById('quickModChannelName');
   const quickModNegate = document.getElementById('quickModNegate');
@@ -119,7 +136,23 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
+  // "channel category" -> hex color, assigned stably the same way channelColorOverrides
+  // is: first unused COLORS entry, kept forever once assigned, so a category's color doesn't
+  // shift when the visible set of categories changes (e.g. a lap filter).
+  const colorAxisCategoryColorOverrides = new Map();
+  // channel -> Set of category values (numbers or trimmed strings, matching the category's
+  // own type) the user has clicked off in the discrete legend. Points in a hidden category
+  // are dropped from every trace, across all files/laps/Y channels, until clicked back on.
+  const colorAxisHiddenCategoriesByChannel = new Map();
+  // A numeric channel is treated as discrete (categorical) rather than continuous when its
+  // distinct-value count is small in absolute terms, or small relative to the number of
+  // samples (e.g. a Gear or Flag channel sampled at 100k rows but only a handful of values).
+  const COLOR_AXIS_DISCRETE_ABS_MAX = 20;
+  const COLOR_AXIS_DISCRETE_RATIO_MAX_COUNT = 30;
+  const COLOR_AXIS_DISCRETE_RATIO_THRESHOLD = 0.05;
   const mathChannels = []; // { name, expression, unit, smoothing? }
+  const dataFilters = []; // { channel, min: number|null, max: number|null, enabled }
+  let dataFilterEditIdx = -1; // -1 = add mode, >=0 = editing existing filter
 
   // Quick modify state
   const QUICK_MOD_PREVIEW_PREFIX = 'Quick Mod: ';
@@ -946,7 +979,7 @@
     try {
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
       renderLapsList();
       updatePlot();
     } catch (err) {
@@ -998,7 +1031,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
         renderLapsList();
         updatePlot();
       }
@@ -1437,6 +1470,87 @@
     }).join('');
   }
 
+  function formatDataFilterRange(f) {
+    const label = getChannelLabel(f.channel);
+    if (f.kind === 'discrete') {
+      const shown = (f.values || []).slice(0, 6).map(v => String(v)).join(', ');
+      const more = f.values && f.values.length > 6 ? `, +${f.values.length - 6} more` : '';
+      return `${label} in {${shown}${more}}`;
+    }
+    if (f.min !== null && f.max !== null) return `${label}: ${f.min} – ${f.max}`;
+    if (f.min !== null) return `${label} ≥ ${f.min}`;
+    if (f.max !== null) return `${label} ≤ ${f.max}`;
+    return label;
+  }
+
+  function renderDataFiltersList() {
+    if (!dataFiltersList) return;
+    dataFiltersList.innerHTML = dataFilters.map((f, i) => (
+      `<div class="data-filter-item${f.enabled ? '' : ' is-disabled'}">` +
+      `<input type="checkbox" class="data-filter-item-enabled" data-idx="${i}" ${f.enabled ? 'checked' : ''} aria-label="Enable filter on ${escapeHtml(f.channel)}" />` +
+      `<span class="data-filter-desc">${escapeHtml(formatDataFilterRange(f))}</span>` +
+      `<button type="button" class="data-filter-edit" data-idx="${i}" aria-label="Edit filter on ${escapeHtml(f.channel)}">✎</button>` +
+      `<button type="button" class="data-filter-delete" data-idx="${i}" aria-label="Delete filter on ${escapeHtml(f.channel)}">✕</button>` +
+      `</div>`
+    )).join('');
+  }
+
+  // Classifies a filter channel the exact same way the color axis does (classifyColorAxisValues),
+  // using every value of that channel across all loaded files (not just the currently
+  // selected/visible ones) -- the form should offer the same discrete/continuous split
+  // regardless of which files happen to be checked while the filter is being edited.
+  function computeDataFilterChannelClassification(channel) {
+    if (!channel) return null;
+    const rawValues = [];
+    logs.forEach((log) => {
+      const resolvedCol = resolveChannelForLog(channel, log);
+      if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
+      log.data.forEach((row) => {
+        const v = row[resolvedCol];
+        if (v !== null && v !== undefined && v !== '') rawValues.push(v);
+      });
+    });
+    return classifyColorAxisValues(rawValues);
+  }
+
+  function formatDataFilterHintNumber(n) {
+    return String(Math.round(n * 1000) / 1000);
+  }
+
+  function populateDataFilterValuesSelect(classification) {
+    if (!dataFilterValuesSelect) return;
+    dataFilterValuesSelect.innerHTML = classification.categories.map((cat) => (
+      `<option value="${escapeHtml(String(cat))}">${escapeHtml(String(cat))}</option>`
+    )).join('');
+  }
+
+  // Single entry point for reacting to a channel pick in the filter form: reclassifies the
+  // channel, swaps between the range fields and the discrete multiselect, and updates the
+  // hint line. Called on channel change and whenever the form is opened (add or edit).
+  function updateDataFilterFormForChannel() {
+    const channel = dataFilterChannelSelect ? dataFilterChannelSelect.value : '';
+    const classification = channel ? computeDataFilterChannelClassification(channel) : null;
+
+    const isDiscrete = !!(classification && classification.kind === 'discrete');
+    if (dataFilterRangeField) dataFilterRangeField.hidden = isDiscrete;
+    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = !isDiscrete;
+
+    if (isDiscrete) {
+      populateDataFilterValuesSelect(classification);
+    }
+
+    if (!dataFilterRangeHint) return;
+    if (isDiscrete) {
+      const n = classification.categories.length;
+      dataFilterRangeHint.textContent = `Discrete channel — ${n} distinct value${n === 1 ? '' : 's'}`;
+    } else if (classification) {
+      dataFilterRangeHint.textContent =
+        `Data range: ${formatDataFilterHintNumber(classification.min)} – ${formatDataFilterHintNumber(classification.max)}`;
+    } else {
+      dataFilterRangeHint.textContent = '';
+    }
+  }
+
   let mathChActiveSuggIdx = -1;
 
   function getMathChAvailableChannels() {
@@ -1547,7 +1661,7 @@
       channelMap = normalized;
       if (logs.length > 0) {
         populateYSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
         updatePlot();
       }
     } catch (err) {
@@ -1772,6 +1886,104 @@
       } else if (mapColorSelect.options.length > 0) {
         mapColorSelect.value = mapColorSelect.options[0].value;
       }
+    }
+  }
+
+  function populateColorAxisSelect() {
+    if (!colorAxisSelect) return;
+    const previousValue = colorAxisSelect.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    colorAxisSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(colorAxisSelect.options).some(o => o.value === previousValue)) {
+      colorAxisSelect.value = previousValue;
+    } else if (colorAxisSelect.options.length > 0) {
+      colorAxisSelect.value = colorAxisSelect.options[0].value;
+    }
+  }
+
+  function populateDataFilterChannelSelect() {
+    if (!dataFilterChannelSelect) return;
+    const previousValue = dataFilterChannelSelect.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    dataFilterChannelSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(dataFilterChannelSelect.options).some(o => o.value === previousValue)) {
+      dataFilterChannelSelect.value = previousValue;
+    } else if (dataFilterChannelSelect.options.length > 0) {
+      dataFilterChannelSelect.value = dataFilterChannelSelect.options[0].value;
     }
   }
 
@@ -3014,7 +3226,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
     renderLapsList();
     updatePlot();
   }
@@ -4226,6 +4438,154 @@
     };
   }
 
+  // Classifies a channel's plotted values as 'discrete' (categorical -- a fixed color per
+  // distinct value) or 'continuous' (a Viridis gradient). Non-numeric values (e.g. a text
+  // LABEL column) are always discrete, since a colorscale has no meaning for them. Numeric
+  // values are discrete when there are few distinct values outright, or few relative to the
+  // sample count -- see COLOR_AXIS_DISCRETE_* above for the exact thresholds.
+  function classifyColorAxisValues(rawValues) {
+    const total = rawValues.length;
+    if (total === 0) return null;
+
+    const allNumeric = rawValues.every((v) => Number.isFinite(Number(v)));
+    const distinctSet = new Set(rawValues.map((v) => (allNumeric ? Number(v) : String(v).trim())));
+    const distinctCount = distinctSet.size;
+
+    const isDiscrete = !allNumeric
+      || distinctCount <= COLOR_AXIS_DISCRETE_ABS_MAX
+      || (distinctCount <= COLOR_AXIS_DISCRETE_RATIO_MAX_COUNT && (distinctCount / total) <= COLOR_AXIS_DISCRETE_RATIO_THRESHOLD);
+
+    if (isDiscrete) {
+      const categories = Array.from(distinctSet).sort((a, b) => (
+        (typeof a === 'number' && typeof b === 'number') ? (a - b) : String(a).localeCompare(String(b))
+      ));
+      return { kind: 'discrete', categories, allNumeric };
+    }
+
+    let min = Infinity, max = -Infinity;
+    rawValues.forEach((v) => {
+      const n = Number(v);
+      if (n < min) min = n;
+      if (n > max) max = n;
+    });
+    return { kind: 'continuous', min, max };
+  }
+
+  // The single source of truth for turning a raw color-channel cell value into the type
+  // (number or trimmed string) that categories/hidden-set membership are keyed by --
+  // classifyColorAxisValues, the legend, and the trace filter all have to agree on this.
+  function normalizeColorAxisCategory(context, rawValue) {
+    return context.allNumeric ? Number(rawValue) : String(rawValue).trim();
+  }
+
+  function isColorAxisCategoryHidden(channel, category) {
+    const hiddenSet = colorAxisHiddenCategoriesByChannel.get(channel);
+    return !!hiddenSet && hiddenSet.has(category);
+  }
+
+  function toggleColorAxisCategoryHidden(channel, category) {
+    let hiddenSet = colorAxisHiddenCategoriesByChannel.get(channel);
+    if (!hiddenSet) {
+      hiddenSet = new Set();
+      colorAxisHiddenCategoriesByChannel.set(channel, hiddenSet);
+    }
+    if (hiddenSet.has(category)) hiddenSet.delete(category);
+    else hiddenSet.add(category);
+  }
+
+  // Gathers every value of `colorAxisChannel` that will actually be plotted (same
+  // file/lap selection the main trace loop uses) and classifies it once, up front, so
+  // every trace shares one consistent color mapping (same cmin/cmax, or the same
+  // category->color assignment) rather than each trace scaling itself independently.
+  function computeColorAxisContext(selFiles, selectedLaps, colorAxisChannel) {
+    if (!colorAxisChannel) return null;
+    const rawValues = [];
+    selFiles.forEach((log) => {
+      const resolvedCol = resolveChannelForLog(colorAxisChannel, log);
+      if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, log.meta.lapNum[i])) return;
+        const v = row[resolvedCol];
+        if (v !== null && v !== undefined && v !== '') rawValues.push(v);
+      });
+    });
+    const classification = classifyColorAxisValues(rawValues);
+    if (!classification) return null;
+    if (classification.kind === 'continuous') {
+      classification.scaleConfig = getMapColorScaleConfig(classification.min, classification.max, 'continuous');
+    }
+    return classification;
+  }
+
+  // Assigns each category a color the first time it's seen, then keeps that assignment
+  // for as long as the app is open -- so switching laps/files in and out doesn't repaint
+  // categories that are still visible (mirrors syncSelectedChannelColors/getChannelColor).
+  function getColorAxisCategoryColor(channel, category) {
+    const key = `${channel}::${category}`;
+    if (colorAxisCategoryColorOverrides.has(key)) return colorAxisCategoryColorOverrides.get(key);
+    const prefix = `${channel}::`;
+    const usedForChannel = new Set();
+    colorAxisCategoryColorOverrides.forEach((color, k) => {
+      if (k.startsWith(prefix)) usedForChannel.add(color);
+    });
+    let color = COLORS.find((candidate) => !usedForChannel.has(candidate));
+    if (!color) color = COLORS[usedForChannel.size % COLORS.length];
+    colorAxisCategoryColorOverrides.set(key, color);
+    return color;
+  }
+
+  // Plotly won't auto-legend a single array-colored trace, so discrete mode gets its own
+  // small legend of category swatches; continuous mode relies on Plotly's own colorbar
+  // (added directly on the first colored trace) so this just hides the discrete legend.
+  function renderColorAxisLegend(channel, context) {
+    if (!colorAxisLegendDiv) return;
+    if (!context || context.kind !== 'discrete') {
+      colorAxisLegendDiv.innerHTML = '';
+      colorAxisLegendDiv.hidden = true;
+      return;
+    }
+    const label = getChannelLabel(channel);
+    const items = context.categories.map((cat) => {
+      const color = getColorAxisCategoryColor(channel, cat);
+      const hidden = isColorAxisCategoryHidden(channel, cat);
+      const cls = hidden ? 'color-axis-legend-item is-hidden' : 'color-axis-legend-item';
+      return `<button type="button" class="${cls}" data-color-axis-category="${escapeHtml(String(cat))}" data-color-axis-numeric="${context.allNumeric ? '1' : '0'}" aria-pressed="${hidden ? 'false' : 'true'}">`
+        + `<span class="color-axis-legend-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(String(cat))}</button>`;
+    }).join('');
+    colorAxisLegendDiv.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${items}`;
+    colorAxisLegendDiv.dataset.channel = channel;
+    colorAxisLegendDiv.hidden = false;
+  }
+
+  // Applies the shared classification from computeColorAxisContext to one trace: switches
+  // it to marker mode (a single 'lines' trace can't vary color along its length) and either
+  // a continuous colorscale or a flat per-category color per point.
+  function applyColorAxisToTrace(trace, colorRawArr, context, channel, showScale) {
+    trace.mode = 'markers';
+    trace.type = 'scattergl';
+    trace.text = colorRawArr.map((v) => (v === null || v === undefined || v === '') ? '' : String(v));
+
+    if (context.kind === 'continuous' && context.scaleConfig) {
+      trace.marker = {
+        color: colorRawArr.map((v) => { const n = Number(v); return Number.isFinite(n) ? n : null; }),
+        colorscale: context.scaleConfig.colorscale,
+        cmin: context.scaleConfig.cmin,
+        cmax: context.scaleConfig.cmax,
+        size: 5,
+        showscale: showScale,
+        colorbar: showScale ? { title: { text: getChannelLabel(channel) } } : undefined
+      };
+    } else {
+      trace.marker = {
+        color: colorRawArr.map((v) => {
+          if (v === null || v === undefined || v === '') return '#999999';
+          return getColorAxisCategoryColor(channel, normalizeColorAxisCategory(context, v));
+        }),
+        size: 5
+      };
+    }
+  }
+
   function lerpColorRgb(rgbA, rgbB, t) {
     const clamped = Math.max(0, Math.min(1, t));
     const r = Math.round(rgbA[0] + (rgbB[0] - rgbA[0]) * clamped);
@@ -4825,8 +5185,15 @@
     return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
-  function buildHoverTemplate(xLabel, yLabel) {
-    return `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}<extra></extra>`;
+  function buildHoverTemplate(xLabel, yLabel, colorLabel) {
+    const base = `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}`;
+    if (colorLabel) {
+      // %{text} carries the color channel's raw value per point (see applyColorAxisToTrace) --
+      // customdata is already used elsewhere for hover-sync row lookups, so it can't double
+      // as this.
+      return `${base}<br>${escapeHtml(colorLabel)}: %{text}<extra></extra>`;
+    }
+    return `${base}<extra></extra>`;
   }
 
   function findNearestRowIndexByLapDistance(log, lap, targetDist) {
@@ -5418,6 +5785,16 @@
     syncSelectedChannelColors(ycols);
     const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
+
+    const colorAxisEnabled = !!(colorAxisEnabledInput && colorAxisEnabledInput.checked);
+    const colorAxisChannel = colorAxisEnabled && colorAxisSelect ? colorAxisSelect.value : '';
+    const colorAxisContext = colorAxisChannel ? computeColorAxisContext(selFiles, selectedLaps, colorAxisChannel) : null;
+    renderColorAxisLegend(colorAxisChannel, colorAxisContext);
+    let colorAxisScaleShown = false;
+
+    const dataFiltersMasterEnabled = !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked);
+    const enabledDataFilters = dataFiltersMasterEnabled ? dataFilters.filter(f => f.enabled) : [];
+
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
@@ -5514,13 +5891,55 @@
 
     selFiles.forEach((log, li) => {
       const fileColor = COLORS[li % COLORS.length];
+      const colorAxisResolvedCol = colorAxisContext ? resolveChannelForLog(colorAxisChannel, log) : '';
+      const canColorByChannel = !!(colorAxisResolvedCol && log.cols.includes(colorAxisResolvedCol));
+      // Filters whose channel doesn't exist in this particular file are dropped rather than
+      // excluding every row of that file -- a filter only constrains files that have the
+      // channel it names.
+      const activeDataFilters = enabledDataFilters
+        .map((f) => ({
+          kind: f.kind === 'discrete' ? 'discrete' : 'range',
+          min: f.min, max: f.max,
+          valueSet: f.kind === 'discrete' ? new Set(f.values) : null,
+          allNumeric: f.allNumeric,
+          resolvedCol: resolveChannelForLog(f.channel, log)
+        }))
+        .filter((f) => f.resolvedCol && log.cols.includes(f.resolvedCol));
       // plot each selected lap separately, x axis is Lap Time or Lap Distance
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
-        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        if (activeDataFilters.length > 0) {
+          maskIdx = maskIdx.filter((i) => activeDataFilters.every((f) => {
+            const raw = log.data[i][f.resolvedCol];
+            if (f.kind === 'discrete') {
+              if (raw === null || raw === undefined || raw === '') return false;
+              const normalized = f.allNumeric ? Number(raw) : String(raw).trim();
+              return f.valueSet.has(normalized);
+            }
+            const v = Number(raw);
+            if (!Number.isFinite(v)) return false;
+            if (f.min !== null && v < f.min) return false;
+            if (f.max !== null && v > f.max) return false;
+            return true;
+          }));
+        }
+        if (canColorByChannel && colorAxisContext.kind === 'discrete') {
+          const hiddenSet = colorAxisHiddenCategoriesByChannel.get(colorAxisChannel);
+          if (hiddenSet && hiddenSet.size > 0) {
+            // Points with no reading for the color channel stay visible -- there's no
+            // category to have clicked off in the legend in the first place.
+            maskIdx = maskIdx.filter((i) => {
+              const raw = log.data[i][colorAxisResolvedCol];
+              if (raw === null || raw === undefined || raw === '') return true;
+              return !hiddenSet.has(normalizeColorAxisCategory(colorAxisContext, raw));
+            });
+          }
+        }
         const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
         if (!xArr) return;
+        const colorRawArr = canColorByChannel ? maskIdx.map(i => log.data[i][colorAxisResolvedCol]) : null;
         ycols.forEach(y => {
           const resolvedCol = resolveChannelForLog(y, log);
           if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
@@ -5528,7 +5947,7 @@
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
           const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
           const dash = getLineDashForFileIndex(li);
-          traces.push({
+          const trace = {
             x: xArr,
             y: yArr,
             customdata: keyArr,
@@ -5538,7 +5957,13 @@
             marker:{color: traceColor},
             line:{color: traceColor, dash},
             hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y))
-          });
+          };
+          if (colorRawArr) {
+            applyColorAxisToTrace(trace, colorRawArr, colorAxisContext, colorAxisChannel, !colorAxisScaleShown);
+            trace.hovertemplate = buildHoverTemplate(mainXTitle, getChannelLabel(y), getChannelLabel(colorAxisChannel));
+            if (colorAxisContext.kind === 'continuous') colorAxisScaleShown = true;
+          }
+          traces.push(trace);
         });
       });
     });
@@ -5818,6 +6243,26 @@
   if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
   if (mapDrawModeSelect) mapDrawModeSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
+  if (colorAxisEnabledInput) {
+    colorAxisEnabledInput.addEventListener('change', () => {
+      if (colorAxisSelect) colorAxisSelect.disabled = !colorAxisEnabledInput.checked;
+      updatePlot();
+    });
+  }
+  if (colorAxisSelect) colorAxisSelect.addEventListener('change', ()=> updatePlot());
+  if (colorAxisLegendDiv) {
+    colorAxisLegendDiv.addEventListener('click', (ev) => {
+      const btn = ev.target instanceof Element ? ev.target.closest('[data-color-axis-category]') : null;
+      if (!btn) return;
+      const channel = colorAxisLegendDiv.dataset.channel || '';
+      if (!channel) return;
+      const isNumeric = btn.getAttribute('data-color-axis-numeric') === '1';
+      const raw = btn.getAttribute('data-color-axis-category');
+      const category = isNumeric ? Number(raw) : raw;
+      toggleColorAxisCategoryHidden(channel, category);
+      updatePlot();
+    });
+  }
   ySelect.addEventListener('change', ()=> {
     renderSelectedChannelColorControls();
     updatePlot();
@@ -5885,7 +6330,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
         renderLapsList();
         Plotly.purge(plotDiv);
         clearXYMapPlot();
@@ -5978,7 +6423,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
     renderLapsList();
     Plotly.purge(plotDiv);
     clearXYMapPlot();
@@ -6015,6 +6460,37 @@
         }
       });
       if (mathChannels.length > 0) renderMathChannelsList();
+    } catch {}
+  })();
+
+  function saveDataFilters() {
+    try {
+      localStorage.setItem('dataFiltersState', JSON.stringify({
+        enabled: !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked),
+        filters: dataFilters
+      }));
+    } catch {}
+  }
+
+  (function loadDataFilters() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('dataFiltersState') || 'null');
+      if (saved && Array.isArray(saved.filters)) {
+        saved.filters.forEach(f => {
+          if (!f || typeof f.channel !== 'string' || !f.channel) return;
+          const enabled = f.enabled !== false;
+          if (f.kind === 'discrete' && Array.isArray(f.values) && f.values.length > 0) {
+            dataFilters.push({ channel: f.channel, kind: 'discrete', values: f.values.slice(), allNumeric: !!f.allNumeric, enabled });
+            return;
+          }
+          const min = Number.isFinite(f.min) ? f.min : null;
+          const max = Number.isFinite(f.max) ? f.max : null;
+          if (min === null && max === null) return;
+          dataFilters.push({ channel: f.channel, kind: 'range', min, max, enabled });
+        });
+      }
+      if (dataFiltersEnabledInput) dataFiltersEnabledInput.checked = !saved || saved.enabled !== false;
+      if (dataFilters.length > 0) renderDataFiltersList();
     } catch {}
   })();
 
@@ -6142,7 +6618,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
       updatePlot();
       resetMathChForm();
     });
@@ -6183,7 +6659,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
       updatePlot();
     });
   }
@@ -6261,6 +6737,135 @@
       if (!item) return;
       ev.preventDefault();
       applyMathChSuggestion(item.dataset.name);
+    });
+  }
+
+  // Data Filters event handlers
+
+  function showDataFilterError(msg) {
+    if (dataFilterError) { dataFilterError.textContent = msg; dataFilterError.hidden = false; }
+  }
+
+  function resetDataFilterForm() {
+    dataFilterEditIdx = -1;
+    if (dataFilterForm) dataFilterForm.hidden = true;
+    if (dataFilterMinInput) dataFilterMinInput.value = '';
+    if (dataFilterMaxInput) dataFilterMaxInput.value = '';
+    if (dataFilterValuesSelect) dataFilterValuesSelect.innerHTML = '';
+    if (dataFilterRangeField) dataFilterRangeField.hidden = false;
+    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = true;
+    if (dataFilterError) { dataFilterError.hidden = true; dataFilterError.textContent = ''; }
+    if (dataFilterRangeHint) dataFilterRangeHint.textContent = '';
+    if (dataFilterSaveBtn) dataFilterSaveBtn.textContent = 'Add Filter';
+    if (addDataFilterBtn) addDataFilterBtn.disabled = false;
+  }
+
+  if (addDataFilterBtn) {
+    addDataFilterBtn.addEventListener('click', () => {
+      populateDataFilterChannelSelect();
+      updateDataFilterFormForChannel();
+      if (dataFilterForm) dataFilterForm.hidden = false;
+      addDataFilterBtn.disabled = true;
+      if (dataFilterChannelSelect) dataFilterChannelSelect.focus();
+    });
+  }
+
+  if (dataFilterChannelSelect) dataFilterChannelSelect.addEventListener('change', updateDataFilterFormForChannel);
+
+  if (dataFilterCancelBtn) dataFilterCancelBtn.addEventListener('click', resetDataFilterForm);
+
+  if (dataFilterSaveBtn) {
+    dataFilterSaveBtn.addEventListener('click', () => {
+      const channel = dataFilterChannelSelect ? dataFilterChannelSelect.value : '';
+      if (!channel) return showDataFilterError('Channel is required.');
+
+      const isEditing = dataFilterEditIdx >= 0 && dataFilterEditIdx < dataFilters.length;
+      const enabled = isEditing ? dataFilters[dataFilterEditIdx].enabled : true;
+      const classification = computeDataFilterChannelClassification(channel);
+      let filter;
+
+      if (classification && classification.kind === 'discrete') {
+        const selected = dataFilterValuesSelect ? Array.from(dataFilterValuesSelect.selectedOptions).map(o => o.value) : [];
+        if (selected.length === 0) return showDataFilterError('Select at least one value.');
+        const values = selected.map((raw) => classification.allNumeric ? Number(raw) : raw);
+        filter = { channel, kind: 'discrete', values, allNumeric: classification.allNumeric, enabled };
+      } else {
+        const minRaw = dataFilterMinInput ? dataFilterMinInput.value.trim() : '';
+        const maxRaw = dataFilterMaxInput ? dataFilterMaxInput.value.trim() : '';
+        const min = minRaw === '' ? null : Number(minRaw);
+        const max = maxRaw === '' ? null : Number(maxRaw);
+        if (minRaw !== '' && !Number.isFinite(min)) return showDataFilterError('Min must be a number.');
+        if (maxRaw !== '' && !Number.isFinite(max)) return showDataFilterError('Max must be a number.');
+        if (min === null && max === null) return showDataFilterError('Enter a min, a max, or both.');
+        if (min !== null && max !== null && min > max) return showDataFilterError('Min must be less than or equal to Max.');
+        filter = { channel, kind: 'range', min, max, enabled };
+      }
+
+      if (isEditing) {
+        dataFilters[dataFilterEditIdx] = filter;
+      } else {
+        dataFilters.push(filter);
+      }
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+      resetDataFilterForm();
+    });
+  }
+
+  if (dataFiltersList) {
+    dataFiltersList.addEventListener('click', ev => {
+      const editBtn = ev.target.closest('.data-filter-edit');
+      if (editBtn) {
+        const idx = Number(editBtn.dataset.idx);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+        const f = dataFilters[idx];
+        dataFilterEditIdx = idx;
+        populateDataFilterChannelSelect();
+        if (dataFilterChannelSelect) dataFilterChannelSelect.value = f.channel;
+        updateDataFilterFormForChannel();
+        // updateDataFilterFormForChannel() reclassifies against the currently loaded data,
+        // which is what decides whether the range fields or the values multiselect is shown;
+        // restore whichever one of those it actually rendered.
+        if (f.kind === 'discrete' && dataFilterValuesSelect && !dataFilterDiscreteField.hidden) {
+          const wanted = new Set((f.values || []).map((v) => String(v)));
+          Array.from(dataFilterValuesSelect.options).forEach((opt) => { opt.selected = wanted.has(opt.value); });
+        } else {
+          if (dataFilterMinInput) dataFilterMinInput.value = (f.min === null || f.min === undefined) ? '' : f.min;
+          if (dataFilterMaxInput) dataFilterMaxInput.value = (f.max === null || f.max === undefined) ? '' : f.max;
+        }
+        if (dataFilterError) { dataFilterError.hidden = true; dataFilterError.textContent = ''; }
+        if (dataFilterSaveBtn) dataFilterSaveBtn.textContent = 'Save Changes';
+        if (dataFilterForm) dataFilterForm.hidden = false;
+        if (addDataFilterBtn) addDataFilterBtn.disabled = true;
+        return;
+      }
+
+      const deleteBtn = ev.target.closest('.data-filter-delete');
+      if (!deleteBtn) return;
+      const idx = Number(deleteBtn.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+      dataFilters.splice(idx, 1);
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+    });
+
+    dataFiltersList.addEventListener('change', ev => {
+      if (!ev.target.matches('.data-filter-item-enabled')) return;
+      const idx = Number(ev.target.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+      dataFilters[idx].enabled = ev.target.checked;
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+    });
+  }
+
+  if (dataFiltersEnabledInput) {
+    dataFiltersEnabledInput.addEventListener('change', () => {
+      saveDataFilters();
+      updatePlot();
     });
   }
 
@@ -6342,7 +6947,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
       updatePlot();
     });
   }
