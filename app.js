@@ -3,6 +3,11 @@
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
   const selectedYColors = document.getElementById('selectedYColors');
+  const colorAxisSelect = document.getElementById('colorAxisSelect');
+  const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
+  const binnedPlotEnabledInput = document.getElementById('binnedPlotEnabled');
+  const binnedPlotAxisSelect = document.getElementById('binnedPlotAxis');
+  const binnedPlotBinWidthInput = document.getElementById('binnedPlotBinWidth');
   const xCustomSelect = document.getElementById('xCustomSelect');
   const showMapInput = document.getElementById('showMap');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
@@ -49,6 +54,7 @@
   const uiPanel7 = document.getElementById('uiPanel7');
   const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
+  const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -67,11 +73,29 @@
   const mathChName = document.getElementById('mathChName');
   const mathChExpr = document.getElementById('mathChExpr');
   const mathChUnit = document.getElementById('mathChUnit');
+  const mathChFilterEnabled = document.getElementById('mathChFilterEnabled');
+  const mathChFilterControls = document.getElementById('mathChFilterControls');
+  const mathChFilterAxis = document.getElementById('mathChFilterAxis');
+  const mathChFilterWindow = document.getElementById('mathChFilterWindow');
   const mathChError = document.getElementById('mathChError');
   const mathChSave = document.getElementById('mathChSave');
   const mathChCancel = document.getElementById('mathChCancel');
   const mathChSuggestions = document.getElementById('mathChSuggestions');
   const mathChPreview = document.getElementById('mathChPreview');
+  const dataFiltersEnabledInput = document.getElementById('dataFiltersEnabled');
+  const addDataFilterBtn = document.getElementById('addDataFilterBtn');
+  const dataFiltersList = document.getElementById('dataFiltersList');
+  const dataFilterForm = document.getElementById('dataFilterForm');
+  const dataFilterChannelSelect = document.getElementById('dataFilterChannel');
+  const dataFilterRangeHint = document.getElementById('dataFilterRangeHint');
+  const dataFilterRangeField = document.getElementById('dataFilterRangeField');
+  const dataFilterMinInput = document.getElementById('dataFilterMin');
+  const dataFilterMaxInput = document.getElementById('dataFilterMax');
+  const dataFilterDiscreteField = document.getElementById('dataFilterDiscreteField');
+  const dataFilterValuesSelect = document.getElementById('dataFilterValues');
+  const dataFilterError = document.getElementById('dataFilterError');
+  const dataFilterSaveBtn = document.getElementById('dataFilterSave');
+  const dataFilterCancelBtn = document.getElementById('dataFilterCancel');
   const quickModSection = document.getElementById('quickModSection');
   const quickModChannelName = document.getElementById('quickModChannelName');
   const quickModNegate = document.getElementById('quickModNegate');
@@ -79,7 +103,7 @@
   const quickModFilter = document.getElementById('quickModFilter');
   const quickModFilterControls = document.getElementById('quickModFilterControls');
   const quickModFilterWindow = document.getElementById('quickModFilterWindow');
-  const quickModFilterMode = document.getElementById('quickModFilterMode');
+  const quickModFilterAxis = document.getElementById('quickModFilterAxis');
   const quickModCreateBtn = document.getElementById('quickModCreateBtn');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
@@ -119,7 +143,27 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
+  // "fileId::lap" -> hex color. Per-file (not just per-lap-number) so two files that
+  // happen to share a lap number can still be colored independently; falls back to
+  // colorForLap()'s deterministic default wherever no override has been set.
+  const lapColorOverrides = new Map();
+  // "channel category" -> hex color, assigned stably the same way channelColorOverrides
+  // is: first unused COLORS entry, kept forever once assigned, so a category's color doesn't
+  // shift when the visible set of categories changes (e.g. a lap filter).
+  const colorAxisCategoryColorOverrides = new Map();
+  // channel -> Set of category values (numbers or trimmed strings, matching the category's
+  // own type) the user has clicked off in the discrete legend. Points in a hidden category
+  // are dropped from every trace, across all files/laps/Y channels, until clicked back on.
+  const colorAxisHiddenCategoriesByChannel = new Map();
+  // A numeric channel is treated as discrete (categorical) rather than continuous when its
+  // distinct-value count is small in absolute terms, or small relative to the number of
+  // samples (e.g. a Gear or Flag channel sampled at 100k rows but only a handful of values).
+  const COLOR_AXIS_DISCRETE_ABS_MAX = 20;
+  const COLOR_AXIS_DISCRETE_RATIO_MAX_COUNT = 30;
+  const COLOR_AXIS_DISCRETE_RATIO_THRESHOLD = 0.05;
   const mathChannels = []; // { name, expression, unit, smoothing? }
+  const dataFilters = []; // { channel, min: number|null, max: number|null, enabled }
+  let dataFilterEditIdx = -1; // -1 = add mode, >=0 = editing existing filter
 
   // Quick modify state
   const QUICK_MOD_PREVIEW_PREFIX = 'Quick Mod: ';
@@ -130,7 +174,7 @@
     reciprocal: false,
     filter: false,
     filterWindow: 0.5,
-    filterMode: 'time'   // 'time' | 'distance'
+    filterAxis: 'time'   // 'time' | 'distance' | any other numeric channel name
   };
   let quickModEditorOpen = false;
   let quickModOriginalVisible = true;
@@ -735,6 +779,19 @@
     return COLORS[idx];
   }
 
+  function lapColorKey(fileId, lap) {
+    return `${fileId}::${lap}`;
+  }
+
+  function getLapColor(fileId, lap) {
+    const key = lapColorKey(fileId, lap);
+    return normalizeHexColor(lapColorOverrides.has(key) ? lapColorOverrides.get(key) : colorForLap(lap));
+  }
+
+  function setLapColor(fileId, lap, color) {
+    lapColorOverrides.set(lapColorKey(fileId, lap), normalizeHexColor(color));
+  }
+
   // The racing-line synthetic log is always a single lap numbered 1, so this is exactly
   // the color the laps list will show for it once added -- used to keep the map polyline
   // and the curvature comparison trace visually matched to that sidebar entry, both
@@ -946,7 +1003,7 @@
     try {
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       renderLapsList();
       updatePlot();
     } catch (err) {
@@ -976,6 +1033,10 @@
   }
 
   function parseFile(file) {
+    // Set by whichever branch below actually runs, before `complete` fires -- lets
+    // processCsvRows() know whether this file was tab-delimited (see isTsvFormat in
+    // file-processors.js) without re-sniffing already-tokenized rows itself.
+    let detectedDelimiter = 'auto';
     const parseConfig = {
       header: false,
       dynamicTyping: true,
@@ -987,7 +1048,7 @@
           return;
         }
 
-        const processed = window.LogFileProcessors.processCsvRows(rows, file.name);
+        const processed = window.LogFileProcessors.processCsvRows(rows, { delimiter: detectedDelimiter });
         if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
           console.error('Failed to process CSV file:', file.name);
           return;
@@ -998,15 +1059,15 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         renderLapsList();
         updatePlot();
       }
     };
 
-    // PapaParse's own delimiter guessing covers comma/tab/semicolon/pipe already, but
-    // can't express "one or more spaces" as a delimiter -- so a plain whitespace-column
-    // log (metadata lines and all) needs sniffing + pre-normalizing to tabs first.
+    // PapaParse's own delimiter guessing covers comma/semicolon/pipe already, but
+    // content-sniffing a short or metadata-heavy tab file can be less reliable than
+    // just checking for tab characters directly, so that case is sniffed up front.
     // Falls back to handing PapaParse the raw File directly (its normal auto-detect) if
     // the browser lacks file.text() or the processors module isn't loaded yet.
     const processors = window.LogFileProcessors;
@@ -1020,14 +1081,12 @@
       // fallback below and silently re-parsing (and re-adding) the same file a second time.
       // The two-argument form only invokes onRejected for a genuine file.text() rejection.
       file.text().then((text) => {
-        // .dat logs are treated as tab/whitespace-delimited outright rather than
-        // sniffed -- they're never a comma CSV in practice, and content-sniffing a
-        // short or metadata-heavy file can be less reliable than just knowing from
-        // the extension.
-        const delimiter = forceTsv ? 'whitespace' : processors.detectFieldDelimiter(text);
-        if (delimiter === 'whitespace') {
-          Papa.parse(processors.normalizeWhitespaceDelimitedText(text), Object.assign({}, parseConfig, { delimiter: '\t' }));
-        } else if (delimiter === 'tab') {
+        // .dat logs are treated as tab-delimited outright rather than sniffed -- they're
+        // never a comma CSV in practice, and content-sniffing a short or metadata-heavy
+        // file can be less reliable than just knowing from the extension.
+        const delimiter = forceTsv ? 'tab' : processors.detectFieldDelimiter(text);
+        detectedDelimiter = delimiter;
+        if (delimiter === 'tab') {
           Papa.parse(text, Object.assign({}, parseConfig, { delimiter: '\t' }));
         } else {
           Papa.parse(text, parseConfig);
@@ -1173,6 +1232,19 @@
     return result;
   }
 
+  // 'time'/'distance' are special-cased to this log's own detected time/distance columns
+  // (so the filter still works even if this log's real column isn't literally named that);
+  // any other value is treated as a channel name and resolved the normal way. Falls back to
+  // time if the chosen channel doesn't exist in this particular log (e.g. a math channel's
+  // filter axis was set from a different file's channel list).
+  function resolveSmoothingAxisColumn(axisChannel, log) {
+    if (axisChannel === 'distance') return log.meta && log.meta.distCol;
+    if (!axisChannel || axisChannel === 'time') return log.meta && log.meta.timeCol;
+    const resolved = resolveChannelForLog(axisChannel, log);
+    if (resolved && log.cols.includes(resolved)) return resolved;
+    return log.meta && log.meta.timeCol;
+  }
+
   function applyMathChannelToLog(mc, log) {
     const { name, expression, unit, smoothing } = mc;
     const refs = [];
@@ -1191,9 +1263,7 @@
     // If smoothing is requested, pre-compute windowed averages for all referenced channels
     let smoothedArrays = null;
     if (smoothing && smoothing.window > 0) {
-      const axisCol = smoothing.mode === 'distance'
-        ? (log.meta && log.meta.distCol)
-        : (log.meta && log.meta.timeCol);
+      const axisCol = resolveSmoothingAxisColumn(smoothing.axisChannel, log);
       const axisValues = axisCol ? log.data.map(row => Number(row[axisCol])) : null;
       const halfWindow = smoothing.window;
       smoothedArrays = resolvedRefs.map(col => {
@@ -1245,9 +1315,9 @@
   function buildQuickModSmoothing() {
     if (!quickModState.filter) return null;
     const w = parseFloat(quickModFilterWindow ? quickModFilterWindow.value : quickModState.filterWindow);
-    const mode = quickModFilterMode ? quickModFilterMode.value : quickModState.filterMode;
+    const axisChannel = quickModFilterAxis ? quickModFilterAxis.value : quickModState.filterAxis;
     const halfWindow = Number.isFinite(w) && w > 0 ? w : 0.5;
-    return { window: halfWindow, mode: mode || 'time' };
+    return { window: halfWindow, axisChannel: axisChannel || 'time' };
   }
 
   function resetQuickModToggles() {
@@ -1415,6 +1485,11 @@
     if (quickModReciprocal) quickModReciprocal.checked = !!quickModState.reciprocal;
     if (quickModFilter) quickModFilter.checked = !!quickModState.filter;
     if (quickModFilterControls) quickModFilterControls.hidden = !quickModState.filter;
+    if (quickModFilterAxis) {
+      populateAxisChannelSelect(quickModFilterAxis);
+      quickModFilterAxis.value = quickModState.filterAxis || 'time';
+    }
+    if (quickModFilterWindow) quickModFilterWindow.value = quickModState.filterWindow;
     if (quickModCreateBtn) {
       quickModCreateBtn.disabled = !hasQuickModActive();
     }
@@ -1422,11 +1497,17 @@
 
   let mathChEditIdx = -1; // -1 = add mode, >=0 = editing existing channel
 
+  function describeSmoothingAxis(axisChannel) {
+    if (!axisChannel || axisChannel === 'time') return 'Time [s]';
+    if (axisChannel === 'distance') return 'Distance [m]';
+    return getChannelLabel(axisChannel);
+  }
+
   function renderMathChannelsList() {
     if (!mathChannelsList) return;
     mathChannelsList.innerHTML = mathChannels.map((mc, i) => {
       const smoothLabel = mc.smoothing && mc.smoothing.window > 0
-        ? ` <span class="math-ch-smooth-info">[smooth ±${mc.smoothing.window}${mc.smoothing.mode === 'distance' ? 'm' : 's'}]</span>`
+        ? ` <span class="math-ch-smooth-info">[filter ±${mc.smoothing.window} on ${escapeHtml(describeSmoothingAxis(mc.smoothing.axisChannel))}]</span>`
         : '';
       return `<div class="math-ch-item">` +
         `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
@@ -1435,6 +1516,189 @@
         `<button type="button" class="math-ch-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(mc.name)}">✕</button>` +
         `</div>`;
     }).join('');
+  }
+
+  function formatDataFilterRange(f) {
+    const label = getChannelLabel(f.channel);
+    if (f.kind === 'discrete') {
+      const shown = (f.values || []).slice(0, 6).map(v => String(v)).join(', ');
+      const more = f.values && f.values.length > 6 ? `, +${f.values.length - 6} more` : '';
+      return `${label} in {${shown}${more}}`;
+    }
+    if (f.min !== null && f.max !== null) return `${label}: ${f.min} – ${f.max}`;
+    if (f.min !== null) return `${label} ≥ ${f.min}`;
+    if (f.max !== null) return `${label} ≤ ${f.max}`;
+    return label;
+  }
+
+  function renderDataFiltersList() {
+    if (!dataFiltersList) return;
+    dataFiltersList.innerHTML = dataFilters.map((f, i) => (
+      `<div class="data-filter-item${f.enabled ? '' : ' is-disabled'}">` +
+      `<input type="checkbox" class="data-filter-item-enabled" data-idx="${i}" ${f.enabled ? 'checked' : ''} aria-label="Enable filter on ${escapeHtml(f.channel)}" />` +
+      `<span class="data-filter-desc">${escapeHtml(formatDataFilterRange(f))}</span>` +
+      `<button type="button" class="data-filter-edit" data-idx="${i}" aria-label="Edit filter on ${escapeHtml(f.channel)}">✎</button>` +
+      `<button type="button" class="data-filter-delete" data-idx="${i}" aria-label="Delete filter on ${escapeHtml(f.channel)}">✕</button>` +
+      `</div>`
+    )).join('');
+  }
+
+  // Shared by updatePlot()'s trace masking and the binned-plot overlay's data-filter-aware
+  // binning -- both need "which rows currently pass the active data filters," just applied
+  // to different things (which points get plotted vs. which rows contribute to a bin mean).
+  function getEnabledDataFilters() {
+    const masterEnabled = !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked);
+    return masterEnabled ? dataFilters.filter(f => f.enabled) : [];
+  }
+
+  // Resolves each filter's channel against this specific log once, dropping any filter
+  // whose channel doesn't exist here -- a filter only constrains files that have the
+  // channel it names, same as the color axis and math channel resolution elsewhere.
+  function resolveDataFiltersForLog(log, enabledFilters) {
+    return enabledFilters
+      .map((f) => ({
+        kind: f.kind === 'discrete' ? 'discrete' : 'range',
+        min: f.min, max: f.max,
+        valueSet: f.kind === 'discrete' ? new Set(f.values) : null,
+        allNumeric: f.allNumeric,
+        resolvedCol: resolveChannelForLog(f.channel, log)
+      }))
+      .filter((f) => f.resolvedCol && log.cols.includes(f.resolvedCol));
+  }
+
+  function rowPassesDataFilters(log, rowIdx, resolvedFilters) {
+    return resolvedFilters.every((f) => {
+      const raw = log.data[rowIdx][f.resolvedCol];
+      if (f.kind === 'discrete') {
+        if (raw === null || raw === undefined || raw === '') return false;
+        const normalized = f.allNumeric ? Number(raw) : String(raw).trim();
+        return f.valueSet.has(normalized);
+      }
+      const v = Number(raw);
+      if (!Number.isFinite(v)) return false;
+      if (f.min !== null && v < f.min) return false;
+      if (f.max !== null && v > f.max) return false;
+      return true;
+    });
+  }
+
+  // Aggregates every currently displayed row -- lap-selected, data-filter-passing --
+  // across ALL currently selected files into one set of bins per Y channel, giving a
+  // single point per bin (the mean of everything that landed there). This is deliberately
+  // NOT a per-row math channel: it produces a shorter series than the raw data, which is
+  // exactly the point -- collapsing something like a hysteresis loop (two Y values for the
+  // same X) into one clean curve, drawn as an extra overlay trace rather than stored as data.
+  function computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, axisChannel, binWidth, channelToRef) {
+    if (!axisChannel || !(binWidth > 0) || ycols.length === 0) return [];
+    const enabledFilters = getEnabledDataFilters();
+    const bins = new Map(); // channel -> Map(binKey -> {xSum, ySum, count})
+    ycols.forEach(y => bins.set(y, new Map()));
+
+    selFiles.forEach((log) => {
+      const axisResolvedCol = resolveChannelForLog(axisChannel, log);
+      if (!axisResolvedCol || !log.cols.includes(axisResolvedCol)) return;
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const lapNumArr = log.meta.lapNum || [];
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, lapNumArr[i])) return;
+        if (activeFilters.length > 0 && !rowPassesDataFilters(log, i, activeFilters)) return;
+        const x = Number(row[axisResolvedCol]);
+        if (!Number.isFinite(x)) return;
+        const binKey = Math.round(x / binWidth);
+
+        ycols.forEach((y, yi) => {
+          const resolvedY = resolvedYCols[yi];
+          if (!resolvedY || !log.cols.includes(resolvedY)) return;
+          const v = Number(row[resolvedY]);
+          if (!Number.isFinite(v)) return;
+          const map = bins.get(y);
+          let entry = map.get(binKey);
+          if (!entry) { entry = { xSum: 0, ySum: 0, count: 0 }; map.set(binKey, entry); }
+          entry.xSum += x;
+          entry.ySum += v;
+          entry.count += 1;
+        });
+      });
+    });
+
+    const traces = [];
+    ycols.forEach((y) => {
+      const map = bins.get(y);
+      if (!map || map.size === 0) return;
+      const points = Array.from(map.values())
+        .map(e => ({ x: e.xSum / e.count, y: e.ySum / e.count }))
+        .sort((a, b) => a.x - b.x);
+      const color = getChannelColor(y);
+      traces.push({
+        x: points.map(p => p.x),
+        y: points.map(p => p.y),
+        yaxis: (channelToRef && channelToRef.get(y)) || 'y',
+        name: `${getChannelLabel(y)} (binned)`,
+        mode: 'lines+markers',
+        line: { color, width: 3 },
+        marker: { color, size: 6, symbol: 'diamond', line: { color: '#fff', width: 1 } },
+        hovertemplate: buildHoverTemplate(getChannelLabel(axisChannel), `${getChannelLabel(y)} (binned)`)
+      });
+    });
+    return traces;
+  }
+
+  // Classifies a filter channel the exact same way the color axis does (classifyColorAxisValues),
+  // using every value of that channel across all loaded files (not just the currently
+  // selected/visible ones) -- the form should offer the same discrete/continuous split
+  // regardless of which files happen to be checked while the filter is being edited.
+  function computeDataFilterChannelClassification(channel) {
+    if (!channel) return null;
+    const rawValues = [];
+    logs.forEach((log) => {
+      const resolvedCol = resolveChannelForLog(channel, log);
+      if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
+      log.data.forEach((row) => {
+        const v = row[resolvedCol];
+        if (v !== null && v !== undefined && v !== '') rawValues.push(v);
+      });
+    });
+    return classifyColorAxisValues(rawValues);
+  }
+
+  function formatDataFilterHintNumber(n) {
+    return String(Math.round(n * 1000) / 1000);
+  }
+
+  function populateDataFilterValuesSelect(classification) {
+    if (!dataFilterValuesSelect) return;
+    dataFilterValuesSelect.innerHTML = classification.categories.map((cat) => (
+      `<option value="${escapeHtml(String(cat))}">${escapeHtml(String(cat))}</option>`
+    )).join('');
+  }
+
+  // Single entry point for reacting to a channel pick in the filter form: reclassifies the
+  // channel, swaps between the range fields and the discrete multiselect, and updates the
+  // hint line. Called on channel change and whenever the form is opened (add or edit).
+  function updateDataFilterFormForChannel() {
+    const channel = dataFilterChannelSelect ? dataFilterChannelSelect.value : '';
+    const classification = channel ? computeDataFilterChannelClassification(channel) : null;
+
+    const isDiscrete = !!(classification && classification.kind === 'discrete');
+    if (dataFilterRangeField) dataFilterRangeField.hidden = isDiscrete;
+    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = !isDiscrete;
+
+    if (isDiscrete) {
+      populateDataFilterValuesSelect(classification);
+    }
+
+    if (!dataFilterRangeHint) return;
+    if (isDiscrete) {
+      const n = classification.categories.length;
+      dataFilterRangeHint.textContent = `Discrete channel — ${n} distinct value${n === 1 ? '' : 's'}`;
+    } else if (classification) {
+      dataFilterRangeHint.textContent =
+        `Data range: ${formatDataFilterHintNumber(classification.min)} – ${formatDataFilterHintNumber(classification.max)}`;
+    } else {
+      dataFilterRangeHint.textContent = '';
+    }
   }
 
   let mathChActiveSuggIdx = -1;
@@ -1547,7 +1811,7 @@
       channelMap = normalized;
       if (logs.length > 0) {
         populateYSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         updatePlot();
       }
     } catch (err) {
@@ -1775,6 +2039,158 @@
     }
   }
 
+  function populateColorAxisSelect() {
+    if (!colorAxisSelect) return;
+    const previousValue = colorAxisSelect.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    colorAxisSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(colorAxisSelect.options).some(o => o.value === previousValue)) {
+      colorAxisSelect.value = previousValue;
+    } else if (colorAxisSelect.options.length > 0) {
+      colorAxisSelect.value = colorAxisSelect.options[0].value;
+    }
+  }
+
+  function populateDataFilterChannelSelect() {
+    if (!dataFilterChannelSelect) return;
+    const previousValue = dataFilterChannelSelect.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+    dataFilterChannelSelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(dataFilterChannelSelect.options).some(o => o.value === previousValue)) {
+      dataFilterChannelSelect.value = previousValue;
+    } else if (dataFilterChannelSelect.options.length > 0) {
+      dataFilterChannelSelect.value = dataFilterChannelSelect.options[0].value;
+    }
+  }
+
+  // Shared by the Quick Modify and Math Channel forward/back filter controls: both let the
+  // user pick what to window the average against, defaulting to Time/Distance (which map to
+  // this log's own detected time/distance columns) but allowing any other numeric channel.
+  function populateAxisChannelSelect(selectEl) {
+    if (!selectEl) return;
+    const previousValue = selectEl.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+
+    const builtins = '<option value="time">Time [s]</option><option value="distance">Distance [m]</option>';
+    selectEl.innerHTML = builtins + mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(selectEl.options).some(o => o.value === previousValue)) {
+      selectEl.value = previousValue;
+    } else {
+      selectEl.value = 'time';
+    }
+  }
+
   function populateXCustomSelect() {
     const previousValue = xCustomSelect ? xCustomSelect.value : '';
     const numericCols = new Set();
@@ -1885,13 +2301,18 @@
       html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
       const totalFileLaps = fileLaps.length;
       fileLaps.forEach((n, idx) => {
-        const color = colorForLap(n);
+        const color = getLapColor(log.id, n);
         const dur = getLapDuration(log.meta, n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
         // Uncheck first and last lap (in/out laps) when there are 3 or more laps
         const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
         const checkedAttr = isInOutLap ? '' : ' checked';
-        html.push(`<label class="lap-item"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
+        html.push(
+          `<div class="lap-item">` +
+          `<label class="lap-toggle"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>` +
+          `<input type="color" class="lap-color-input" data-id="${log.id}" data-lap="${n}" value="${color}" aria-label="Color for lap ${n} (${escapeHtml(log.name)})" />` +
+          `</div>`
+        );
       });
       html.push('</div></div>');
     });
@@ -3014,7 +3435,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
   }
@@ -3082,7 +3503,7 @@
         if (xArr.length > 1) {
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
           const keys = maskIdx.map(i => rowKey(log.id, lap, i));
-          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
+          lapSeries.push({file: log.name, fileId: log.id, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
         }
       });
     });
@@ -3153,7 +3574,7 @@
           nonCrashMinDelta = traceMin;
         }
       }
-      const color = colorForLap(s.lap);
+      const color = getLapColor(s.fileId, s.lap);
       const dash = getLineDashForFileIndex(s.fileIdx);
       const keyGrid = grid.map((g) => {
         const idx = nearestIndexAtX(s.x, g);
@@ -3974,7 +4395,7 @@
         });
         if (xArr.length < 2) return;
 
-        const color = colorForLap(lap);
+        const color = getLapColor(log.id, lap);
         const dash = DASHES[fileIdx % DASHES.length];
         pendingTraces.push({
           x: xArr,
@@ -4224,6 +4645,154 @@
       cmax: markerCmax,
       colorscale: markerColorscale
     };
+  }
+
+  // Classifies a channel's plotted values as 'discrete' (categorical -- a fixed color per
+  // distinct value) or 'continuous' (a Viridis gradient). Non-numeric values (e.g. a text
+  // LABEL column) are always discrete, since a colorscale has no meaning for them. Numeric
+  // values are discrete when there are few distinct values outright, or few relative to the
+  // sample count -- see COLOR_AXIS_DISCRETE_* above for the exact thresholds.
+  function classifyColorAxisValues(rawValues) {
+    const total = rawValues.length;
+    if (total === 0) return null;
+
+    const allNumeric = rawValues.every((v) => Number.isFinite(Number(v)));
+    const distinctSet = new Set(rawValues.map((v) => (allNumeric ? Number(v) : String(v).trim())));
+    const distinctCount = distinctSet.size;
+
+    const isDiscrete = !allNumeric
+      || distinctCount <= COLOR_AXIS_DISCRETE_ABS_MAX
+      || (distinctCount <= COLOR_AXIS_DISCRETE_RATIO_MAX_COUNT && (distinctCount / total) <= COLOR_AXIS_DISCRETE_RATIO_THRESHOLD);
+
+    if (isDiscrete) {
+      const categories = Array.from(distinctSet).sort((a, b) => (
+        (typeof a === 'number' && typeof b === 'number') ? (a - b) : String(a).localeCompare(String(b))
+      ));
+      return { kind: 'discrete', categories, allNumeric };
+    }
+
+    let min = Infinity, max = -Infinity;
+    rawValues.forEach((v) => {
+      const n = Number(v);
+      if (n < min) min = n;
+      if (n > max) max = n;
+    });
+    return { kind: 'continuous', min, max };
+  }
+
+  // The single source of truth for turning a raw color-channel cell value into the type
+  // (number or trimmed string) that categories/hidden-set membership are keyed by --
+  // classifyColorAxisValues, the legend, and the trace filter all have to agree on this.
+  function normalizeColorAxisCategory(context, rawValue) {
+    return context.allNumeric ? Number(rawValue) : String(rawValue).trim();
+  }
+
+  function isColorAxisCategoryHidden(channel, category) {
+    const hiddenSet = colorAxisHiddenCategoriesByChannel.get(channel);
+    return !!hiddenSet && hiddenSet.has(category);
+  }
+
+  function toggleColorAxisCategoryHidden(channel, category) {
+    let hiddenSet = colorAxisHiddenCategoriesByChannel.get(channel);
+    if (!hiddenSet) {
+      hiddenSet = new Set();
+      colorAxisHiddenCategoriesByChannel.set(channel, hiddenSet);
+    }
+    if (hiddenSet.has(category)) hiddenSet.delete(category);
+    else hiddenSet.add(category);
+  }
+
+  // Gathers every value of `colorAxisChannel` that will actually be plotted (same
+  // file/lap selection the main trace loop uses) and classifies it once, up front, so
+  // every trace shares one consistent color mapping (same cmin/cmax, or the same
+  // category->color assignment) rather than each trace scaling itself independently.
+  function computeColorAxisContext(selFiles, selectedLaps, colorAxisChannel) {
+    if (!colorAxisChannel) return null;
+    const rawValues = [];
+    selFiles.forEach((log) => {
+      const resolvedCol = resolveChannelForLog(colorAxisChannel, log);
+      if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, log.meta.lapNum[i])) return;
+        const v = row[resolvedCol];
+        if (v !== null && v !== undefined && v !== '') rawValues.push(v);
+      });
+    });
+    const classification = classifyColorAxisValues(rawValues);
+    if (!classification) return null;
+    if (classification.kind === 'continuous') {
+      classification.scaleConfig = getMapColorScaleConfig(classification.min, classification.max, 'continuous');
+    }
+    return classification;
+  }
+
+  // Assigns each category a color the first time it's seen, then keeps that assignment
+  // for as long as the app is open -- so switching laps/files in and out doesn't repaint
+  // categories that are still visible (mirrors syncSelectedChannelColors/getChannelColor).
+  function getColorAxisCategoryColor(channel, category) {
+    const key = `${channel}::${category}`;
+    if (colorAxisCategoryColorOverrides.has(key)) return colorAxisCategoryColorOverrides.get(key);
+    const prefix = `${channel}::`;
+    const usedForChannel = new Set();
+    colorAxisCategoryColorOverrides.forEach((color, k) => {
+      if (k.startsWith(prefix)) usedForChannel.add(color);
+    });
+    let color = COLORS.find((candidate) => !usedForChannel.has(candidate));
+    if (!color) color = COLORS[usedForChannel.size % COLORS.length];
+    colorAxisCategoryColorOverrides.set(key, color);
+    return color;
+  }
+
+  // Plotly won't auto-legend a single array-colored trace, so discrete mode gets its own
+  // small legend of category swatches; continuous mode relies on Plotly's own colorbar
+  // (added directly on the first colored trace) so this just hides the discrete legend.
+  function renderColorAxisLegend(channel, context) {
+    if (!colorAxisLegendDiv) return;
+    if (!context || context.kind !== 'discrete') {
+      colorAxisLegendDiv.innerHTML = '';
+      colorAxisLegendDiv.hidden = true;
+      return;
+    }
+    const label = getChannelLabel(channel);
+    const items = context.categories.map((cat) => {
+      const color = getColorAxisCategoryColor(channel, cat);
+      const hidden = isColorAxisCategoryHidden(channel, cat);
+      const cls = hidden ? 'color-axis-legend-item is-hidden' : 'color-axis-legend-item';
+      return `<button type="button" class="${cls}" data-color-axis-category="${escapeHtml(String(cat))}" data-color-axis-numeric="${context.allNumeric ? '1' : '0'}" aria-pressed="${hidden ? 'false' : 'true'}">`
+        + `<span class="color-axis-legend-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(String(cat))}</button>`;
+    }).join('');
+    colorAxisLegendDiv.innerHTML = `<strong>${escapeHtml(label)}:</strong> ${items}`;
+    colorAxisLegendDiv.dataset.channel = channel;
+    colorAxisLegendDiv.hidden = false;
+  }
+
+  // Applies the shared classification from computeColorAxisContext to one trace: switches
+  // it to marker mode (a single 'lines' trace can't vary color along its length) and either
+  // a continuous colorscale or a flat per-category color per point.
+  function applyColorAxisToTrace(trace, colorRawArr, context, channel, showScale) {
+    trace.mode = 'markers';
+    trace.type = 'scattergl';
+    trace.text = colorRawArr.map((v) => (v === null || v === undefined || v === '') ? '' : String(v));
+
+    if (context.kind === 'continuous' && context.scaleConfig) {
+      trace.marker = {
+        color: colorRawArr.map((v) => { const n = Number(v); return Number.isFinite(n) ? n : null; }),
+        colorscale: context.scaleConfig.colorscale,
+        cmin: context.scaleConfig.cmin,
+        cmax: context.scaleConfig.cmax,
+        size: 5,
+        showscale: showScale,
+        colorbar: showScale ? { title: { text: getChannelLabel(channel) } } : undefined
+      };
+    } else {
+      trace.marker = {
+        color: colorRawArr.map((v) => {
+          if (v === null || v === undefined || v === '') return '#999999';
+          return getColorAxisCategoryColor(channel, normalizeColorAxisCategory(context, v));
+        }),
+        size: 5
+      };
+    }
   }
 
   function lerpColorRgb(rgbA, rgbB, t) {
@@ -4692,7 +5261,7 @@
         });
         
         if (latlngs.length >= 1) {
-          const color = colorForLap(lap);
+          const color = getLapColor(log.id, lap);
           const dash = DASHES[fileIdx % DASHES.length];
           if (mapDrawMode === 'scatter') {
             for (let pi = 0; pi < latlngs.length; pi++) {
@@ -4825,8 +5394,177 @@
     return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
-  function buildHoverTemplate(xLabel, yLabel) {
-    return `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}<extra></extra>`;
+  function csvEscapeValue(value) {
+    const s = value === null || value === undefined ? '' : String(value);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function describeActiveDataFiltersForMetadata() {
+    const enabledFilters = getEnabledDataFilters();
+    if (enabledFilters.length === 0) return 'None';
+    return enabledFilters.map(f => formatDataFilterRange(f)).join('; ');
+  }
+
+  // "#"-prefixed lines are a common lightweight convention for metadata at the top of a CSV
+  // export (not meant to be parsed as a data row) -- source file(s) and active data filters
+  // apply to every export; extraLines lets a specific export (e.g. the binned plot) add its
+  // own additional context (bin axis/width) before the blank "#" separator and the real header.
+  function buildCsvMetadataLines(selFiles, extraLines) {
+    const lines = [
+      `# Source file(s): ${selFiles.map(l => l.name).join(', ') || 'None'}`,
+      `# Data filters: ${describeActiveDataFiltersForMetadata()}`
+    ];
+    (extraLines || []).forEach((line) => lines.push(`# ${line}`));
+    lines.push('#');
+    return lines;
+  }
+
+  // Rebuilds exactly what's currently plotted -- same file/lap selection, same data filters,
+  // same X mode, same selected Y channels -- as a CSV, one row per row that's actually
+  // visible in the main plot right now (File, Lap, X, one column per selected Y channel).
+  function buildDisplayedDataCsv() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const xMode = document.querySelector('input[name=xaxis]:checked').value;
+    const customXCol = xCustomSelect ? xCustomSelect.value : '';
+    const xLabel = getXAxisTitle(xMode, customXCol);
+    const enabledFilters = getEnabledDataFilters();
+
+    const header = ['File', 'Lap', xLabel, ...ycols.map(y => getChannelLabel(y))];
+    const lines = buildCsvMetadataLines(selFiles);
+    lines.push(header.map(csvEscapeValue).join(','));
+
+    selFiles.forEach((log) => {
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a, b) => a - b);
+      lapNums.forEach((lap) => {
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        let maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        if (activeFilters.length > 0) {
+          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeFilters));
+        }
+        const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
+        if (!xArr) return;
+        maskIdx.forEach((rowIdx, k) => {
+          const row = [log.name, lap, xArr[k]];
+          resolvedYCols.forEach((resolvedCol) => {
+            const v = (resolvedCol && log.cols.includes(resolvedCol)) ? log.data[rowIdx][resolvedCol] : '';
+            row.push(v === null || v === undefined ? '' : v);
+          });
+          lines.push(row.map(csvEscapeValue).join(','));
+        });
+      });
+    });
+
+    return lines.join('\r\n');
+  }
+
+  function triggerCsvDownload(csv, filenamePrefix) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadDisplayedDataCsv() {
+    triggerCsvDownload(buildDisplayedDataCsv(), 'displayed-data');
+  }
+
+  // Rebuilds the Binned Plot overlay's own points (see computeBinnedOverlayTraces) as a CSV:
+  // one row per bin, a single shared X column (the mean of every in-scope row's axis value in
+  // that bin, regardless of which Y channels it had), and one value column per selected Y
+  // channel -- null/missing for a channel with no data in that particular bin. A shared X
+  // column (rather than each channel's own slightly-different bin mean, which is what the
+  // plotted trace uses) is what makes a single flat table possible when multiple channels
+  // are selected.
+  function buildBinnedPlotCsv() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const axisChannel = binnedPlotAxisSelect ? binnedPlotAxisSelect.value : '';
+    const binWidth = binnedPlotBinWidthInput ? parseFloat(binnedPlotBinWidthInput.value) : NaN;
+    if (!axisChannel || !Number.isFinite(binWidth) || binWidth <= 0 || ycols.length === 0) return null;
+
+    const enabledFilters = getEnabledDataFilters();
+    const bins = new Map(); // binKey -> { xSum, xCount, values: Map(channel -> {sum, count}) }
+
+    selFiles.forEach((log) => {
+      const axisResolvedCol = resolveChannelForLog(axisChannel, log);
+      if (!axisResolvedCol || !log.cols.includes(axisResolvedCol)) return;
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const lapNumArr = log.meta.lapNum || [];
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, lapNumArr[i])) return;
+        if (activeFilters.length > 0 && !rowPassesDataFilters(log, i, activeFilters)) return;
+        const x = Number(row[axisResolvedCol]);
+        if (!Number.isFinite(x)) return;
+        const binKey = Math.round(x / binWidth);
+        let bin = bins.get(binKey);
+        if (!bin) { bin = { xSum: 0, xCount: 0, values: new Map() }; bins.set(binKey, bin); }
+        bin.xSum += x;
+        bin.xCount += 1;
+
+        ycols.forEach((y, yi) => {
+          const resolvedY = resolvedYCols[yi];
+          if (!resolvedY || !log.cols.includes(resolvedY)) return;
+          const v = Number(row[resolvedY]);
+          if (!Number.isFinite(v)) return;
+          let entry = bin.values.get(y);
+          if (!entry) { entry = { sum: 0, count: 0 }; bin.values.set(y, entry); }
+          entry.sum += v;
+          entry.count += 1;
+        });
+      });
+    });
+
+    if (bins.size === 0) return null;
+
+    const header = [getChannelLabel(axisChannel), ...ycols.map(y => `${getChannelLabel(y)} (binned)`)];
+    const lines = buildCsvMetadataLines(selFiles, [
+      `Bin axis: ${getChannelLabel(axisChannel)}`,
+      `Bin width: ${binWidth}`
+    ]);
+    lines.push(header.map(csvEscapeValue).join(','));
+
+    Array.from(bins.keys()).sort((a, b) => a - b).forEach((binKey) => {
+      const bin = bins.get(binKey);
+      const row = [bin.xSum / bin.xCount];
+      ycols.forEach((y) => {
+        const entry = bin.values.get(y);
+        row.push(entry ? entry.sum / entry.count : '');
+      });
+      lines.push(row.map(csvEscapeValue).join(','));
+    });
+
+    return lines.join('\r\n');
+  }
+
+  function downloadBinnedPlotDataCsv() {
+    const csv = buildBinnedPlotCsv();
+    if (!csv) return;
+    triggerCsvDownload(csv, 'binned-plot');
+  }
+
+  function buildHoverTemplate(xLabel, yLabel, colorLabel) {
+    const base = `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}`;
+    if (colorLabel) {
+      // %{text} carries the color channel's raw value per point (see applyColorAxisToTrace) --
+      // customdata is already used elsewhere for hover-sync row lookups, so it can't double
+      // as this.
+      return `${base}<br>${escapeHtml(colorLabel)}: %{text}<extra></extra>`;
+    }
+    return `${base}<extra></extra>`;
   }
 
   function findNearestRowIndexByLapDistance(log, lap, targetDist) {
@@ -5412,12 +6150,24 @@
     }
     const plotByLap = true;
     const selectedLaps = getSelectedLaps();
-    // singleLapSelected: true when exactly one lap is visible across all files
-    const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
-    const singleLapSelected = totalSelectedLaps === 1;
+    const checkedColorMode = document.querySelector('input[name=colorMode]:checked');
+    const colorMode = checkedColorMode ? checkedColorMode.value : 'channel'; // 'lap' | 'channel' | 'axis'
     syncSelectedChannelColors(ycols);
     const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
+
+    const colorAxisEnabled = colorMode === 'axis';
+    const colorAxisChannel = colorAxisEnabled && colorAxisSelect ? colorAxisSelect.value : '';
+    const colorAxisContext = colorAxisChannel ? computeColorAxisContext(selFiles, selectedLaps, colorAxisChannel) : null;
+    renderColorAxisLegend(colorAxisChannel, colorAxisContext);
+    let colorAxisScaleShown = false;
+
+    const enabledDataFilters = getEnabledDataFilters();
+
+    const binnedPlotEnabled = !!(binnedPlotEnabledInput && binnedPlotEnabledInput.checked);
+    const binnedPlotAxis = binnedPlotAxisSelect ? binnedPlotAxisSelect.value : '';
+    const binnedPlotBinWidth = binnedPlotBinWidthInput ? parseFloat(binnedPlotBinWidthInput.value) : NaN;
+
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
@@ -5514,21 +6264,40 @@
 
     selFiles.forEach((log, li) => {
       const fileColor = COLORS[li % COLORS.length];
+      const colorAxisResolvedCol = colorAxisContext ? resolveChannelForLog(colorAxisChannel, log) : '';
+      const canColorByChannel = !!(colorAxisResolvedCol && log.cols.includes(colorAxisResolvedCol));
+      const activeDataFilters = resolveDataFiltersForLog(log, enabledDataFilters);
       // plot each selected lap separately, x axis is Lap Time or Lap Distance
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
-        const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+        if (activeDataFilters.length > 0) {
+          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeDataFilters));
+        }
+        if (canColorByChannel && colorAxisContext.kind === 'discrete') {
+          const hiddenSet = colorAxisHiddenCategoriesByChannel.get(colorAxisChannel);
+          if (hiddenSet && hiddenSet.size > 0) {
+            // Points with no reading for the color channel stay visible -- there's no
+            // category to have clicked off in the legend in the first place.
+            maskIdx = maskIdx.filter((i) => {
+              const raw = log.data[i][colorAxisResolvedCol];
+              if (raw === null || raw === undefined || raw === '') return true;
+              return !hiddenSet.has(normalizeColorAxisCategory(colorAxisContext, raw));
+            });
+          }
+        }
         const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
         if (!xArr) return;
+        const colorRawArr = canColorByChannel ? maskIdx.map(i => log.data[i][colorAxisResolvedCol]) : null;
         ycols.forEach(y => {
           const resolvedCol = resolveChannelForLog(y, log);
           if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
-          const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
+          const traceColor = colorMode === 'lap' ? getLapColor(log.id, lap) : (channelColors.get(y) || fileColor);
           const dash = getLineDashForFileIndex(li);
-          traces.push({
+          const trace = {
             x: xArr,
             y: yArr,
             customdata: keyArr,
@@ -5538,7 +6307,13 @@
             marker:{color: traceColor},
             line:{color: traceColor, dash},
             hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y))
-          });
+          };
+          if (colorRawArr) {
+            applyColorAxisToTrace(trace, colorRawArr, colorAxisContext, colorAxisChannel, !colorAxisScaleShown);
+            trace.hovertemplate = buildHoverTemplate(mainXTitle, getChannelLabel(y), getChannelLabel(colorAxisChannel));
+            if (colorAxisContext.kind === 'continuous') colorAxisScaleShown = true;
+          }
+          traces.push(trace);
         });
       });
     });
@@ -5562,6 +6337,10 @@
           hovertemplate: buildHoverTemplate(mainXTitle, 'Race Lap Curvature [1/m]')
         });
       }
+    }
+
+    if (binnedPlotEnabled && Number.isFinite(binnedPlotBinWidth) && binnedPlotBinWidth > 0) {
+      traces.push(...computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, binnedPlotAxis, binnedPlotBinWidth, channelToRef));
     }
 
     // if shading requested and plotting by lap, compute envelope per Y channel
@@ -5818,6 +6597,39 @@
   if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
   if (mapDrawModeSelect) mapDrawModeSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
+  document.querySelectorAll('input[name=colorMode]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (colorAxisSelect) colorAxisSelect.disabled = radio.value !== 'axis';
+      updatePlot();
+    });
+  });
+  if (colorAxisSelect) colorAxisSelect.addEventListener('change', ()=> updatePlot());
+  if (colorAxisLegendDiv) {
+    colorAxisLegendDiv.addEventListener('click', (ev) => {
+      const btn = ev.target instanceof Element ? ev.target.closest('[data-color-axis-category]') : null;
+      if (!btn) return;
+      const channel = colorAxisLegendDiv.dataset.channel || '';
+      if (!channel) return;
+      const isNumeric = btn.getAttribute('data-color-axis-numeric') === '1';
+      const raw = btn.getAttribute('data-color-axis-category');
+      const category = isNumeric ? Number(raw) : raw;
+      toggleColorAxisCategoryHidden(channel, category);
+      updatePlot();
+    });
+  }
+  if (binnedPlotEnabledInput) {
+    binnedPlotEnabledInput.addEventListener('change', () => {
+      const enabled = binnedPlotEnabledInput.checked;
+      if (binnedPlotAxisSelect) {
+        binnedPlotAxisSelect.disabled = !enabled;
+        if (enabled) populateAxisChannelSelect(binnedPlotAxisSelect);
+      }
+      if (binnedPlotBinWidthInput) binnedPlotBinWidthInput.disabled = !enabled;
+      updatePlot();
+    });
+  }
+  if (binnedPlotAxisSelect) binnedPlotAxisSelect.addEventListener('change', () => updatePlot());
+  if (binnedPlotBinWidthInput) binnedPlotBinWidthInput.addEventListener('input', () => updatePlot());
   ySelect.addEventListener('change', ()=> {
     renderSelectedChannelColorControls();
     updatePlot();
@@ -5885,7 +6697,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         renderLapsList();
         Plotly.purge(plotDiv);
         clearXYMapPlot();
@@ -5949,6 +6761,30 @@
     lapsList.addEventListener('change', (ev)=>{
       if (ev.target.matches('input[type=checkbox]')) updatePlot();
     });
+    lapsList.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'color') return;
+      const fileId = target.getAttribute('data-id');
+      const lap = Number(target.getAttribute('data-lap'));
+      if (!fileId || !Number.isFinite(lap)) return;
+      const color = normalizeHexColor(target.value);
+      setLapColor(fileId, lap, color);
+      const item = target.closest('.lap-item');
+      const checkbox = item ? item.querySelector('input[type=checkbox]') : null;
+      const label = item ? item.querySelector('.lap-label') : null;
+      if (checkbox) checkbox.style.accentColor = color;
+      if (label) label.style.color = color;
+      updatePlot();
+    });
+  }
+
+  if (downloadDisplayedDataBtn) {
+    downloadDisplayedDataBtn.addEventListener('click', () => {
+      downloadDisplayedDataCsv();
+      if (binnedPlotEnabledInput && binnedPlotEnabledInput.checked) {
+        downloadBinnedPlotDataCsv();
+      }
+    });
   }
 
   clearBtn.addEventListener('click', ()=>{
@@ -5978,7 +6814,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     Plotly.purge(plotDiv);
     clearXYMapPlot();
@@ -6009,12 +6845,46 @@
         if (mc && typeof mc.name === 'string' && typeof mc.expression === 'string') {
           const entry = { name: mc.name, expression: mc.expression, unit: mc.unit || '' };
           if (mc.smoothing && typeof mc.smoothing === 'object' && mc.smoothing.window > 0) {
-            entry.smoothing = { window: mc.smoothing.window, mode: mc.smoothing.mode || 'time' };
+            // mc.smoothing.mode is the pre-"filter on channel" field name (always 'time' or
+            // 'distance') -- still a valid axisChannel value, so reading it as a fallback
+            // here is enough to load older saved math channels without a migration step.
+            entry.smoothing = { window: mc.smoothing.window, axisChannel: mc.smoothing.axisChannel || mc.smoothing.mode || 'time' };
           }
           mathChannels.push(entry);
         }
       });
       if (mathChannels.length > 0) renderMathChannelsList();
+    } catch {}
+  })();
+
+  function saveDataFilters() {
+    try {
+      localStorage.setItem('dataFiltersState', JSON.stringify({
+        enabled: !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked),
+        filters: dataFilters
+      }));
+    } catch {}
+  }
+
+  (function loadDataFilters() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('dataFiltersState') || 'null');
+      if (saved && Array.isArray(saved.filters)) {
+        saved.filters.forEach(f => {
+          if (!f || typeof f.channel !== 'string' || !f.channel) return;
+          const enabled = f.enabled !== false;
+          if (f.kind === 'discrete' && Array.isArray(f.values) && f.values.length > 0) {
+            dataFilters.push({ channel: f.channel, kind: 'discrete', values: f.values.slice(), allNumeric: !!f.allNumeric, enabled });
+            return;
+          }
+          const min = Number.isFinite(f.min) ? f.min : null;
+          const max = Number.isFinite(f.max) ? f.max : null;
+          if (min === null && max === null) return;
+          dataFilters.push({ channel: f.channel, kind: 'range', min, max, enabled });
+        });
+      }
+      if (dataFiltersEnabledInput) dataFiltersEnabledInput.checked = !saved || saved.enabled !== false;
+      if (dataFilters.length > 0) renderDataFiltersList();
     } catch {}
   })();
 
@@ -6080,6 +6950,9 @@
     if (mathChName) mathChName.value = '';
     if (mathChExpr) mathChExpr.value = '';
     if (mathChUnit) mathChUnit.value = '';
+    if (mathChFilterEnabled) mathChFilterEnabled.checked = false;
+    if (mathChFilterControls) mathChFilterControls.hidden = true;
+    if (mathChFilterWindow) mathChFilterWindow.value = '0.5';
     if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
     if (mathChPreview) mathChPreview.hidden = true;
     if (mathChSave) mathChSave.textContent = 'Add Channel';
@@ -6090,6 +6963,7 @@
   if (addMathChannelBtn) {
     addMathChannelBtn.addEventListener('click', () => {
       if (mathChannelForm) mathChannelForm.hidden = false;
+      if (mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
       if (mathChName) mathChName.focus();
       addMathChannelBtn.disabled = true;
     });
@@ -6097,6 +6971,13 @@
 
   if (mathChCancel) {
     mathChCancel.addEventListener('click', resetMathChForm);
+  }
+
+  if (mathChFilterEnabled) {
+    mathChFilterEnabled.addEventListener('change', () => {
+      if (mathChFilterControls) mathChFilterControls.hidden = !mathChFilterEnabled.checked;
+      if (mathChFilterEnabled.checked && mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
+    });
   }
 
   if (mathChSave) {
@@ -6122,6 +7003,12 @@
       if (!testResult.valid) return showMathChError(testResult.error);
 
       const mc = { name, expression, unit };
+      if (mathChFilterEnabled && mathChFilterEnabled.checked) {
+        const w = parseFloat(mathChFilterWindow ? mathChFilterWindow.value : '');
+        const axisChannel = mathChFilterAxis ? mathChFilterAxis.value : 'time';
+        if (!Number.isFinite(w) || w <= 0) return showMathChError('Filter window must be a positive number.');
+        mc.smoothing = { window: w, axisChannel: axisChannel || 'time' };
+      }
 
       if (isEditing) {
         // Remove old column data from all logs before re-applying with new definition
@@ -6142,7 +7029,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
       resetMathChForm();
     });
@@ -6159,6 +7046,16 @@
         if (mathChName) { mathChName.value = mc.name; mathChName.disabled = true; }
         if (mathChExpr) mathChExpr.value = mc.expression;
         if (mathChUnit) mathChUnit.value = mc.unit || '';
+        if (mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
+        if (mc.smoothing && mc.smoothing.window > 0) {
+          if (mathChFilterEnabled) mathChFilterEnabled.checked = true;
+          if (mathChFilterControls) mathChFilterControls.hidden = false;
+          if (mathChFilterAxis) mathChFilterAxis.value = mc.smoothing.axisChannel || 'time';
+          if (mathChFilterWindow) mathChFilterWindow.value = mc.smoothing.window;
+        } else {
+          if (mathChFilterEnabled) mathChFilterEnabled.checked = false;
+          if (mathChFilterControls) mathChFilterControls.hidden = true;
+        }
         if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
         if (mathChPreview) mathChPreview.hidden = true;
         if (mathChSave) mathChSave.textContent = 'Save Changes';
@@ -6183,7 +7080,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
     });
   }
@@ -6264,6 +7161,135 @@
     });
   }
 
+  // Data Filters event handlers
+
+  function showDataFilterError(msg) {
+    if (dataFilterError) { dataFilterError.textContent = msg; dataFilterError.hidden = false; }
+  }
+
+  function resetDataFilterForm() {
+    dataFilterEditIdx = -1;
+    if (dataFilterForm) dataFilterForm.hidden = true;
+    if (dataFilterMinInput) dataFilterMinInput.value = '';
+    if (dataFilterMaxInput) dataFilterMaxInput.value = '';
+    if (dataFilterValuesSelect) dataFilterValuesSelect.innerHTML = '';
+    if (dataFilterRangeField) dataFilterRangeField.hidden = false;
+    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = true;
+    if (dataFilterError) { dataFilterError.hidden = true; dataFilterError.textContent = ''; }
+    if (dataFilterRangeHint) dataFilterRangeHint.textContent = '';
+    if (dataFilterSaveBtn) dataFilterSaveBtn.textContent = 'Add Filter';
+    if (addDataFilterBtn) addDataFilterBtn.disabled = false;
+  }
+
+  if (addDataFilterBtn) {
+    addDataFilterBtn.addEventListener('click', () => {
+      populateDataFilterChannelSelect();
+      updateDataFilterFormForChannel();
+      if (dataFilterForm) dataFilterForm.hidden = false;
+      addDataFilterBtn.disabled = true;
+      if (dataFilterChannelSelect) dataFilterChannelSelect.focus();
+    });
+  }
+
+  if (dataFilterChannelSelect) dataFilterChannelSelect.addEventListener('change', updateDataFilterFormForChannel);
+
+  if (dataFilterCancelBtn) dataFilterCancelBtn.addEventListener('click', resetDataFilterForm);
+
+  if (dataFilterSaveBtn) {
+    dataFilterSaveBtn.addEventListener('click', () => {
+      const channel = dataFilterChannelSelect ? dataFilterChannelSelect.value : '';
+      if (!channel) return showDataFilterError('Channel is required.');
+
+      const isEditing = dataFilterEditIdx >= 0 && dataFilterEditIdx < dataFilters.length;
+      const enabled = isEditing ? dataFilters[dataFilterEditIdx].enabled : true;
+      const classification = computeDataFilterChannelClassification(channel);
+      let filter;
+
+      if (classification && classification.kind === 'discrete') {
+        const selected = dataFilterValuesSelect ? Array.from(dataFilterValuesSelect.selectedOptions).map(o => o.value) : [];
+        if (selected.length === 0) return showDataFilterError('Select at least one value.');
+        const values = selected.map((raw) => classification.allNumeric ? Number(raw) : raw);
+        filter = { channel, kind: 'discrete', values, allNumeric: classification.allNumeric, enabled };
+      } else {
+        const minRaw = dataFilterMinInput ? dataFilterMinInput.value.trim() : '';
+        const maxRaw = dataFilterMaxInput ? dataFilterMaxInput.value.trim() : '';
+        const min = minRaw === '' ? null : Number(minRaw);
+        const max = maxRaw === '' ? null : Number(maxRaw);
+        if (minRaw !== '' && !Number.isFinite(min)) return showDataFilterError('Min must be a number.');
+        if (maxRaw !== '' && !Number.isFinite(max)) return showDataFilterError('Max must be a number.');
+        if (min === null && max === null) return showDataFilterError('Enter a min, a max, or both.');
+        if (min !== null && max !== null && min > max) return showDataFilterError('Min must be less than or equal to Max.');
+        filter = { channel, kind: 'range', min, max, enabled };
+      }
+
+      if (isEditing) {
+        dataFilters[dataFilterEditIdx] = filter;
+      } else {
+        dataFilters.push(filter);
+      }
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+      resetDataFilterForm();
+    });
+  }
+
+  if (dataFiltersList) {
+    dataFiltersList.addEventListener('click', ev => {
+      const editBtn = ev.target.closest('.data-filter-edit');
+      if (editBtn) {
+        const idx = Number(editBtn.dataset.idx);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+        const f = dataFilters[idx];
+        dataFilterEditIdx = idx;
+        populateDataFilterChannelSelect();
+        if (dataFilterChannelSelect) dataFilterChannelSelect.value = f.channel;
+        updateDataFilterFormForChannel();
+        // updateDataFilterFormForChannel() reclassifies against the currently loaded data,
+        // which is what decides whether the range fields or the values multiselect is shown;
+        // restore whichever one of those it actually rendered.
+        if (f.kind === 'discrete' && dataFilterValuesSelect && !dataFilterDiscreteField.hidden) {
+          const wanted = new Set((f.values || []).map((v) => String(v)));
+          Array.from(dataFilterValuesSelect.options).forEach((opt) => { opt.selected = wanted.has(opt.value); });
+        } else {
+          if (dataFilterMinInput) dataFilterMinInput.value = (f.min === null || f.min === undefined) ? '' : f.min;
+          if (dataFilterMaxInput) dataFilterMaxInput.value = (f.max === null || f.max === undefined) ? '' : f.max;
+        }
+        if (dataFilterError) { dataFilterError.hidden = true; dataFilterError.textContent = ''; }
+        if (dataFilterSaveBtn) dataFilterSaveBtn.textContent = 'Save Changes';
+        if (dataFilterForm) dataFilterForm.hidden = false;
+        if (addDataFilterBtn) addDataFilterBtn.disabled = true;
+        return;
+      }
+
+      const deleteBtn = ev.target.closest('.data-filter-delete');
+      if (!deleteBtn) return;
+      const idx = Number(deleteBtn.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+      dataFilters.splice(idx, 1);
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+    });
+
+    dataFiltersList.addEventListener('change', ev => {
+      if (!ev.target.matches('.data-filter-item-enabled')) return;
+      const idx = Number(ev.target.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= dataFilters.length) return;
+      dataFilters[idx].enabled = ev.target.checked;
+      saveDataFilters();
+      renderDataFiltersList();
+      updatePlot();
+    });
+  }
+
+  if (dataFiltersEnabledInput) {
+    dataFiltersEnabledInput.addEventListener('change', () => {
+      saveDataFilters();
+      updatePlot();
+    });
+  }
+
   // Quick Modify event handlers
 
   if (quickModNegate) {
@@ -6286,6 +7312,7 @@
     quickModFilter.addEventListener('change', () => {
       quickModState.filter = quickModFilter.checked;
       if (quickModFilterControls) quickModFilterControls.hidden = !quickModFilter.checked;
+      if (quickModFilter.checked && quickModFilterAxis) populateAxisChannelSelect(quickModFilterAxis);
       if (quickModCreateBtn) quickModCreateBtn.disabled = !hasQuickModActive();
       updateQuickModPreview();
     });
@@ -6299,9 +7326,9 @@
     });
   }
 
-  if (quickModFilterMode) {
-    quickModFilterMode.addEventListener('change', () => {
-      quickModState.filterMode = quickModFilterMode.value || 'time';
+  if (quickModFilterAxis) {
+    quickModFilterAxis.addEventListener('change', () => {
+      quickModState.filterAxis = quickModFilterAxis.value || 'time';
       if (quickModState.filter) updateQuickModPreview();
     });
   }
@@ -6342,7 +7369,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
     });
   }

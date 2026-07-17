@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const Papa = require('papaparse');
 
 function loadLogFileProcessors() {
   const scriptPath = path.join(__dirname, '..', 'file-processors.js');
@@ -67,13 +68,61 @@ test('calculates Total Acceleration (calc) for AiM rows', () => {
   assert.equal(processed.units[total], 'g');
 });
 
+// Shared fixture for the TSV-detection tests below: a metadata preamble followed by
+// header/units/data rows, real tab characters throughout (as Papa.parse would tokenize a
+// genuinely tab-delimited file) -- the same shape as the Calspan/TIRF sample, which has no
+// "Format"/"Source" metadata field and a header row that isn't at index 0, so it can't be
+// recognized any other way than "this came from a tab-delimited file".
+function buildTsvRows() {
+  const text = [
+    'TIRF Data File: Project 2881; Run 004',
+    'ET\tV\tTSTO\tTSTC\tLABEL',
+    's\tkph\tdeg c\tdeg c\tnone',
+    '460.850\t59.95\t36.38\t35.23\tCHECK',
+    '460.855\t59.95\t36.43\t35.23\tCHECK'
+  ].join('\n');
+  return Papa.parse(text, { header: false, dynamicTyping: true, skipEmptyLines: true, delimiter: '\t' }).data;
+}
+
+test('processCsvRows auto-detects TSV when told the source was tab-delimited', () => {
+  const processors = loadLogFileProcessors();
+  const rows = buildTsvRows();
+
+  const processed = processors.processCsvRows(rows, { delimiter: 'tab' });
+  assert.ok(processed, 'processCsvRows should return a processed payload');
+  assert.equal(processed.meta.source, 'TSV');
+  assert.equal(processed.meta.format, 'TSV');
+  assert.deepEqual(processed.cols, ['ET', 'V', 'TSTO', 'TSTC', 'LABEL']);
+  assert.equal(processed.units.TSTO, 'deg c');
+  assert.equal(processed.data[0].TSTO, 36.38);
+});
+
+test('processCsvRows does not classify as TSV without delimiter:"tab" in options', () => {
+  const processors = loadLogFileProcessors();
+  const rows = buildTsvRows();
+
+  const processed = processors.processCsvRows(rows, {});
+  assert.ok(processed, 'processCsvRows should return a processed payload');
+  assert.equal(processed.meta.source, 'Generic', 'same rows without the delimiter hint should fall back to Generic');
+});
+
+test('processCsvRowsWithDecoder can force the TSV decoder', () => {
+  const processors = loadLogFileProcessors();
+  const rows = buildTsvRows();
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'TSV');
+  assert.ok(processed, 'processCsvRowsWithDecoder should return a processed payload');
+  assert.equal(processed.meta.source, 'TSV');
+  assert.deepEqual(processed.cols, ['ET', 'V', 'TSTO', 'TSTC', 'LABEL']);
+});
+
 test('AVAILABLE_DECODERS is exported and contains expected decoders', () => {
   const processors = loadLogFileProcessors();
   assert.ok(processors, 'LogFileProcessors should be defined');
   assert.ok(Array.isArray(processors.AVAILABLE_DECODERS), 'AVAILABLE_DECODERS should be an array');
 
   const names = processors.AVAILABLE_DECODERS.map(d => d.name);
-  for (const expected of ['GP Bikes', 'AiM', 'MoTeC', 'VIGrade', 'ScanMyTesla', 'Standard', 'Generic']) {
+  for (const expected of ['GP Bikes', 'AiM', 'MoTeC', 'VIGrade', 'ScanMyTesla', 'Standard', 'TSV', 'Generic']) {
     assert.ok(names.includes(expected), `AVAILABLE_DECODERS should include "${expected}"`);
   }
 
