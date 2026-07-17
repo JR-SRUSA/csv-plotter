@@ -3,7 +3,6 @@
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
   const selectedYColors = document.getElementById('selectedYColors');
-  const colorAxisEnabledInput = document.getElementById('colorAxisEnabled');
   const colorAxisSelect = document.getElementById('colorAxisSelect');
   const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
   const xCustomSelect = document.getElementById('xCustomSelect');
@@ -136,6 +135,10 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
+  // "fileId::lap" -> hex color. Per-file (not just per-lap-number) so two files that
+  // happen to share a lap number can still be colored independently; falls back to
+  // colorForLap()'s deterministic default wherever no override has been set.
+  const lapColorOverrides = new Map();
   // "channel category" -> hex color, assigned stably the same way channelColorOverrides
   // is: first unused COLORS entry, kept forever once assigned, so a category's color doesn't
   // shift when the visible set of categories changes (e.g. a lap filter).
@@ -768,6 +771,19 @@
     return COLORS[idx];
   }
 
+  function lapColorKey(fileId, lap) {
+    return `${fileId}::${lap}`;
+  }
+
+  function getLapColor(fileId, lap) {
+    const key = lapColorKey(fileId, lap);
+    return normalizeHexColor(lapColorOverrides.has(key) ? lapColorOverrides.get(key) : colorForLap(lap));
+  }
+
+  function setLapColor(fileId, lap, color) {
+    lapColorOverrides.set(lapColorKey(fileId, lap), normalizeHexColor(color));
+  }
+
   // The racing-line synthetic log is always a single lap numbered 1, so this is exactly
   // the color the laps list will show for it once added -- used to keep the map polyline
   // and the curvature comparison trace visually matched to that sidebar entry, both
@@ -1009,6 +1025,10 @@
   }
 
   function parseFile(file) {
+    // Set by whichever branch below actually runs, before `complete` fires -- lets
+    // processCsvRows() know whether this file was tab-delimited (see isTsvFormat in
+    // file-processors.js) without re-sniffing already-tokenized rows itself.
+    let detectedDelimiter = 'auto';
     const parseConfig = {
       header: false,
       dynamicTyping: true,
@@ -1020,7 +1040,7 @@
           return;
         }
 
-        const processed = window.LogFileProcessors.processCsvRows(rows, file.name);
+        const processed = window.LogFileProcessors.processCsvRows(rows, { delimiter: detectedDelimiter });
         if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
           console.error('Failed to process CSV file:', file.name);
           return;
@@ -1037,9 +1057,9 @@
       }
     };
 
-    // PapaParse's own delimiter guessing covers comma/tab/semicolon/pipe already, but
-    // can't express "one or more spaces" as a delimiter -- so a plain whitespace-column
-    // log (metadata lines and all) needs sniffing + pre-normalizing to tabs first.
+    // PapaParse's own delimiter guessing covers comma/semicolon/pipe already, but
+    // content-sniffing a short or metadata-heavy tab file can be less reliable than
+    // just checking for tab characters directly, so that case is sniffed up front.
     // Falls back to handing PapaParse the raw File directly (its normal auto-detect) if
     // the browser lacks file.text() or the processors module isn't loaded yet.
     const processors = window.LogFileProcessors;
@@ -1053,14 +1073,12 @@
       // fallback below and silently re-parsing (and re-adding) the same file a second time.
       // The two-argument form only invokes onRejected for a genuine file.text() rejection.
       file.text().then((text) => {
-        // .dat logs are treated as tab/whitespace-delimited outright rather than
-        // sniffed -- they're never a comma CSV in practice, and content-sniffing a
-        // short or metadata-heavy file can be less reliable than just knowing from
-        // the extension.
-        const delimiter = forceTsv ? 'whitespace' : processors.detectFieldDelimiter(text);
-        if (delimiter === 'whitespace') {
-          Papa.parse(processors.normalizeWhitespaceDelimitedText(text), Object.assign({}, parseConfig, { delimiter: '\t' }));
-        } else if (delimiter === 'tab') {
+        // .dat logs are treated as tab-delimited outright rather than sniffed -- they're
+        // never a comma CSV in practice, and content-sniffing a short or metadata-heavy
+        // file can be less reliable than just knowing from the extension.
+        const delimiter = forceTsv ? 'tab' : processors.detectFieldDelimiter(text);
+        detectedDelimiter = delimiter;
+        if (delimiter === 'tab') {
           Papa.parse(text, Object.assign({}, parseConfig, { delimiter: '\t' }));
         } else {
           Papa.parse(text, parseConfig);
@@ -2097,13 +2115,18 @@
       html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
       const totalFileLaps = fileLaps.length;
       fileLaps.forEach((n, idx) => {
-        const color = colorForLap(n);
+        const color = getLapColor(log.id, n);
         const dur = getLapDuration(log.meta, n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
         // Uncheck first and last lap (in/out laps) when there are 3 or more laps
         const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
         const checkedAttr = isInOutLap ? '' : ' checked';
-        html.push(`<label class="lap-item"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>`);
+        html.push(
+          `<div class="lap-item">` +
+          `<label class="lap-toggle"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>` +
+          `<input type="color" class="lap-color-input" data-id="${log.id}" data-lap="${n}" value="${color}" aria-label="Color for lap ${n} (${escapeHtml(log.name)})" />` +
+          `</div>`
+        );
       });
       html.push('</div></div>');
     });
@@ -3294,7 +3317,7 @@
         if (xArr.length > 1) {
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
           const keys = maskIdx.map(i => rowKey(log.id, lap, i));
-          lapSeries.push({file: log.name, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
+          lapSeries.push({file: log.name, fileId: log.id, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
         }
       });
     });
@@ -3365,7 +3388,7 @@
           nonCrashMinDelta = traceMin;
         }
       }
-      const color = colorForLap(s.lap);
+      const color = getLapColor(s.fileId, s.lap);
       const dash = getLineDashForFileIndex(s.fileIdx);
       const keyGrid = grid.map((g) => {
         const idx = nearestIndexAtX(s.x, g);
@@ -4186,7 +4209,7 @@
         });
         if (xArr.length < 2) return;
 
-        const color = colorForLap(lap);
+        const color = getLapColor(log.id, lap);
         const dash = DASHES[fileIdx % DASHES.length];
         pendingTraces.push({
           x: xArr,
@@ -5052,7 +5075,7 @@
         });
         
         if (latlngs.length >= 1) {
-          const color = colorForLap(lap);
+          const color = getLapColor(log.id, lap);
           const dash = DASHES[fileIdx % DASHES.length];
           if (mapDrawMode === 'scatter') {
             for (let pi = 0; pi < latlngs.length; pi++) {
@@ -5779,14 +5802,13 @@
     }
     const plotByLap = true;
     const selectedLaps = getSelectedLaps();
-    // singleLapSelected: true when exactly one lap is visible across all files
-    const totalSelectedLaps = Array.from(selectedLaps.values()).reduce((sum, s) => sum + s.size, 0);
-    const singleLapSelected = totalSelectedLaps === 1;
+    const checkedColorMode = document.querySelector('input[name=colorMode]:checked');
+    const colorMode = checkedColorMode ? checkedColorMode.value : 'channel'; // 'lap' | 'channel' | 'axis'
     syncSelectedChannelColors(ycols);
     const channelColors = new Map(ycols.map((y) => [y, getChannelColor(y)]));
     const mainXTitle = getXAxisTitle(xMode, customXCol);
 
-    const colorAxisEnabled = !!(colorAxisEnabledInput && colorAxisEnabledInput.checked);
+    const colorAxisEnabled = colorMode === 'axis';
     const colorAxisChannel = colorAxisEnabled && colorAxisSelect ? colorAxisSelect.value : '';
     const colorAxisContext = colorAxisChannel ? computeColorAxisContext(selFiles, selectedLaps, colorAxisChannel) : null;
     renderColorAxisLegend(colorAxisChannel, colorAxisContext);
@@ -5945,7 +5967,7 @@
           if (!resolvedCol || !log.cols.includes(resolvedCol)) return; // channel not in this file
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
-          const traceColor = singleLapSelected ? (channelColors.get(y) || fileColor) : colorForLap(lap);
+          const traceColor = colorMode === 'lap' ? getLapColor(log.id, lap) : (channelColors.get(y) || fileColor);
           const dash = getLineDashForFileIndex(li);
           const trace = {
             x: xArr,
@@ -6243,12 +6265,12 @@
   if (mapColorSelect) mapColorSelect.addEventListener('change', ()=> updatePlot());
   if (mapDrawModeSelect) mapDrawModeSelect.addEventListener('change', ()=> updatePlot());
   if (mapColorModeSelect) mapColorModeSelect.addEventListener('change', ()=> updatePlot());
-  if (colorAxisEnabledInput) {
-    colorAxisEnabledInput.addEventListener('change', () => {
-      if (colorAxisSelect) colorAxisSelect.disabled = !colorAxisEnabledInput.checked;
+  document.querySelectorAll('input[name=colorMode]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (colorAxisSelect) colorAxisSelect.disabled = radio.value !== 'axis';
       updatePlot();
     });
-  }
+  });
   if (colorAxisSelect) colorAxisSelect.addEventListener('change', ()=> updatePlot());
   if (colorAxisLegendDiv) {
     colorAxisLegendDiv.addEventListener('click', (ev) => {
@@ -6393,6 +6415,21 @@
   if (lapsList) {
     lapsList.addEventListener('change', (ev)=>{
       if (ev.target.matches('input[type=checkbox]')) updatePlot();
+    });
+    lapsList.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'color') return;
+      const fileId = target.getAttribute('data-id');
+      const lap = Number(target.getAttribute('data-lap'));
+      if (!fileId || !Number.isFinite(lap)) return;
+      const color = normalizeHexColor(target.value);
+      setLapColor(fileId, lap, color);
+      const item = target.closest('.lap-item');
+      const checkbox = item ? item.querySelector('input[type=checkbox]') : null;
+      const label = item ? item.querySelector('.lap-label') : null;
+      if (checkbox) checkbox.style.accentColor = color;
+      if (label) label.style.color = color;
+      updatePlot();
     });
   }
 

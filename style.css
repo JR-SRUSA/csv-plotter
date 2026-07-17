@@ -30,6 +30,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .plots-body #xCustomSelect{margin-top:6px}
 .color-axis-controls{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed #e7edf5}
 .color-axis-controls select{width:100%}
+.color-mode-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:0.92em}
 .color-axis-legend{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:4px 8px;font-size:0.85em;color:#0b2545}
 .color-axis-legend-item{display:inline-flex;align-items:center;gap:5px;border:1px solid transparent;background:none;padding:2px 6px;border-radius:4px;cursor:pointer;font:inherit;color:inherit}
 .color-axis-legend-item:hover{background:#eef3fa;border-color:#dde6f0}
@@ -214,7 +215,9 @@ body.sidebar-collapsed .controls{display:none}
 #lapsList strong{display:block;margin-bottom:6px}
 .laps-col{display:flex;flex-direction:column;gap:6px}
 .lap-item{display:flex;align-items:center;gap:8px}
+.lap-toggle{display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer}
 .lap-item input[type=checkbox]{width:16px;height:16px}
+.lap-color-input{width:22px;height:22px;padding:0;border:none;background:transparent;cursor:pointer;flex:0 0 auto}
 .lap-label{font-weight:500}
 .file-lap-group{margin-top:8px}
 .file-lap-heading{font-size:0.82em;font-weight:600;color:#888;margin-bottom:4px;word-break:break-all}

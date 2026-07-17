@@ -13,11 +13,11 @@
     return row.map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
   }
 
-  // Sniffs the raw file text (before Papa.parse tokenizes it) to tell whitespace-column
-  // logs apart from ordinary comma CSVs -- PapaParse's own delimiter auto-detection
-  // already covers comma/tab/semicolon/pipe, but can't express "one or more spaces" as
-  // a delimiter, so that case needs to be caught here and pre-normalized.
-  // Returns 'comma' | 'tab' | 'whitespace' | 'auto' (let Papa.parse's own guess run).
+  // Sniffs the raw file text (before Papa.parse tokenizes it) to tell tab-delimited logs
+  // apart from ordinary comma CSVs -- PapaParse's own delimiter auto-detection already
+  // covers comma/semicolon/pipe well, but content-sniffing a short or metadata-heavy tab
+  // file can be less reliable than just checking for tab characters directly.
+  // Returns 'tab' | 'auto' (let Papa.parse's own guess run).
   function detectFieldDelimiter(text) {
     const lines = String(text || '')
       .split(/\r\n|\r|\n/)
@@ -26,30 +26,16 @@
       .slice(0, 40);
     if (lines.length === 0) return 'auto';
 
-    let commaLines = 0, tabLines = 0, wsLines = 0;
+    let commaLines = 0, tabLines = 0;
     lines.forEach(line => {
       if (line.indexOf(',') >= 0) commaLines += 1;
       if (line.indexOf('\t') >= 0) tabLines += 1;
-      if (line.split(/\s+/).length >= 2) wsLines += 1;
     });
 
     const n = lines.length;
     if (commaLines / n >= 0.5) return 'auto'; // comma CSV -- untouched, existing behavior
     if (tabLines / n >= 0.5) return 'tab';
-    if (wsLines / n >= 0.5) return 'whitespace';
     return 'auto';
-  }
-
-  // Collapses each line's whitespace runs (spaces and/or tabs) into a single tab so
-  // Papa.parse can tokenize a whitespace-column file with delimiter:'\t'. A metadata
-  // line's multi-word value (e.g. "Format Piboso CSV File") ends up split into several
-  // cells same as any other field -- extractMetadata()/getMetadataValueFromRows()
-  // rejoin multi-cell values with a single space, so that reassembles correctly.
-  function normalizeWhitespaceDelimitedText(text) {
-    return String(text || '')
-      .split(/\r\n|\r|\n/)
-      .map(line => line.trim().split(/\s+/).join('\t'))
-      .join('\n');
   }
 
   function isDataLikeCell(value) {
@@ -81,10 +67,9 @@
       const afterNextDataLike = afterNextCells.filter(isDataLikeCell).length;
       // A genuine "header, units row, data" layout has the units row's cell count
       // match the header's (one unit per column). A metadata row that happens to pass
-      // isHeaderRow too -- e.g. a whitespace-delimited file where a multi-word value
-      // like "Venue Laguna Seca" tokenized into several cells -- usually won't line up
-      // in width with the real header row that follows it. Use that mismatch to keep
-      // looking instead of locking onto the metadata row here.
+      // isHeaderRow too usually won't line up in width with the real header row that
+      // follows it. Use that mismatch to keep looking instead of locking onto the
+      // metadata row here.
       const nextLooksLikeRealHeader = isHeaderRow(nextCells) && nextCells.length !== cells.length;
       if (nextDataLike >= 2 || (afterNextDataLike >= 2 && !nextLooksLikeRealHeader)) {
         return i;
@@ -124,9 +109,9 @@
       let value = '';
       if (row.length > 1) {
         const values = row.slice(1).map(c => (c == null ? '' : String(c).trim())).filter(Boolean);
-        // A single space, not ", " -- so a multi-word value that a whitespace-delimited
-        // file tokenized into several cells (e.g. "Piboso CSV File") reassembles exactly,
-        // matching the same format strings a comma CSV would produce in one cell.
+        // A single space, not ", " -- so a multi-word value spread across several
+        // tab-separated cells (e.g. "Piboso CSV File") reassembles exactly, matching
+        // the same format strings a comma CSV would produce in one cell.
         value = values.join(' ');
       }
 
@@ -253,6 +238,15 @@
     return dataLikeRowCount >= minDataLikeRows;
   }
 
+  // TSV isn't detected from file content the way the other formats are -- there's no
+  // metadata field or structural shape that reliably says "this came from a tab-delimited
+  // file" after it's already been tokenized into rows. app.js's parseFile() does its own
+  // delimiter sniffing before Papa.parse ever runs, so it's the one place that actually
+  // knows -- it passes that along as options.delimiter.
+  function isTsvFormat(options = {}) {
+    return !!(options && options.delimiter === 'tab');
+  }
+
   function processCsvRows(rows, options = {}) {
     const parsedOptions = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
     const formatHint = getMetadataValueFromRows(rows, 'format');
@@ -287,6 +281,10 @@
       return processStandardRows(rows, headerRowIndex, { source, format, metadata });
     }
 
+    if (isTsvFormat(parsedOptions)) {
+      return processTsvRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
     return processGenericRows(rows, headerRowIndex, { source, format, metadata });
   }
 
@@ -312,6 +310,12 @@
     const source = details.source || 'Standard CSV';
     const format = details.format || 'Standard CSV';
     return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
+  }
+
+  function processTsvRows(rows, headerRowIndex, details = {}) {
+    const source = details.source || 'TSV';
+    const format = details.format || 'TSV';
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
   }
 
   function processGenericRows(rows, headerRowIndex, details = {}) {
@@ -1218,6 +1222,7 @@
     { name: 'VIGrade', label: 'VIGrade' },
     { name: 'ScanMyTesla', label: 'ScanMyTesla' },
     { name: 'Standard', label: 'Standard CSV' },
+    { name: 'TSV', label: 'TSV (Tab-Separated)' },
     { name: 'Generic', label: 'Generic (fallback)' }
   ];
 
@@ -1247,6 +1252,8 @@
         });
       case 'Standard':
         return processStandardRows(rows, headerRowIndex, { source, format, metadata });
+      case 'TSV':
+        return processTsvRows(rows, headerRowIndex, { source, format, metadata });
       case 'Generic':
         return processGenericRows(rows, headerRowIndex, { source, format, metadata });
       default:
@@ -1264,8 +1271,8 @@
     isStandardFormat,
     isScanMyTeslaFormat,
     isVIGradeFormat,
+    isTsvFormat,
     addTotalAccelerationCalculatedChannel,
-    detectFieldDelimiter,
-    normalizeWhitespaceDelimitedText
+    detectFieldDelimiter
   };
 })();

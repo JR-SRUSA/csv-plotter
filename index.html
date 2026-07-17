@@ -60,7 +60,12 @@
             <div id="selectedYColors" class="selected-y-colors"></div>
 
             <div class="color-axis-controls">
-              <label><input type="checkbox" id="colorAxisEnabled" /> Color Axis</label>
+              <div class="color-mode-row">
+                <strong>Color:</strong>
+                <label><input type="radio" name="colorMode" value="lap" checked /> By Lap</label>
+                <label><input type="radio" name="colorMode" value="channel" /> Per Y-Channel</label>
+                <label><input type="radio" name="colorMode" value="axis" /> Selected Channel</label>
+              </div>
               <select id="colorAxisSelect" disabled></select>
             </div>
 
