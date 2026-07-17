@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>GP Bikes Logged Data Plotter</title>
+  <title>Data Plotter</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css" />
   <!-- <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script> -->
@@ -69,6 +69,12 @@
               <select id="colorAxisSelect" disabled></select>
             </div>
 
+            <div class="binned-plot-controls">
+              <label><input type="checkbox" id="binnedPlotEnabled" /> Binned Plot</label>
+              <label>on channel <select id="binnedPlotAxis" disabled></select></label>
+              <label>Bin width: <input id="binnedPlotBinWidth" type="number" min="0.0001" step="0.1" value="1" disabled /></label>
+            </div>
+
             <div id="quickModSection" class="quick-modify-section" hidden>
               <div class="quick-mod-header">
                 <strong>Quick Modify:</strong>
@@ -79,11 +85,8 @@
                 <label><input type="checkbox" id="quickModReciprocal" /> 1/x Reciprocal</label>
                 <label><input type="checkbox" id="quickModFilter" /> Forward/Back Filter</label>
                 <div id="quickModFilterControls" class="quick-mod-filter-controls" hidden>
-                  <label>Window: <input id="quickModFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
-                  <select id="quickModFilterMode">
-                    <option value="time">seconds (time)</option>
-                    <option value="distance">meters (dist)</option>
-                  </select>
+                  <label>Filter on channel <select id="quickModFilterAxis"></select></label>
+                  <label>Window (±): <input id="quickModFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
                 </div>
               </div>
               <button id="quickModCreateBtn" type="button" class="quick-mod-create-btn" disabled>Create Math Channel from Mods</button>
@@ -110,6 +113,13 @@
               <div class="math-ch-field">
                 <label>Unit (optional)</label>
                 <input id="mathChUnit" type="text" placeholder="e.g. km/h" style="width:50%" />
+              </div>
+              <div class="math-ch-field">
+                <label><input type="checkbox" id="mathChFilterEnabled" /> Forward/Back Filter</label>
+                <div id="mathChFilterControls" class="quick-mod-filter-controls" hidden>
+                  <label>Filter on channel <select id="mathChFilterAxis"></select></label>
+                  <label>Window (±): <input id="mathChFilterWindow" type="number" min="0.01" step="0.1" value="0.5" /></label>
+                </div>
               </div>
               <div id="mathChError" class="math-ch-error" hidden></div>
               <div class="math-ch-btns">
@@ -176,6 +186,9 @@
                 <button id="cornerEditorResetBtn" type="button" class="corner-editor-reset-btn">Reset to Auto-Detected</button>
               </div>
             </div>
+          </div>
+          <div class="plot-download-controls">
+            <button id="downloadDisplayedDataBtn" type="button">Download Displayed Data as CSV</button>
           </div>
         </div>
       </details>
@@ -295,7 +308,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-16f</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-17a</div>
     </section>
 
     <section class="plot">

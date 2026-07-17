@@ -5,6 +5,9 @@
   const selectedYColors = document.getElementById('selectedYColors');
   const colorAxisSelect = document.getElementById('colorAxisSelect');
   const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
+  const binnedPlotEnabledInput = document.getElementById('binnedPlotEnabled');
+  const binnedPlotAxisSelect = document.getElementById('binnedPlotAxis');
+  const binnedPlotBinWidthInput = document.getElementById('binnedPlotBinWidth');
   const xCustomSelect = document.getElementById('xCustomSelect');
   const showMapInput = document.getElementById('showMap');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
@@ -51,6 +54,7 @@
   const uiPanel7 = document.getElementById('uiPanel7');
   const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
+  const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -69,6 +73,10 @@
   const mathChName = document.getElementById('mathChName');
   const mathChExpr = document.getElementById('mathChExpr');
   const mathChUnit = document.getElementById('mathChUnit');
+  const mathChFilterEnabled = document.getElementById('mathChFilterEnabled');
+  const mathChFilterControls = document.getElementById('mathChFilterControls');
+  const mathChFilterAxis = document.getElementById('mathChFilterAxis');
+  const mathChFilterWindow = document.getElementById('mathChFilterWindow');
   const mathChError = document.getElementById('mathChError');
   const mathChSave = document.getElementById('mathChSave');
   const mathChCancel = document.getElementById('mathChCancel');
@@ -95,7 +103,7 @@
   const quickModFilter = document.getElementById('quickModFilter');
   const quickModFilterControls = document.getElementById('quickModFilterControls');
   const quickModFilterWindow = document.getElementById('quickModFilterWindow');
-  const quickModFilterMode = document.getElementById('quickModFilterMode');
+  const quickModFilterAxis = document.getElementById('quickModFilterAxis');
   const quickModCreateBtn = document.getElementById('quickModCreateBtn');
   const plotlyConfig = {responsive:true, displaylogo:false};
   const DEFAULT_Y_CHANNEL = 'Speed';
@@ -166,7 +174,7 @@
     reciprocal: false,
     filter: false,
     filterWindow: 0.5,
-    filterMode: 'time'   // 'time' | 'distance'
+    filterAxis: 'time'   // 'time' | 'distance' | any other numeric channel name
   };
   let quickModEditorOpen = false;
   let quickModOriginalVisible = true;
@@ -995,7 +1003,7 @@
     try {
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       renderLapsList();
       updatePlot();
     } catch (err) {
@@ -1051,7 +1059,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         renderLapsList();
         updatePlot();
       }
@@ -1224,6 +1232,19 @@
     return result;
   }
 
+  // 'time'/'distance' are special-cased to this log's own detected time/distance columns
+  // (so the filter still works even if this log's real column isn't literally named that);
+  // any other value is treated as a channel name and resolved the normal way. Falls back to
+  // time if the chosen channel doesn't exist in this particular log (e.g. a math channel's
+  // filter axis was set from a different file's channel list).
+  function resolveSmoothingAxisColumn(axisChannel, log) {
+    if (axisChannel === 'distance') return log.meta && log.meta.distCol;
+    if (!axisChannel || axisChannel === 'time') return log.meta && log.meta.timeCol;
+    const resolved = resolveChannelForLog(axisChannel, log);
+    if (resolved && log.cols.includes(resolved)) return resolved;
+    return log.meta && log.meta.timeCol;
+  }
+
   function applyMathChannelToLog(mc, log) {
     const { name, expression, unit, smoothing } = mc;
     const refs = [];
@@ -1242,9 +1263,7 @@
     // If smoothing is requested, pre-compute windowed averages for all referenced channels
     let smoothedArrays = null;
     if (smoothing && smoothing.window > 0) {
-      const axisCol = smoothing.mode === 'distance'
-        ? (log.meta && log.meta.distCol)
-        : (log.meta && log.meta.timeCol);
+      const axisCol = resolveSmoothingAxisColumn(smoothing.axisChannel, log);
       const axisValues = axisCol ? log.data.map(row => Number(row[axisCol])) : null;
       const halfWindow = smoothing.window;
       smoothedArrays = resolvedRefs.map(col => {
@@ -1296,9 +1315,9 @@
   function buildQuickModSmoothing() {
     if (!quickModState.filter) return null;
     const w = parseFloat(quickModFilterWindow ? quickModFilterWindow.value : quickModState.filterWindow);
-    const mode = quickModFilterMode ? quickModFilterMode.value : quickModState.filterMode;
+    const axisChannel = quickModFilterAxis ? quickModFilterAxis.value : quickModState.filterAxis;
     const halfWindow = Number.isFinite(w) && w > 0 ? w : 0.5;
-    return { window: halfWindow, mode: mode || 'time' };
+    return { window: halfWindow, axisChannel: axisChannel || 'time' };
   }
 
   function resetQuickModToggles() {
@@ -1466,6 +1485,11 @@
     if (quickModReciprocal) quickModReciprocal.checked = !!quickModState.reciprocal;
     if (quickModFilter) quickModFilter.checked = !!quickModState.filter;
     if (quickModFilterControls) quickModFilterControls.hidden = !quickModState.filter;
+    if (quickModFilterAxis) {
+      populateAxisChannelSelect(quickModFilterAxis);
+      quickModFilterAxis.value = quickModState.filterAxis || 'time';
+    }
+    if (quickModFilterWindow) quickModFilterWindow.value = quickModState.filterWindow;
     if (quickModCreateBtn) {
       quickModCreateBtn.disabled = !hasQuickModActive();
     }
@@ -1473,11 +1497,17 @@
 
   let mathChEditIdx = -1; // -1 = add mode, >=0 = editing existing channel
 
+  function describeSmoothingAxis(axisChannel) {
+    if (!axisChannel || axisChannel === 'time') return 'Time [s]';
+    if (axisChannel === 'distance') return 'Distance [m]';
+    return getChannelLabel(axisChannel);
+  }
+
   function renderMathChannelsList() {
     if (!mathChannelsList) return;
     mathChannelsList.innerHTML = mathChannels.map((mc, i) => {
       const smoothLabel = mc.smoothing && mc.smoothing.window > 0
-        ? ` <span class="math-ch-smooth-info">[smooth ±${mc.smoothing.window}${mc.smoothing.mode === 'distance' ? 'm' : 's'}]</span>`
+        ? ` <span class="math-ch-smooth-info">[filter ±${mc.smoothing.window} on ${escapeHtml(describeSmoothingAxis(mc.smoothing.axisChannel))}]</span>`
         : '';
       return `<div class="math-ch-item">` +
         `<span class="math-ch-name">${escapeHtml(mc.name)}</span>` +
@@ -1511,6 +1541,108 @@
       `<button type="button" class="data-filter-delete" data-idx="${i}" aria-label="Delete filter on ${escapeHtml(f.channel)}">✕</button>` +
       `</div>`
     )).join('');
+  }
+
+  // Shared by updatePlot()'s trace masking and the binned-plot overlay's data-filter-aware
+  // binning -- both need "which rows currently pass the active data filters," just applied
+  // to different things (which points get plotted vs. which rows contribute to a bin mean).
+  function getEnabledDataFilters() {
+    const masterEnabled = !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked);
+    return masterEnabled ? dataFilters.filter(f => f.enabled) : [];
+  }
+
+  // Resolves each filter's channel against this specific log once, dropping any filter
+  // whose channel doesn't exist here -- a filter only constrains files that have the
+  // channel it names, same as the color axis and math channel resolution elsewhere.
+  function resolveDataFiltersForLog(log, enabledFilters) {
+    return enabledFilters
+      .map((f) => ({
+        kind: f.kind === 'discrete' ? 'discrete' : 'range',
+        min: f.min, max: f.max,
+        valueSet: f.kind === 'discrete' ? new Set(f.values) : null,
+        allNumeric: f.allNumeric,
+        resolvedCol: resolveChannelForLog(f.channel, log)
+      }))
+      .filter((f) => f.resolvedCol && log.cols.includes(f.resolvedCol));
+  }
+
+  function rowPassesDataFilters(log, rowIdx, resolvedFilters) {
+    return resolvedFilters.every((f) => {
+      const raw = log.data[rowIdx][f.resolvedCol];
+      if (f.kind === 'discrete') {
+        if (raw === null || raw === undefined || raw === '') return false;
+        const normalized = f.allNumeric ? Number(raw) : String(raw).trim();
+        return f.valueSet.has(normalized);
+      }
+      const v = Number(raw);
+      if (!Number.isFinite(v)) return false;
+      if (f.min !== null && v < f.min) return false;
+      if (f.max !== null && v > f.max) return false;
+      return true;
+    });
+  }
+
+  // Aggregates every currently displayed row -- lap-selected, data-filter-passing --
+  // across ALL currently selected files into one set of bins per Y channel, giving a
+  // single point per bin (the mean of everything that landed there). This is deliberately
+  // NOT a per-row math channel: it produces a shorter series than the raw data, which is
+  // exactly the point -- collapsing something like a hysteresis loop (two Y values for the
+  // same X) into one clean curve, drawn as an extra overlay trace rather than stored as data.
+  function computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, axisChannel, binWidth, channelToRef) {
+    if (!axisChannel || !(binWidth > 0) || ycols.length === 0) return [];
+    const enabledFilters = getEnabledDataFilters();
+    const bins = new Map(); // channel -> Map(binKey -> {xSum, ySum, count})
+    ycols.forEach(y => bins.set(y, new Map()));
+
+    selFiles.forEach((log) => {
+      const axisResolvedCol = resolveChannelForLog(axisChannel, log);
+      if (!axisResolvedCol || !log.cols.includes(axisResolvedCol)) return;
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const lapNumArr = log.meta.lapNum || [];
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, lapNumArr[i])) return;
+        if (activeFilters.length > 0 && !rowPassesDataFilters(log, i, activeFilters)) return;
+        const x = Number(row[axisResolvedCol]);
+        if (!Number.isFinite(x)) return;
+        const binKey = Math.round(x / binWidth);
+
+        ycols.forEach((y, yi) => {
+          const resolvedY = resolvedYCols[yi];
+          if (!resolvedY || !log.cols.includes(resolvedY)) return;
+          const v = Number(row[resolvedY]);
+          if (!Number.isFinite(v)) return;
+          const map = bins.get(y);
+          let entry = map.get(binKey);
+          if (!entry) { entry = { xSum: 0, ySum: 0, count: 0 }; map.set(binKey, entry); }
+          entry.xSum += x;
+          entry.ySum += v;
+          entry.count += 1;
+        });
+      });
+    });
+
+    const traces = [];
+    ycols.forEach((y) => {
+      const map = bins.get(y);
+      if (!map || map.size === 0) return;
+      const points = Array.from(map.values())
+        .map(e => ({ x: e.xSum / e.count, y: e.ySum / e.count }))
+        .sort((a, b) => a.x - b.x);
+      const color = getChannelColor(y);
+      traces.push({
+        x: points.map(p => p.x),
+        y: points.map(p => p.y),
+        yaxis: (channelToRef && channelToRef.get(y)) || 'y',
+        name: `${getChannelLabel(y)} (binned)`,
+        mode: 'lines+markers',
+        line: { color, width: 3 },
+        marker: { color, size: 6, symbol: 'diamond', line: { color: '#fff', width: 1 } },
+        hovertemplate: buildHoverTemplate(getChannelLabel(axisChannel), `${getChannelLabel(y)} (binned)`)
+      });
+    });
+    return traces;
   }
 
   // Classifies a filter channel the exact same way the color axis does (classifyColorAxisValues),
@@ -1679,7 +1811,7 @@
       channelMap = normalized;
       if (logs.length > 0) {
         populateYSelect();
-        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         updatePlot();
       }
     } catch (err) {
@@ -2002,6 +2134,60 @@
       dataFilterChannelSelect.value = previousValue;
     } else if (dataFilterChannelSelect.options.length > 0) {
       dataFilterChannelSelect.value = dataFilterChannelSelect.options[0].value;
+    }
+  }
+
+  // Shared by the Quick Modify and Math Channel forward/back filter controls: both let the
+  // user pick what to window the average against, defaulting to Time/Distance (which map to
+  // this log's own detected time/distance columns) but allowing any other numeric channel.
+  function populateAxisChannelSelect(selectEl) {
+    if (!selectEl) return;
+    const previousValue = selectEl.value;
+    const numericCols = new Set();
+    logs.forEach(l => {
+      l.cols.forEach(col => {
+        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
+        if (sample) {
+          const val = sample[col];
+          if (typeof val === 'number') numericCols.add(col);
+          else if (!isNaN(Number(val))) numericCols.add(col);
+        }
+      });
+    });
+
+    const coveredRawCols = new Set();
+    const activeMappings = [];
+    getChannelMap().forEach(mapping => {
+      let hasMatch = false;
+      logs.forEach(log => {
+        const col = resolveChannelForLog(mapping.displayName, log);
+        if (col && numericCols.has(col)) {
+          coveredRawCols.add(col);
+          hasMatch = true;
+        }
+      });
+      if (hasMatch) activeMappings.push(mapping);
+    });
+
+    const mappedOptions = activeMappings.map(m => {
+      const unit = getUnitForChannel(m.displayName);
+      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
+      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+    });
+    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+      let unit = '';
+      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
+      const label = unit ? `${c} [${unit}]` : c;
+      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+    });
+
+    const builtins = '<option value="time">Time [s]</option><option value="distance">Distance [m]</option>';
+    selectEl.innerHTML = builtins + mappedOptions.concat(rawOptions).join('');
+
+    if (previousValue && Array.from(selectEl.options).some(o => o.value === previousValue)) {
+      selectEl.value = previousValue;
+    } else {
+      selectEl.value = 'time';
     }
   }
 
@@ -3249,7 +3435,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
   }
@@ -5208,6 +5394,168 @@
     return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
+  function csvEscapeValue(value) {
+    const s = value === null || value === undefined ? '' : String(value);
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function describeActiveDataFiltersForMetadata() {
+    const enabledFilters = getEnabledDataFilters();
+    if (enabledFilters.length === 0) return 'None';
+    return enabledFilters.map(f => formatDataFilterRange(f)).join('; ');
+  }
+
+  // "#"-prefixed lines are a common lightweight convention for metadata at the top of a CSV
+  // export (not meant to be parsed as a data row) -- source file(s) and active data filters
+  // apply to every export; extraLines lets a specific export (e.g. the binned plot) add its
+  // own additional context (bin axis/width) before the blank "#" separator and the real header.
+  function buildCsvMetadataLines(selFiles, extraLines) {
+    const lines = [
+      `# Source file(s): ${selFiles.map(l => l.name).join(', ') || 'None'}`,
+      `# Data filters: ${describeActiveDataFiltersForMetadata()}`
+    ];
+    (extraLines || []).forEach((line) => lines.push(`# ${line}`));
+    lines.push('#');
+    return lines;
+  }
+
+  // Rebuilds exactly what's currently plotted -- same file/lap selection, same data filters,
+  // same X mode, same selected Y channels -- as a CSV, one row per row that's actually
+  // visible in the main plot right now (File, Lap, X, one column per selected Y channel).
+  function buildDisplayedDataCsv() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const xMode = document.querySelector('input[name=xaxis]:checked').value;
+    const customXCol = xCustomSelect ? xCustomSelect.value : '';
+    const xLabel = getXAxisTitle(xMode, customXCol);
+    const enabledFilters = getEnabledDataFilters();
+
+    const header = ['File', 'Lap', xLabel, ...ycols.map(y => getChannelLabel(y))];
+    const lines = buildCsvMetadataLines(selFiles);
+    lines.push(header.map(csvEscapeValue).join(','));
+
+    selFiles.forEach((log) => {
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+      const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a, b) => a - b);
+      lapNums.forEach((lap) => {
+        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        let maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+        if (activeFilters.length > 0) {
+          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeFilters));
+        }
+        const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
+        if (!xArr) return;
+        maskIdx.forEach((rowIdx, k) => {
+          const row = [log.name, lap, xArr[k]];
+          resolvedYCols.forEach((resolvedCol) => {
+            const v = (resolvedCol && log.cols.includes(resolvedCol)) ? log.data[rowIdx][resolvedCol] : '';
+            row.push(v === null || v === undefined ? '' : v);
+          });
+          lines.push(row.map(csvEscapeValue).join(','));
+        });
+      });
+    });
+
+    return lines.join('\r\n');
+  }
+
+  function triggerCsvDownload(csv, filenamePrefix) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadDisplayedDataCsv() {
+    triggerCsvDownload(buildDisplayedDataCsv(), 'displayed-data');
+  }
+
+  // Rebuilds the Binned Plot overlay's own points (see computeBinnedOverlayTraces) as a CSV:
+  // one row per bin, a single shared X column (the mean of every in-scope row's axis value in
+  // that bin, regardless of which Y channels it had), and one value column per selected Y
+  // channel -- null/missing for a channel with no data in that particular bin. A shared X
+  // column (rather than each channel's own slightly-different bin mean, which is what the
+  // plotted trace uses) is what makes a single flat table possible when multiple channels
+  // are selected.
+  function buildBinnedPlotCsv() {
+    const selFiles = getSelectedFiles();
+    const selectedLaps = getSelectedLaps();
+    const selectedYChannels = getSelectedY();
+    const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const axisChannel = binnedPlotAxisSelect ? binnedPlotAxisSelect.value : '';
+    const binWidth = binnedPlotBinWidthInput ? parseFloat(binnedPlotBinWidthInput.value) : NaN;
+    if (!axisChannel || !Number.isFinite(binWidth) || binWidth <= 0 || ycols.length === 0) return null;
+
+    const enabledFilters = getEnabledDataFilters();
+    const bins = new Map(); // binKey -> { xSum, xCount, values: Map(channel -> {sum, count}) }
+
+    selFiles.forEach((log) => {
+      const axisResolvedCol = resolveChannelForLog(axisChannel, log);
+      if (!axisResolvedCol || !log.cols.includes(axisResolvedCol)) return;
+      const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+      const lapNumArr = log.meta.lapNum || [];
+      const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
+
+      log.data.forEach((row, i) => {
+        if (!isLapSelected(selectedLaps, log.id, lapNumArr[i])) return;
+        if (activeFilters.length > 0 && !rowPassesDataFilters(log, i, activeFilters)) return;
+        const x = Number(row[axisResolvedCol]);
+        if (!Number.isFinite(x)) return;
+        const binKey = Math.round(x / binWidth);
+        let bin = bins.get(binKey);
+        if (!bin) { bin = { xSum: 0, xCount: 0, values: new Map() }; bins.set(binKey, bin); }
+        bin.xSum += x;
+        bin.xCount += 1;
+
+        ycols.forEach((y, yi) => {
+          const resolvedY = resolvedYCols[yi];
+          if (!resolvedY || !log.cols.includes(resolvedY)) return;
+          const v = Number(row[resolvedY]);
+          if (!Number.isFinite(v)) return;
+          let entry = bin.values.get(y);
+          if (!entry) { entry = { sum: 0, count: 0 }; bin.values.set(y, entry); }
+          entry.sum += v;
+          entry.count += 1;
+        });
+      });
+    });
+
+    if (bins.size === 0) return null;
+
+    const header = [getChannelLabel(axisChannel), ...ycols.map(y => `${getChannelLabel(y)} (binned)`)];
+    const lines = buildCsvMetadataLines(selFiles, [
+      `Bin axis: ${getChannelLabel(axisChannel)}`,
+      `Bin width: ${binWidth}`
+    ]);
+    lines.push(header.map(csvEscapeValue).join(','));
+
+    Array.from(bins.keys()).sort((a, b) => a - b).forEach((binKey) => {
+      const bin = bins.get(binKey);
+      const row = [bin.xSum / bin.xCount];
+      ycols.forEach((y) => {
+        const entry = bin.values.get(y);
+        row.push(entry ? entry.sum / entry.count : '');
+      });
+      lines.push(row.map(csvEscapeValue).join(','));
+    });
+
+    return lines.join('\r\n');
+  }
+
+  function downloadBinnedPlotDataCsv() {
+    const csv = buildBinnedPlotCsv();
+    if (!csv) return;
+    triggerCsvDownload(csv, 'binned-plot');
+  }
+
   function buildHoverTemplate(xLabel, yLabel, colorLabel) {
     const base = `${escapeHtml(xLabel)}: %{x:.3f}<br>${escapeHtml(yLabel)}: %{y:.3f}`;
     if (colorLabel) {
@@ -5814,8 +6162,11 @@
     renderColorAxisLegend(colorAxisChannel, colorAxisContext);
     let colorAxisScaleShown = false;
 
-    const dataFiltersMasterEnabled = !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked);
-    const enabledDataFilters = dataFiltersMasterEnabled ? dataFilters.filter(f => f.enabled) : [];
+    const enabledDataFilters = getEnabledDataFilters();
+
+    const binnedPlotEnabled = !!(binnedPlotEnabledInput && binnedPlotEnabledInput.checked);
+    const binnedPlotAxis = binnedPlotAxisSelect ? binnedPlotAxisSelect.value : '';
+    const binnedPlotBinWidth = binnedPlotBinWidthInput ? parseFloat(binnedPlotBinWidthInput.value) : NaN;
 
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
@@ -5915,37 +6266,14 @@
       const fileColor = COLORS[li % COLORS.length];
       const colorAxisResolvedCol = colorAxisContext ? resolveChannelForLog(colorAxisChannel, log) : '';
       const canColorByChannel = !!(colorAxisResolvedCol && log.cols.includes(colorAxisResolvedCol));
-      // Filters whose channel doesn't exist in this particular file are dropped rather than
-      // excluding every row of that file -- a filter only constrains files that have the
-      // channel it names.
-      const activeDataFilters = enabledDataFilters
-        .map((f) => ({
-          kind: f.kind === 'discrete' ? 'discrete' : 'range',
-          min: f.min, max: f.max,
-          valueSet: f.kind === 'discrete' ? new Set(f.values) : null,
-          allNumeric: f.allNumeric,
-          resolvedCol: resolveChannelForLog(f.channel, log)
-        }))
-        .filter((f) => f.resolvedCol && log.cols.includes(f.resolvedCol));
+      const activeDataFilters = resolveDataFiltersForLog(log, enabledDataFilters);
       // plot each selected lap separately, x axis is Lap Time or Lap Distance
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         if (activeDataFilters.length > 0) {
-          maskIdx = maskIdx.filter((i) => activeDataFilters.every((f) => {
-            const raw = log.data[i][f.resolvedCol];
-            if (f.kind === 'discrete') {
-              if (raw === null || raw === undefined || raw === '') return false;
-              const normalized = f.allNumeric ? Number(raw) : String(raw).trim();
-              return f.valueSet.has(normalized);
-            }
-            const v = Number(raw);
-            if (!Number.isFinite(v)) return false;
-            if (f.min !== null && v < f.min) return false;
-            if (f.max !== null && v > f.max) return false;
-            return true;
-          }));
+          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeDataFilters));
         }
         if (canColorByChannel && colorAxisContext.kind === 'discrete') {
           const hiddenSet = colorAxisHiddenCategoriesByChannel.get(colorAxisChannel);
@@ -6009,6 +6337,10 @@
           hovertemplate: buildHoverTemplate(mainXTitle, 'Race Lap Curvature [1/m]')
         });
       }
+    }
+
+    if (binnedPlotEnabled && Number.isFinite(binnedPlotBinWidth) && binnedPlotBinWidth > 0) {
+      traces.push(...computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, binnedPlotAxis, binnedPlotBinWidth, channelToRef));
     }
 
     // if shading requested and plotting by lap, compute envelope per Y channel
@@ -6285,6 +6617,19 @@
       updatePlot();
     });
   }
+  if (binnedPlotEnabledInput) {
+    binnedPlotEnabledInput.addEventListener('change', () => {
+      const enabled = binnedPlotEnabledInput.checked;
+      if (binnedPlotAxisSelect) {
+        binnedPlotAxisSelect.disabled = !enabled;
+        if (enabled) populateAxisChannelSelect(binnedPlotAxisSelect);
+      }
+      if (binnedPlotBinWidthInput) binnedPlotBinWidthInput.disabled = !enabled;
+      updatePlot();
+    });
+  }
+  if (binnedPlotAxisSelect) binnedPlotAxisSelect.addEventListener('change', () => updatePlot());
+  if (binnedPlotBinWidthInput) binnedPlotBinWidthInput.addEventListener('input', () => updatePlot());
   ySelect.addEventListener('change', ()=> {
     renderSelectedChannelColorControls();
     updatePlot();
@@ -6352,7 +6697,7 @@
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
-        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
         renderLapsList();
         Plotly.purge(plotDiv);
         clearXYMapPlot();
@@ -6433,6 +6778,15 @@
     });
   }
 
+  if (downloadDisplayedDataBtn) {
+    downloadDisplayedDataBtn.addEventListener('click', () => {
+      downloadDisplayedDataCsv();
+      if (binnedPlotEnabledInput && binnedPlotEnabledInput.checked) {
+        downloadBinnedPlotDataCsv();
+      }
+    });
+  }
+
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
     resetWholeCircuitFitState();
@@ -6460,7 +6814,7 @@
     renderFilesList();
     populateYSelect();
     populateXCustomSelect();
-    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     Plotly.purge(plotDiv);
     clearXYMapPlot();
@@ -6491,7 +6845,10 @@
         if (mc && typeof mc.name === 'string' && typeof mc.expression === 'string') {
           const entry = { name: mc.name, expression: mc.expression, unit: mc.unit || '' };
           if (mc.smoothing && typeof mc.smoothing === 'object' && mc.smoothing.window > 0) {
-            entry.smoothing = { window: mc.smoothing.window, mode: mc.smoothing.mode || 'time' };
+            // mc.smoothing.mode is the pre-"filter on channel" field name (always 'time' or
+            // 'distance') -- still a valid axisChannel value, so reading it as a fallback
+            // here is enough to load older saved math channels without a migration step.
+            entry.smoothing = { window: mc.smoothing.window, axisChannel: mc.smoothing.axisChannel || mc.smoothing.mode || 'time' };
           }
           mathChannels.push(entry);
         }
@@ -6593,6 +6950,9 @@
     if (mathChName) mathChName.value = '';
     if (mathChExpr) mathChExpr.value = '';
     if (mathChUnit) mathChUnit.value = '';
+    if (mathChFilterEnabled) mathChFilterEnabled.checked = false;
+    if (mathChFilterControls) mathChFilterControls.hidden = true;
+    if (mathChFilterWindow) mathChFilterWindow.value = '0.5';
     if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
     if (mathChPreview) mathChPreview.hidden = true;
     if (mathChSave) mathChSave.textContent = 'Add Channel';
@@ -6603,6 +6963,7 @@
   if (addMathChannelBtn) {
     addMathChannelBtn.addEventListener('click', () => {
       if (mathChannelForm) mathChannelForm.hidden = false;
+      if (mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
       if (mathChName) mathChName.focus();
       addMathChannelBtn.disabled = true;
     });
@@ -6610,6 +6971,13 @@
 
   if (mathChCancel) {
     mathChCancel.addEventListener('click', resetMathChForm);
+  }
+
+  if (mathChFilterEnabled) {
+    mathChFilterEnabled.addEventListener('change', () => {
+      if (mathChFilterControls) mathChFilterControls.hidden = !mathChFilterEnabled.checked;
+      if (mathChFilterEnabled.checked && mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
+    });
   }
 
   if (mathChSave) {
@@ -6635,6 +7003,12 @@
       if (!testResult.valid) return showMathChError(testResult.error);
 
       const mc = { name, expression, unit };
+      if (mathChFilterEnabled && mathChFilterEnabled.checked) {
+        const w = parseFloat(mathChFilterWindow ? mathChFilterWindow.value : '');
+        const axisChannel = mathChFilterAxis ? mathChFilterAxis.value : 'time';
+        if (!Number.isFinite(w) || w <= 0) return showMathChError('Filter window must be a positive number.');
+        mc.smoothing = { window: w, axisChannel: axisChannel || 'time' };
+      }
 
       if (isEditing) {
         // Remove old column data from all logs before re-applying with new definition
@@ -6655,7 +7029,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
       resetMathChForm();
     });
@@ -6672,6 +7046,16 @@
         if (mathChName) { mathChName.value = mc.name; mathChName.disabled = true; }
         if (mathChExpr) mathChExpr.value = mc.expression;
         if (mathChUnit) mathChUnit.value = mc.unit || '';
+        if (mathChFilterAxis) populateAxisChannelSelect(mathChFilterAxis);
+        if (mc.smoothing && mc.smoothing.window > 0) {
+          if (mathChFilterEnabled) mathChFilterEnabled.checked = true;
+          if (mathChFilterControls) mathChFilterControls.hidden = false;
+          if (mathChFilterAxis) mathChFilterAxis.value = mc.smoothing.axisChannel || 'time';
+          if (mathChFilterWindow) mathChFilterWindow.value = mc.smoothing.window;
+        } else {
+          if (mathChFilterEnabled) mathChFilterEnabled.checked = false;
+          if (mathChFilterControls) mathChFilterControls.hidden = true;
+        }
         if (mathChError) { mathChError.hidden = true; mathChError.textContent = ''; }
         if (mathChPreview) mathChPreview.hidden = true;
         if (mathChSave) mathChSave.textContent = 'Save Changes';
@@ -6696,7 +7080,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
     });
   }
@@ -6928,6 +7312,7 @@
     quickModFilter.addEventListener('change', () => {
       quickModState.filter = quickModFilter.checked;
       if (quickModFilterControls) quickModFilterControls.hidden = !quickModFilter.checked;
+      if (quickModFilter.checked && quickModFilterAxis) populateAxisChannelSelect(quickModFilterAxis);
       if (quickModCreateBtn) quickModCreateBtn.disabled = !hasQuickModActive();
       updateQuickModPreview();
     });
@@ -6941,9 +7326,9 @@
     });
   }
 
-  if (quickModFilterMode) {
-    quickModFilterMode.addEventListener('change', () => {
-      quickModState.filterMode = quickModFilterMode.value || 'time';
+  if (quickModFilterAxis) {
+    quickModFilterAxis.addEventListener('change', () => {
+      quickModState.filterAxis = quickModFilterAxis.value || 'time';
       if (quickModState.filter) updateQuickModPreview();
     });
   }
@@ -6984,7 +7369,7 @@
       renderMathChannelsList();
       populateYSelect();
       populateXCustomSelect();
-      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
       updatePlot();
     });
   }
