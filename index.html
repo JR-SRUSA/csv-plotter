@@ -312,7 +312,17 @@
     </section>
 
     <section class="plot">
-      <div id="plotDiv"></div>
+      <div class="plot-canvas-wrap">
+        <div id="plotDiv"></div>
+        <button type="button" id="selectDataToggleBtn" class="select-data-toggle-btn" aria-pressed="false" title="Box/lasso-select data on the plot to see min/max, best-fit slope and R²">Select Data</button>
+        <div id="selectionStatsPanel" class="selection-stats-panel" hidden>
+          <div class="selection-stats-header">
+            <strong>Selection fit</strong>
+            <button type="button" id="selectionStatsClose" class="selection-stats-close" aria-label="Clear selection">✕</button>
+          </div>
+          <div id="selectionStatsBody" class="selection-stats-body"></div>
+        </div>
+      </div>
       <div id="colorAxisLegend" class="color-axis-legend" hidden></div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>

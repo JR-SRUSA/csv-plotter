@@ -40,6 +40,15 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .color-axis-legend-item:hover{background:#eef3fa;border-color:#dde6f0}
 .color-axis-legend-item.is-hidden{opacity:0.4;text-decoration:line-through}
 .color-axis-legend-swatch{width:11px;height:11px;border-radius:2px;display:inline-block;flex:0 0 auto;border:1px solid rgba(11,37,69,0.25)}
+.selection-stats-panel{position:absolute;top:10px;right:10px;z-index:5;max-width:280px;max-height:calc(100% - 20px);overflow:auto;background:rgba(255,255,255,0.97);border:1px solid #cbd6e2;border-radius:6px;box-shadow:0 2px 10px rgba(10,20,40,0.18);font-size:12px;color:#0b2545}
+.selection-stats-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-bottom:1px solid #e7edf5;position:sticky;top:0;background:inherit;border-radius:6px 6px 0 0}
+.selection-stats-close{padding:1px 6px;font-size:0.8em;line-height:1.4;flex:0 0 auto;color:#c00;border-color:#f8c8c8;background:#fff5f5}
+.selection-stats-close:hover{background:#ffe0e0}
+.selection-stats-body{padding:6px 8px;display:flex;flex-direction:column;gap:8px}
+.selection-stats-group{display:flex;flex-direction:column;gap:2px}
+.selection-stats-group-title{display:flex;align-items:center;gap:6px;font-weight:600}
+.selection-stats-swatch{width:11px;height:11px;border-radius:2px;display:inline-block;flex:0 0 auto;border:1px solid rgba(11,37,69,0.25)}
+.selection-stats-row{color:#445;margin-left:17px}
 .selected-y-colors{display:flex;flex-direction:column;gap:6px;margin-top:8px}
 .selected-y-color-item{display:flex;align-items:center;gap:8px;font-size:0.92em}
 .selected-y-color-item input[type=color]{width:28px;height:24px;padding:0;border:none;background:transparent;cursor:pointer}
@@ -180,7 +189,10 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 #plotDiv{height:640px;width:100%;max-width:100%}
 .maps-container{display:block;margin-top:0;width:100%;grid-area:maps;align-self:stretch}
 .map-panel{min-width:0;height:100%;min-height:160px}
-#plotDiv{grid-area:plot}
+.plot-canvas-wrap{position:relative;grid-area:plot;min-width:0}
+.select-data-toggle-btn{position:absolute;top:10px;left:10px;z-index:5;font-size:12px;padding:5px 10px;border-radius:4px;border:1px solid #cbd6e2;background:#f1f6fb;color:#1a3c6b;cursor:pointer;box-shadow:0 1px 4px rgba(10,20,40,0.1)}
+.select-data-toggle-btn:hover{background:#e6f0fb}
+.select-data-toggle-btn[aria-pressed="true"]{background:#1a3c6b;border-color:#1a3c6b;color:#fff}
 #mapDiv{display:none}
 #leafletMapDiv{max-width:100%;height:100%;min-height:160px;display:block}
 #plotDiv .plot-container,
