@@ -22,3 +22,7 @@ node_modules/
 # Packed plotly files
 plotly-*.min.js
 plotly.*.min.js
+
+# Playwright e2e test output
+/playwright-report/
+/test-results/

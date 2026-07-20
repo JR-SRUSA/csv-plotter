@@ -308,11 +308,20 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-17a</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-20a</div>
     </section>
 
     <section class="plot">
-      <div id="plotDiv"></div>
+      <div class="plot-canvas-wrap">
+        <div id="plotDiv"></div>
+        <div id="selectionStatsPanel" class="selection-stats-panel" hidden>
+          <div id="selectionStatsHeader" class="selection-stats-header">
+            <strong>Selection fit</strong>
+            <button type="button" id="selectionStatsClose" class="selection-stats-close" aria-label="Clear selection">✕</button>
+          </div>
+          <div id="selectionStatsBody" class="selection-stats-body"></div>
+        </div>
+      </div>
       <div id="colorAxisLegend" class="color-axis-legend" hidden></div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>

@@ -56,6 +56,10 @@
   const clearBtn = document.getElementById('clearBtn');
   const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
   const plotDiv = document.getElementById('plotDiv');
+  const selectionStatsPanel = document.getElementById('selectionStatsPanel');
+  const selectionStatsBody = document.getElementById('selectionStatsBody');
+  const selectionStatsClose = document.getElementById('selectionStatsClose');
+  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
@@ -105,7 +109,34 @@
   const quickModFilterWindow = document.getElementById('quickModFilterWindow');
   const quickModFilterAxis = document.getElementById('quickModFilterAxis');
   const quickModCreateBtn = document.getElementById('quickModCreateBtn');
-  const plotlyConfig = {responsive:true, displaylogo:false};
+  // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
+  // Plotly only auto-shows those when a trace already has markers -- which channel traces
+  // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
+  // ones are explicitly removed so they don't also reappear (duplicated) once markers are
+  // added. attr/val make Plotly highlight these exactly like its native dragmode buttons.
+  const plotlyConfig = {
+    responsive: true,
+    displaylogo: false,
+    modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+    modeBarButtonsToAdd: [
+      {
+        name: 'boxSelectFit',
+        title: 'Box Select',
+        icon: Plotly.Icons.selectbox,
+        attr: 'dragmode',
+        val: 'select',
+        click: (gd) => Plotly.relayout(gd, {dragmode: 'select'})
+      },
+      {
+        name: 'lassoSelectFit',
+        title: 'Lasso Select',
+        icon: Plotly.Icons.lasso,
+        attr: 'dragmode',
+        val: 'lasso',
+        click: (gd) => Plotly.relayout(gd, {dragmode: 'lasso'})
+      }
+    ]
+  };
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
   const DERIVED_MAP_X_COL = 'Map X';
@@ -246,6 +277,15 @@
   let wholeCircuitFitPreview = null; // { fit, referenceLog, referenceLap, cornerSegments, currentCornerIndex } awaiting Accept/Discard
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
+  let baseCornerShapesForOverlay = []; // corner/straight shading shapes, kept separate so selection fit lines can be layered on top
+  let selectionFitShapes = []; // temporary best-fit line(s) drawn for the current box/lasso selection
+  let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
+  let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
+  // Plotly.relayout({shapes:...}) internally reapplies ("reselects") the current drag
+  // selection, synchronously re-emitting plotly_selected/plotly_deselect from inside that
+  // same call. Without this guard, our own relayout-in-response-to-selection would trigger
+  // itself again recursively.
+  let suppressSelectionReentry = false;
 
   function resizeVisualizations() {
     if (plotDiv && plotDiv.data) {
@@ -399,7 +439,13 @@
     let _applying = false;
 
     plotDiv.on('plotly_relayout', (eventData) => {
-      if (_applying || !eventData) return;
+      if (!eventData) return;
+
+      if (Object.prototype.hasOwnProperty.call(eventData, 'dragmode')) {
+        setSelectModeActive(eventData.dragmode === 'select' || eventData.dragmode === 'lasso');
+      }
+
+      if (_applying) return;
 
       // X axis reset — restore full-data Y range
       if (Object.prototype.hasOwnProperty.call(eventData, 'xaxis.autorange') && eventData['xaxis.autorange']) {
@@ -559,6 +605,232 @@
       clearLeafletHoverMarker();
       lastLinkedHoverKey = null;
       Plotly.Fx.unhover(plotDiv);
+      clearSelectionFit();
+    });
+  }
+
+  // Least-squares fit of y = slope*x + intercept, plus R^2 (squared Pearson correlation).
+  // Returns null when the selection has no x spread (a vertical slice), since slope is undefined.
+  function computeLinearFit(xs, ys) {
+    const n = xs.length;
+    if (n < 2) return null;
+    let sumX = 0, sumY = 0;
+    for (let i = 0; i < n; i++) { sumX += xs[i]; sumY += ys[i]; }
+    const meanX = sumX / n, meanY = sumY / n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = xs[i] - meanX, dy = ys[i] - meanY;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    if (sxx === 0) return null;
+    const slope = sxy / sxx;
+    const intercept = meanY - slope * meanX;
+    const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
+    return {slope, intercept, r2};
+  }
+
+  function formatStatValue(v) {
+    if (!Number.isFinite(v)) return 'n/a';
+    const abs = Math.abs(v);
+    if (abs === 0) return '0';
+    if (abs >= 1000) return v.toFixed(0);
+    if (abs >= 1) return v.toFixed(2);
+    if (abs >= 0.01) return v.toFixed(4);
+    return v.toExponential(2);
+  }
+
+  // Only main channel traces carry meta.channel (see updatePlot) -- overlay traces like
+  // shading envelopes or the race-line curvature preview are excluded from selection fitting.
+  function groupSelectedPointsByTrace(points) {
+    const groups = new Map();
+    points.forEach((p) => {
+      if (!Number.isInteger(p.curveNumber)) return;
+      const trace = plotDiv.data && plotDiv.data[p.curveNumber];
+      if (!trace || !trace.meta || !trace.meta.channel) return;
+      const x = Number(p.x), y = Number(p.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      let g = groups.get(p.curveNumber);
+      if (!g) { g = {trace, xs: [], ys: []}; groups.set(p.curveNumber, g); }
+      g.xs.push(x); g.ys.push(y);
+    });
+    return groups;
+  }
+
+  // Plotly's box/lasso select only picks up points on traces whose mode includes
+  // 'markers' -- a pure 'lines' trace (what every channel trace uses normally) reports
+  // zero selected points even when the drag box clearly crosses it. Rather than paying
+  // the marker rendering cost at all times (expensive on traces with tens of thousands
+  // of points), markers are added (invisibly, size/opacity 0) only while the select or
+  // lasso tool is the active drag mode, and stripped back off once the user leaves it.
+  function setSelectableMarkersEnabled(enabled) {
+    if (!plotDiv || !Array.isArray(plotDiv.data)) return;
+    const idxs = [];
+    plotDiv.data.forEach((t, i) => {
+      if (!t || !t.meta || !t.meta.channel) return;
+      if (t.type === 'scattergl') return; // color-by-axis traces already render as selectable markers
+      idxs.push(i);
+    });
+    if (idxs.length === 0) return;
+    if (enabled) {
+      Plotly.restyle(plotDiv, {mode: 'lines+markers', 'marker.size': 0, 'marker.opacity': 0}, idxs);
+    } else {
+      Plotly.restyle(plotDiv, {mode: 'lines'}, idxs);
+    }
+  }
+
+  function setSelectModeActive(active) {
+    if (active === selectModeActive) return;
+    selectModeActive = active;
+    setSelectableMarkersEnabled(active);
+    if (!active) clearSelectionFit();
+  }
+
+  // Spreading a large array into Math.min/max (Math.min(...arr)) blows the call stack
+  // once arr has more than ~65k elements, which a single lap's worth of selected points
+  // easily exceeds -- so min/max are accumulated in a plain loop instead.
+  function arrayMinMax(arr) {
+    let min = Infinity, max = -Infinity;
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return [min, max];
+  }
+
+  function clearSelectionFit() {
+    const hadShapes = selectionFitShapes.length > 0;
+    selectionFitShapes = [];
+    if (selectionStatsPanel) selectionStatsPanel.hidden = true;
+    if (selectionStatsBody) selectionStatsBody.innerHTML = '';
+    if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
+      suppressSelectionReentry = true;
+      Plotly.relayout(plotDiv, {shapes: baseCornerShapesForOverlay}).then(() => { suppressSelectionReentry = false; });
+    }
+  }
+
+  function renderSelectionStatsPanel(groups) {
+    if (!selectionStatsPanel || !selectionStatsBody) return;
+    const parts = [];
+    groups.forEach((g) => {
+      if (g.xs.length < 2) return;
+      const [xMin, xMax] = arrayMinMax(g.xs);
+      const [yMin, yMax] = arrayMinMax(g.ys);
+      const fit = computeLinearFit(g.xs, g.ys);
+      const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
+      const label = getChannelLabel(g.trace.meta.channel);
+      const name = g.trace.name || label;
+      const fitRows = fit
+        ? `<div class="selection-stats-row">slope: ${formatStatValue(fit.slope)}</div>
+           <div class="selection-stats-row">R²: ${fit.r2.toFixed(3)}</div>`
+        : `<div class="selection-stats-row">slope: n/a (no x spread)</div>`;
+      parts.push(`<div class="selection-stats-group">
+        <div class="selection-stats-group-title"><span class="selection-stats-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(name)}</div>
+        <div class="selection-stats-row">n = ${g.xs.length} pts</div>
+        <div class="selection-stats-row">${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}</div>
+        <div class="selection-stats-row">${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}</div>
+        ${fitRows}
+      </div>`);
+    });
+    if (parts.length === 0) {
+      clearSelectionFit();
+      return;
+    }
+    selectionStatsBody.innerHTML = parts.join('');
+    selectionStatsPanel.hidden = false;
+  }
+
+  function applySelectionFit(points) {
+    const groups = groupSelectedPointsByTrace(points);
+    const shapes = [];
+    const validGroups = [];
+    groups.forEach((g) => {
+      if (g.xs.length < 2) return;
+      validGroups.push(g);
+      const fit = computeLinearFit(g.xs, g.ys);
+      if (!fit) return;
+      const [xMin, xMax] = arrayMinMax(g.xs);
+      shapes.push({
+        type: 'line',
+        xref: g.trace.xaxis || 'x',
+        yref: g.trace.yaxis || 'y',
+        x0: xMin, x1: xMax,
+        y0: fit.slope * xMin + fit.intercept,
+        y1: fit.slope * xMax + fit.intercept,
+        line: {color: 'black', width: 2, dash: 'dot'},
+        layer: 'above'
+      });
+    });
+    if (validGroups.length === 0) {
+      clearSelectionFit();
+      return;
+    }
+    selectionFitShapes = shapes;
+    renderSelectionStatsPanel(validGroups);
+    if (suppressSelectionReentry) return;
+    suppressSelectionReentry = true;
+    Plotly.relayout(plotDiv, {shapes: baseCornerShapesForOverlay.concat(selectionFitShapes)})
+      .then(() => { suppressSelectionReentry = false; });
+  }
+
+  // Lets the user drag the selection-fit panel by its header to wherever it doesn't
+  // obscure the plot. Position is kept in inline left/top (in place of the CSS default
+  // top/right) and clamped to stay inside the plot canvas; it resets on reload.
+  function bindSelectionPanelDrag() {
+    if (!selectionStatsPanel || !selectionStatsHeader) return;
+    const wrap = selectionStatsPanel.offsetParent || selectionStatsPanel.parentElement;
+    let dragging = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+    selectionStatsHeader.addEventListener('pointerdown', (ev) => {
+      if (ev.target.closest('.selection-stats-close')) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const panelRect = selectionStatsPanel.getBoundingClientRect();
+      dragging = true;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      startLeft = panelRect.left - wrapRect.left;
+      startTop = panelRect.top - wrapRect.top;
+      selectionStatsPanel.style.right = 'auto';
+      selectionStatsPanel.style.left = `${startLeft}px`;
+      selectionStatsPanel.style.top = `${startTop}px`;
+      selectionStatsHeader.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+
+    selectionStatsHeader.addEventListener('pointermove', (ev) => {
+      if (!dragging) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const maxLeft = Math.max(0, wrapRect.width - selectionStatsPanel.offsetWidth);
+      const maxTop = Math.max(0, wrapRect.height - selectionStatsPanel.offsetHeight);
+      const newLeft = Math.min(maxLeft, Math.max(0, startLeft + (ev.clientX - startX)));
+      const newTop = Math.min(maxTop, Math.max(0, startTop + (ev.clientY - startY)));
+      selectionStatsPanel.style.left = `${newLeft}px`;
+      selectionStatsPanel.style.top = `${newTop}px`;
+    });
+
+    const endDrag = () => { dragging = false; };
+    selectionStatsHeader.addEventListener('pointerup', endDrag);
+    selectionStatsHeader.addEventListener('pointercancel', endDrag);
+  }
+
+  function bindMainPlotSelectionSync() {
+    if (!plotDiv || plotDiv.__selectionSyncBound) return;
+    if (typeof plotDiv.on !== 'function') return;
+    plotDiv.__selectionSyncBound = true;
+
+    plotDiv.on('plotly_selected', (eventData) => {
+      if (suppressSelectionReentry) return;
+      if (!eventData || !Array.isArray(eventData.points) || eventData.points.length === 0) {
+        clearSelectionFit();
+        return;
+      }
+      applySelectionFit(eventData.points);
+    });
+
+    plotDiv.on('plotly_deselect', () => {
+      if (suppressSelectionReentry) return;
+      clearSelectionFit();
     });
   }
 
@@ -872,6 +1144,11 @@
 
   if (controlsClose) controlsClose.addEventListener('click', () => setControlsOpen(false));
   if (controlsBackdrop) controlsBackdrop.addEventListener('click', () => setControlsOpen(false));
+  if (selectionStatsClose) selectionStatsClose.addEventListener('click', () => {
+    clearSelectionFit();
+    if (typeof Plotly !== 'undefined' && plotDiv) Plotly.relayout(plotDiv, {selections: []});
+  });
+  bindSelectionPanelDrag();
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
@@ -5170,7 +5447,7 @@
   function clearLeafletMapPlot() {
     leafletHoverLookup = new Map();
     clearLeafletHoverMarker();
-    clearRacingLineOverlay();
+    clearWholeCircuitOverlay();
     removeLeafletColorLegend();
     leafletViewState = null;
     leafletViewStateUserSet = false;
@@ -6227,7 +6504,7 @@
     if (showCornerStrip) {
       const shadeOpacityPct = cornerShadeOpacityInput ? Number(cornerShadeOpacityInput.value) : 10;
       const cornerVis = buildCornerShapesAndAnnotations(cornerData, built.mainDomainTop, shadeOpacityPct);
-      layout.shapes = cornerVis.shapes;
+      baseCornerShapesForOverlay = cornerVis.shapes;
       layout.annotations = cornerVis.annotations;
       activeCornerHeadingSegments = cornerVis.clickTargets;
 
@@ -6236,11 +6513,17 @@
       saveCornerMetadataForVenue(cornerVenue, cornerData, cornerTotals);
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = formatCornerSummary(cornerVenue, cornerData, cornerTotals);
     } else {
-      layout.shapes = [];
+      baseCornerShapesForOverlay = [];
       layout.annotations = [];
       activeCornerHeadingSegments = [];
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
     }
+    layout.shapes = baseCornerShapesForOverlay.concat(selectionFitShapes);
+    mainPlotXAxisTitle = mainXTitle;
+    // Plotly.react takes a fresh layout object each call; without this, any re-render
+    // while the select tool is active (e.g. toggling a lap) would silently drop back to
+    // the default 'zoom' dragmode.
+    if (selectModeActive) layout.dragmode = 'select';
 
     if (plotDiv && Number.isFinite(layout.height)) {
       plotDiv.style.height = `${layout.height}px`;
@@ -6306,7 +6589,11 @@
             mode: 'lines',
             marker:{color: traceColor},
             line:{color: traceColor, dash},
-            hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y))
+            hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y)),
+            // Consumed by the box/lasso selection stats panel to label + color each
+            // fit line; overlay traces (shading, race-line curvature, etc.) intentionally
+            // don't set this so they're excluded from selection fitting.
+            meta: {channel: y, color: traceColor}
           };
           if (colorRawArr) {
             applyColorAxisToTrace(trace, colorRawArr, colorAxisContext, colorAxisChannel, !colorAxisScaleShown);
@@ -6398,7 +6685,11 @@
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
+    bindMainPlotSelectionSync();
     bindCornerStripZoom();
+    // Plotly.react rebuilds trace objects from scratch (mode:'lines'), so re-apply the
+    // invisible selection markers if the select/lasso tool was already active.
+    if (selectModeActive) setSelectableMarkersEnabled(true);
 
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
