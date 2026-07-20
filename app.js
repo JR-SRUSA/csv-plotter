@@ -59,7 +59,7 @@
   const selectionStatsPanel = document.getElementById('selectionStatsPanel');
   const selectionStatsBody = document.getElementById('selectionStatsBody');
   const selectionStatsClose = document.getElementById('selectionStatsClose');
-  const selectDataToggleBtn = document.getElementById('selectDataToggleBtn');
+  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
@@ -109,7 +109,34 @@
   const quickModFilterWindow = document.getElementById('quickModFilterWindow');
   const quickModFilterAxis = document.getElementById('quickModFilterAxis');
   const quickModCreateBtn = document.getElementById('quickModCreateBtn');
-  const plotlyConfig = {responsive:true, displaylogo:false};
+  // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
+  // Plotly only auto-shows those when a trace already has markers -- which channel traces
+  // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
+  // ones are explicitly removed so they don't also reappear (duplicated) once markers are
+  // added. attr/val make Plotly highlight these exactly like its native dragmode buttons.
+  const plotlyConfig = {
+    responsive: true,
+    displaylogo: false,
+    modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+    modeBarButtonsToAdd: [
+      {
+        name: 'boxSelectFit',
+        title: 'Box Select',
+        icon: Plotly.Icons.selectbox,
+        attr: 'dragmode',
+        val: 'select',
+        click: (gd) => Plotly.relayout(gd, {dragmode: 'select'})
+      },
+      {
+        name: 'lassoSelectFit',
+        title: 'Lasso Select',
+        icon: Plotly.Icons.lasso,
+        attr: 'dragmode',
+        val: 'lasso',
+        click: (gd) => Plotly.relayout(gd, {dragmode: 'lasso'})
+      }
+    ]
+  };
   const DEFAULT_Y_CHANNEL = 'Speed';
   const HOVER_MARKER_TRACE_NAME = '__hover_marker__';
   const DERIVED_MAP_X_COL = 'Map X';
@@ -656,10 +683,6 @@
     selectModeActive = active;
     setSelectableMarkersEnabled(active);
     if (!active) clearSelectionFit();
-    if (selectDataToggleBtn) {
-      selectDataToggleBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
-      selectDataToggleBtn.textContent = active ? 'Select Data: On' : 'Select Data';
-    }
   }
 
   // Spreading a large array into Math.min/max (Math.min(...arr)) blows the call stack
@@ -748,6 +771,47 @@
     suppressSelectionReentry = true;
     Plotly.relayout(plotDiv, {shapes: baseCornerShapesForOverlay.concat(selectionFitShapes)})
       .then(() => { suppressSelectionReentry = false; });
+  }
+
+  // Lets the user drag the selection-fit panel by its header to wherever it doesn't
+  // obscure the plot. Position is kept in inline left/top (in place of the CSS default
+  // top/right) and clamped to stay inside the plot canvas; it resets on reload.
+  function bindSelectionPanelDrag() {
+    if (!selectionStatsPanel || !selectionStatsHeader) return;
+    const wrap = selectionStatsPanel.offsetParent || selectionStatsPanel.parentElement;
+    let dragging = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+    selectionStatsHeader.addEventListener('pointerdown', (ev) => {
+      if (ev.target.closest('.selection-stats-close')) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const panelRect = selectionStatsPanel.getBoundingClientRect();
+      dragging = true;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      startLeft = panelRect.left - wrapRect.left;
+      startTop = panelRect.top - wrapRect.top;
+      selectionStatsPanel.style.right = 'auto';
+      selectionStatsPanel.style.left = `${startLeft}px`;
+      selectionStatsPanel.style.top = `${startTop}px`;
+      selectionStatsHeader.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+
+    selectionStatsHeader.addEventListener('pointermove', (ev) => {
+      if (!dragging) return;
+      const wrapRect = wrap.getBoundingClientRect();
+      const maxLeft = Math.max(0, wrapRect.width - selectionStatsPanel.offsetWidth);
+      const maxTop = Math.max(0, wrapRect.height - selectionStatsPanel.offsetHeight);
+      const newLeft = Math.min(maxLeft, Math.max(0, startLeft + (ev.clientX - startX)));
+      const newTop = Math.min(maxTop, Math.max(0, startTop + (ev.clientY - startY)));
+      selectionStatsPanel.style.left = `${newLeft}px`;
+      selectionStatsPanel.style.top = `${newTop}px`;
+    });
+
+    const endDrag = () => { dragging = false; };
+    selectionStatsHeader.addEventListener('pointerup', endDrag);
+    selectionStatsHeader.addEventListener('pointercancel', endDrag);
   }
 
   function bindMainPlotSelectionSync() {
@@ -1084,10 +1148,7 @@
     clearSelectionFit();
     if (typeof Plotly !== 'undefined' && plotDiv) Plotly.relayout(plotDiv, {selections: []});
   });
-  if (selectDataToggleBtn) selectDataToggleBtn.addEventListener('click', () => {
-    if (!plotDiv) return;
-    Plotly.relayout(plotDiv, {dragmode: selectModeActive ? 'zoom' : 'select'});
-  });
+  bindSelectionPanelDrag();
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
