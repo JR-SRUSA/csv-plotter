@@ -4,8 +4,23 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Data Plotter</title>
-  <link rel="stylesheet" href="style.css">
+  <script>
+    // Runs before style.css paints anything so the page never flashes the wrong theme.
+    // Kept inline/synchronous for that reason -- the full toggle UI logic lives in app.js.
+    (function () {
+      try {
+        var stored = localStorage.getItem('csvPlotterTheme');
+        var theme = (stored === 'dark' || stored === 'light')
+          ? stored
+          : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="leaflet.css" />
+  <!-- Loads after Leaflet's CSS so our theme overrides (e.g. dark-mode control colors)
+       win the cascade on equal specificity, regardless of shorthand/longhand quirks. -->
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header>
@@ -27,6 +42,26 @@
         <p></p>
         <button id="controlsClose" class="controls-close" aria-label="Close controls">🗙</button>
       </div>
+      <button type="button" id="themeToggleBtn" class="theme-toggle-switch" role="switch" aria-checked="false" aria-label="Switch to dark mode">
+        <span class="theme-toggle-track" aria-hidden="true">
+          <svg class="theme-toggle-icon theme-toggle-icon-sun" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <circle cx="12" cy="12" r="5" stroke="none"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="theme-toggle-icon theme-toggle-icon-moon" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <span class="theme-toggle-thumb"></span>
+        </span>
+        <span class="theme-toggle-text sr-only" id="themeToggleLabel">Dark Mode</span>
+      </button>
       <label class="file-label">Select CSV files
         <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel,.tsv,.txt,text/tab-separated-values,text/plain,.dat" multiple />
 
@@ -304,7 +339,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-20d</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-20g</div>
     </section>
 
     <section class="plot">

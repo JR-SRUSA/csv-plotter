@@ -65,6 +65,8 @@
   const controlsToggle = document.getElementById('controlsToggle');
   const controlsClose = document.getElementById('controlsClose');
   const controlsBackdrop = document.getElementById('controlsBackdrop');
+  const themeToggleBtn = document.getElementById('themeToggleBtn');
+  const themeToggleLabel = document.getElementById('themeToggleLabel');
   const mapXOffsetInput = document.getElementById('mapXOffset');
   const mapYOffsetInput = document.getElementById('mapYOffset');
   const mapCenterLatInput = document.getElementById('mapCenterLat');
@@ -156,7 +158,20 @@
   const DEFAULT_MAP_COLOR_CHANNEL_CANDIDATES = ['LongAcc', 'LonAcc', 'GPS LonAcc'];
   const AUTO_MAP_OFFSET_SAMPLE_STEP_M = 10;
   const DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS = [];
-  const BLANK_BASEMAP_BACKGROUND = '#d2d6dc';
+  // Light mode keeps a distinct neutral gray (not page-background white) so white points
+  // in divergent colormaps stay visible against it. Dark mode can just reuse the page's
+  // own dark background -- white is already visible against anything that dark.
+  const BLANK_BASEMAP_BACKGROUND_LIGHT = '#d2d6dc';
+  const BLANK_BASEMAP_BACKGROUND_DARK = '#0f1520';
+
+  // OpenStreetMap's own standard tile style has no dark variant. CARTO's Dark Matter
+  // basemap (still OSM data underneath, just re-styled) is the common free substitute --
+  // no API key needed, same as the Esri satellite tiles already used below, just
+  // attribution-required. Swapped in for the 'OpenStreetMap' layer via setUrl() whenever
+  // it's the active base layer and the app theme changes.
+  const OSM_TILE_URL_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const OSM_TILE_URL_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  const OSM_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
@@ -261,6 +276,7 @@
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
   let leafletColorLegendControl = null;
+  let leafletOsmLayer = null; // the 'OpenStreetMap' base layer -- its tile URL swaps with the app theme
   let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
@@ -1108,6 +1124,96 @@
     return normalizeHexColor(channelColorOverrides.get(channel));
   }
 
+  // Kept in sync by hand with the CSS custom properties in style.css (--bg-surface,
+  // --text-primary, --border-dashed, --border for each theme) -- Plotly renders its own
+  // axes/background into an SVG, so it can't pick up CSS variables directly and needs
+  // its own template pushed in whenever the theme changes.
+  const PLOTLY_THEME_TEMPLATES = {
+    light: {
+      layout: {
+        paper_bgcolor: '#ffffff',
+        plot_bgcolor: '#ffffff',
+        font: {color: '#0b2545'},
+        xaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'},
+        yaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'}
+      }
+    },
+    dark: {
+      layout: {
+        paper_bgcolor: '#1a222c',
+        plot_bgcolor: '#1a222c',
+        font: {color: '#e8eef7'},
+        xaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'},
+        yaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'}
+      }
+    }
+  };
+
+  function getCurrentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  }
+
+  // Plotly's `layout.template` applies its xaxis/yaxis entries as defaults to every
+  // matching axis on the plot (xaxis2, yaxis3, ...), so this alone re-themes a plot with
+  // any number of dynamically-added channel axes without enumerating them by hand.
+  function getPlotlyThemeTemplate() {
+    return PLOTLY_THEME_TEMPLATES[getCurrentTheme()];
+  }
+
+  function getBlankBasemapBackground() {
+    return getCurrentTheme() === 'dark' ? BLANK_BASEMAP_BACKGROUND_DARK : BLANK_BASEMAP_BACKGROUND_LIGHT;
+  }
+
+  function getOsmTileUrl() {
+    return getCurrentTheme() === 'dark' ? OSM_TILE_URL_DARK : OSM_TILE_URL_LIGHT;
+  }
+
+  function applyTheme(theme, opts) {
+    const options = opts || {};
+    const resolved = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', resolved);
+
+    if (options.persist !== false) {
+      try { localStorage.setItem('csvPlotterTheme', resolved); } catch (e) { /* private browsing, etc. */ }
+    }
+
+    if (themeToggleBtn) {
+      const isDark = resolved === 'dark';
+      themeToggleBtn.setAttribute('aria-checked', isDark ? 'true' : 'false');
+      themeToggleBtn.setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+      if (themeToggleLabel) themeToggleLabel.textContent = isDark ? 'Light Mode' : 'Dark Mode';
+    }
+
+    if (options.rerenderPlots !== false) {
+      const template = getPlotlyThemeTemplate();
+      if (plotDiv && Array.isArray(plotDiv.data) && plotDiv.data.length > 0) {
+        Plotly.relayout(plotDiv, {template});
+      }
+      if (mapDiv && Array.isArray(mapDiv.data) && mapDiv.data.length > 0) {
+        Plotly.relayout(mapDiv, {template});
+      }
+      if (leafletMapDiv) leafletMapDiv.style.background = getBlankBasemapBackground();
+      // Updated unconditionally (not just while it's the visible layer) so switching to
+      // OpenStreetMap later, after a theme change made while Satellite was active, still
+      // shows the right variant instead of a stale one from whenever it was created.
+      // Satellite imagery isn't touched -- it's just photos, no meaningful "dark mode".
+      if (leafletOsmLayer) leafletOsmLayer.setUrl(getOsmTileUrl());
+    }
+  }
+
+  function initThemeToggle() {
+    // The inline anti-flash script in <head> already set data-theme before this ran --
+    // this just syncs the button's own label/aria state to it (the switch's slide and
+    // icon-dimming animation is pure CSS, driven directly off data-theme), without touching the
+    // still-empty plots or re-writing the localStorage value that was just read from.
+    applyTheme(getCurrentTheme(), {persist: false, rerenderPlots: false});
+    if (themeToggleBtn) {
+      themeToggleBtn.addEventListener('click', () => {
+        applyTheme(getCurrentTheme() === 'dark' ? 'light' : 'dark');
+      });
+    }
+  }
+
   function setControlsOpen(isOpen) {
     const isMobile = window.innerWidth <= 980;
     if (isMobile) {
@@ -1144,6 +1250,7 @@
 
   if (controlsClose) controlsClose.addEventListener('click', () => setControlsOpen(false));
   if (controlsBackdrop) controlsBackdrop.addEventListener('click', () => setControlsOpen(false));
+  initThemeToggle();
   if (selectionStatsClose) selectionStatsClose.addEventListener('click', () => {
     clearSelectionFit();
     if (typeof Plotly !== 'undefined' && plotDiv) Plotly.relayout(plotDiv, {selections: []});
@@ -1238,7 +1345,7 @@
     if (!errorEl) {
       errorEl = document.createElement('div');
       errorEl.className = 'file-decoder-error';
-      errorEl.style.color = '#9b1c1c';
+      errorEl.style.color = 'var(--danger-text)';
       errorEl.style.fontSize = '0.8em';
       errorEl.style.marginTop = '4px';
       fileItem.appendChild(errorEl);
@@ -4774,6 +4881,7 @@
       mapLayout.yaxis.autorange = false;
     }
 
+    mapLayout.template = getPlotlyThemeTemplate();
     Plotly.react(mapDiv, traces, mapLayout, plotlyConfig);
     bindMapViewStateSync();
     mapHoverLookup = nextHoverLookup;
@@ -4789,6 +4897,7 @@
       leafletMap = null;
       leafletLayers = [];
       leafletHoverMarker = null;
+      leafletOsmLayer = null;
     }
 
     if (leafletMap && leafletMapMode === mode) return;
@@ -4796,7 +4905,7 @@
     syncLeafletContainerHeight();
 
     // Used by the blank basemap so white values in divergent colormaps remain visible.
-    leafletMapDiv.style.background = BLANK_BASEMAP_BACKGROUND;
+    leafletMapDiv.style.background = getBlankBasemapBackground();
 
     if (mode === 'xy') {
       leafletMap = L.map(leafletMapDiv, {
@@ -4818,10 +4927,10 @@
         }
       ).addTo(leafletMap);
 
-      const osmLayer = L.tileLayer(
-        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      leafletOsmLayer = L.tileLayer(
+        getOsmTileUrl(),
         {
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          attribution: OSM_TILE_ATTRIBUTION,
           maxZoom: 19
         }
       );
@@ -4830,7 +4939,7 @@
       L.control.layers(
         {
           'Satellite': satelliteLayer,
-          'OpenStreetMap': osmLayer,
+          'OpenStreetMap': leafletOsmLayer,
           'Blank (gray)': blankLayer
         },
         {},
@@ -5202,14 +5311,15 @@
     control.onAdd = () => {
       const div = L.DomUtil.create('div', 'leaflet-map-color-legend');
       const gradient = `linear-gradient(to right, ${sampleColors.join(',')})`;
-      div.style.background = 'rgba(255,255,255,0.95)';
-      div.style.border = '1px solid #c8d2df';
+      div.style.background = 'var(--panel-bg-translucent)';
+      div.style.border = '1px solid var(--border)';
       div.style.borderRadius = '6px';
       div.style.padding = '6px 8px';
       div.style.font = '12px/1.2 sans-serif';
-      div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.15)';
+      div.style.boxShadow = '0 1px 4px var(--shadow-md)';
       div.style.minWidth = '150px';
       div.style.cursor = 'pointer';
+      div.style.color = 'var(--text-primary)';
 
       const currentMin = Number(scaleConfig.cmin);
       const currentMax = Number(scaleConfig.cmax);
@@ -5223,34 +5333,34 @@
         : null;
       const rangeLabelsHtml = showZeroLabel
         ? [
-            '<div style="position:relative;display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+            '<div style="position:relative;display:flex;justify-content:space-between;margin-top:3px;color:var(--text-secondary);">',
             `<span>${currentMin.toFixed(2)}</span>`,
             `<span>${currentMax.toFixed(2)}</span>`,
             `<span style="position:absolute;left:${zeroPct.toFixed(2)}%;transform:translateX(-50%);font-weight:600;">0</span>`,
             '</div>'
           ].join('')
         : [
-            '<div style="display:flex;justify-content:space-between;margin-top:3px;color:#31445a;">',
+            '<div style="display:flex;justify-content:space-between;margin-top:3px;color:var(--text-secondary);">',
             `<span>${currentMin.toFixed(2)}</span>`,
             `<span>${currentMax.toFixed(2)}</span>`,
             '</div>'
           ].join('');
 
       div.innerHTML = [
-        `<div style="margin-bottom:4px;font-weight:600;color:#223;">${escapeHtml(channelName || 'Map Color')}</div>`,
-        `<div style="height:10px;border-radius:3px;border:1px solid #9fb0c5;background:${gradient};"></div>`,
+        `<div style="margin-bottom:4px;font-weight:600;color:var(--text-primary);">${escapeHtml(channelName || 'Map Color')}</div>`,
+        `<div style="height:10px;border-radius:3px;border:1px solid var(--border);background:${gradient};"></div>`,
         rangeLabelsHtml,
-        `<div style="margin-top:4px;color:#5a6b82;">${isManualRange ? 'Manual bounds active' : 'Auto bounds active'} (click to edit)</div>`,
-        '<div class="leaflet-map-color-range-editor" style="display:none;margin-top:6px;border-top:1px solid #d7e0ec;padding-top:6px;">',
+        `<div style="margin-top:4px;color:var(--text-muted);">${isManualRange ? 'Manual bounds active' : 'Auto bounds active'} (click to edit)</div>`,
+        '<div class="leaflet-map-color-range-editor" style="display:none;margin-top:6px;border-top:1px solid var(--border-dashed);padding-top:6px;">',
         '<div style="display:flex;gap:6px;align-items:center;">',
-        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Min <input type="number" step="any" class="leaflet-map-color-min" value="${currentMin.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
-        `<label style="display:flex;align-items:center;gap:4px;color:#223;">Max <input type="number" step="any" class="leaflet-map-color-max" value="${currentMax.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;"></label>`,
+        `<label style="display:flex;align-items:center;gap:4px;color:var(--text-primary);">Min <input type="number" step="any" class="leaflet-map-color-min" value="${currentMin.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;background:var(--bg-surface);color:var(--text-primary);border:1px solid var(--border);"></label>`,
+        `<label style="display:flex;align-items:center;gap:4px;color:var(--text-primary);">Max <input type="number" step="any" class="leaflet-map-color-max" value="${currentMax.toFixed(6)}" style="width:74px;padding:2px 4px;font-size:12px;background:var(--bg-surface);color:var(--text-primary);border:1px solid var(--border);"></label>`,
         '</div>',
         '<div style="display:flex;gap:6px;margin-top:6px;">',
         '<button type="button" class="leaflet-map-color-apply" style="padding:2px 8px;font-size:12px;">Apply</button>',
         '<button type="button" class="leaflet-map-color-auto" style="padding:2px 8px;font-size:12px;">Auto</button>',
         '</div>',
-        '<div class="leaflet-map-color-error" style="display:none;color:#9b1c1c;margin-top:5px;"></div>',
+        '<div class="leaflet-map-color-error" style="display:none;color:var(--danger-text);margin-top:5px;"></div>',
         '</div>'
       ].join('');
 
@@ -6682,6 +6792,7 @@
       selFiles.map(f => f.id).sort().join('\x00'),
       String(includeTimeSlip)
     ].join('|');
+    layout.template = getPlotlyThemeTemplate();
     Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
