@@ -44,6 +44,7 @@ try {
   const gzipFile = `${bundleFile}.gz`;
   const distHtml = path.join(distDir, 'index.html');
   const distCss = path.join(distDir, 'style.css');
+  const distLeafletCss = path.join(distDir, 'leaflet.css');
   const distChannelMap = path.join(distDir, 'channel-map.json');
   const distStaticDir = path.join(distDir, 'static');
   const distTrackMapDefaults = path.join(distStaticDir, 'gpbikes-track-map-defaults.json');
@@ -51,6 +52,8 @@ try {
   const sourceTrackMapDefaults = path.join(rootDir, 'static', 'gpbikes-track-map-defaults.json');
   const plotlySource = require.resolve('plotly.js-basic-dist');
   const papaSource = require.resolve('papaparse/papaparse.min.js');
+  const leafletSource = require.resolve('leaflet/dist/leaflet.js');
+  const leafletCssSource = require.resolve('leaflet/dist/leaflet.css');
 
   ensureDir(buildDir);
   resetDir(distDir);
@@ -61,6 +64,7 @@ try {
   const bundleParts = [
     fs.readFileSync(plotlySource, 'utf8'),
     fs.readFileSync(papaSource, 'utf8'),
+    fs.readFileSync(leafletSource, 'utf8'),
     fs.readFileSync(processorSource, 'utf8'),
     fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(appMinified, 'utf8'),
@@ -74,9 +78,14 @@ try {
 
   const sourceHtml = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
   const productionHtml = sourceHtml
+    .replace(
+      '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css" />',
+      '<link rel="stylesheet" href="leaflet.css" />'
+    )
     .replace(/\s*<!-- <script src="https:\/\/cdn\.plot\.ly\/plotly-2\.20\.0\.min\.js"><\/script> -->\n?/g, '\n')
     .replace(/\s*<script src="lib\/plotly-custom\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/papaparse@5\.4\.1\/papaparse\.min\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/leaflet@1\.9\.4\/dist\/leaflet\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="file-processors\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="map-coordinate-utils\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="resize-panels\.js"><\/script>\n?/g, '\n')
@@ -85,6 +94,7 @@ try {
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
   writeMaybeCompressed(distCss, fs.readFileSync(path.join(rootDir, 'style.css')), gzipOnly);
+  writeMaybeCompressed(distLeafletCss, fs.readFileSync(leafletCssSource), gzipOnly);
   writeMaybeCompressed(distChannelMap, fs.readFileSync(sourceChannelMap), gzipOnly);
   writeMaybeCompressed(distTrackMapDefaults, fs.readFileSync(sourceTrackMapDefaults), gzipOnly);
 
@@ -92,6 +102,7 @@ try {
     console.log(`Built ${bundleFile}.gz`);
     console.log(`Built ${distHtml}.gz`);
     console.log(`Built ${distCss}.gz`);
+    console.log(`Built ${distLeafletCss}.gz`);
     console.log(`Built ${distChannelMap}.gz`);
     console.log(`Built ${distTrackMapDefaults}.gz`);
     console.log('Created gzip-only dist for ESP32-style hosting');
@@ -100,6 +111,7 @@ try {
     console.log(`Built ${gzipFile}`);
     console.log(`Built ${distHtml}`);
     console.log(`Built ${distCss}`);
+    console.log(`Built ${distLeafletCss}`);
     console.log(`Built ${distChannelMap}`);
     console.log(`Built ${distTrackMapDefaults}`);
   }
