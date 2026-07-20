@@ -164,6 +164,15 @@
   const BLANK_BASEMAP_BACKGROUND_LIGHT = '#d2d6dc';
   const BLANK_BASEMAP_BACKGROUND_DARK = '#0f1520';
 
+  // OpenStreetMap's own standard tile style has no dark variant. CARTO's Dark Matter
+  // basemap (still OSM data underneath, just re-styled) is the common free substitute --
+  // no API key needed, same as the Esri satellite tiles already used below, just
+  // attribution-required. Swapped in for the 'OpenStreetMap' layer via setUrl() whenever
+  // it's the active base layer and the app theme changes.
+  const OSM_TILE_URL_LIGHT = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const OSM_TILE_URL_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
+  const OSM_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
+
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
   // Fallback channel mapping if channel-map.json is unavailable.
@@ -267,6 +276,7 @@
   let leafletHoverLookup = new Map(); // key -> {lat, lon}
   let leafletHoverMarker = null;
   let leafletColorLegendControl = null;
+  let leafletOsmLayer = null; // the 'OpenStreetMap' base layer -- its tile URL swaps with the app theme
   let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
@@ -1154,6 +1164,10 @@
     return getCurrentTheme() === 'dark' ? BLANK_BASEMAP_BACKGROUND_DARK : BLANK_BASEMAP_BACKGROUND_LIGHT;
   }
 
+  function getOsmTileUrl() {
+    return getCurrentTheme() === 'dark' ? OSM_TILE_URL_DARK : OSM_TILE_URL_LIGHT;
+  }
+
   function applyTheme(theme, opts) {
     const options = opts || {};
     const resolved = theme === 'dark' ? 'dark' : 'light';
@@ -1179,6 +1193,11 @@
         Plotly.relayout(mapDiv, {template});
       }
       if (leafletMapDiv) leafletMapDiv.style.background = getBlankBasemapBackground();
+      // Updated unconditionally (not just while it's the visible layer) so switching to
+      // OpenStreetMap later, after a theme change made while Satellite was active, still
+      // shows the right variant instead of a stale one from whenever it was created.
+      // Satellite imagery isn't touched -- it's just photos, no meaningful "dark mode".
+      if (leafletOsmLayer) leafletOsmLayer.setUrl(getOsmTileUrl());
     }
   }
 
@@ -4878,6 +4897,7 @@
       leafletMap = null;
       leafletLayers = [];
       leafletHoverMarker = null;
+      leafletOsmLayer = null;
     }
 
     if (leafletMap && leafletMapMode === mode) return;
@@ -4907,10 +4927,10 @@
         }
       ).addTo(leafletMap);
 
-      const osmLayer = L.tileLayer(
-        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      leafletOsmLayer = L.tileLayer(
+        getOsmTileUrl(),
         {
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          attribution: OSM_TILE_ATTRIBUTION,
           maxZoom: 19
         }
       );
@@ -4919,7 +4939,7 @@
       L.control.layers(
         {
           'Satellite': satelliteLayer,
-          'OpenStreetMap': osmLayer,
+          'OpenStreetMap': leafletOsmLayer,
           'Blank (gray)': blankLayer
         },
         {},
