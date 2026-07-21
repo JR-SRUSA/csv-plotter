@@ -58,10 +58,6 @@
   const clearBtn = document.getElementById('clearBtn');
   const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
   const plotDiv = document.getElementById('plotDiv');
-  const selectionStatsPanel = document.getElementById('selectionStatsPanel');
-  const selectionStatsBody = document.getElementById('selectionStatsBody');
-  const selectionStatsClose = document.getElementById('selectionStatsClose');
-  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
@@ -143,6 +139,26 @@
         attr: 'dragmode',
         val: 'lasso',
         click: (gd) => Plotly.relayout(gd, {dragmode: 'lasso'})
+      },
+      {
+        name: 'clearSelectionFit',
+        title: 'Clear Selection & Exit Select Mode',
+        icon: Plotly.Icons.eraseshape,
+        click: (gd) => {
+          clearSelectionFit();
+          Plotly.relayout(gd, {selections: [], dragmode: 'zoom'});
+        }
+      },
+      {
+        name: 'toggleHoverData',
+        title: 'Toggle Hover Data',
+        icon: Plotly.Icons.tooltip_basic,
+        attr: 'hovermode',
+        val: 'x',
+        click: (gd) => {
+          hoverEnabled = !hoverEnabled;
+          Plotly.relayout(gd, {hovermode: hoverEnabled ? 'x' : false});
+        }
       }
     ]
   };
@@ -306,6 +322,10 @@
   let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
   let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
+  // Hover tooltips default off on mobile, where they mostly just get in the way of touch
+  // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
+  // modebar button) sticks regardless of later window resizes.
+  let hoverEnabled = window.innerWidth > 980;
   // Plotly.relayout({shapes:...}) internally reapplies ("reselects") the current drag
   // selection, synchronously re-emitting plotly_selected/plotly_deselect from inside that
   // same call. Without this guard, our own relayout-in-response-to-selection would trigger
@@ -745,8 +765,6 @@
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
     selectionFitAnnotations = [];
-    if (selectionStatsPanel) selectionStatsPanel.hidden = true;
-    if (selectionStatsBody) selectionStatsBody.innerHTML = '';
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
@@ -756,41 +774,18 @@
     }
   }
 
-  function renderSelectionStatsPanel(groups) {
-    if (!selectionStatsPanel || !selectionStatsBody) return;
-    const parts = [];
-    groups.forEach((g) => {
-      if (g.xs.length < 2) return;
-      const [xMin, xMax] = arrayMinMax(g.xs);
-      const [yMin, yMax] = arrayMinMax(g.ys);
-      const fit = computeLinearFit(g.xs, g.ys);
-      const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
-      const label = getChannelLabel(g.trace.meta.channel);
-      const name = g.trace.name || label;
-      const fitRows = fit
-        ? `<div class="selection-stats-row">slope: ${formatStatValue(fit.slope)}</div>
-           <div class="selection-stats-row">R²: ${fit.r2.toFixed(3)}</div>`
-        : `<div class="selection-stats-row">slope: n/a (no x spread)</div>`;
-      parts.push(`<div class="selection-stats-group">
-        <div class="selection-stats-group-title"><span class="selection-stats-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(name)}</div>
-        <div class="selection-stats-row">n = ${g.xs.length} pts</div>
-        <div class="selection-stats-row">${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}</div>
-        <div class="selection-stats-row">${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}</div>
-        ${fitRows}
-      </div>`);
-    });
-    if (parts.length === 0) {
-      clearSelectionFit();
-      return;
-    }
-    selectionStatsBody.innerHTML = parts.join('');
-    selectionStatsPanel.hidden = false;
+  // Fit line color needs to stay readable against the plot background in both themes --
+  // a plain black line all but vanishes on the dark background's dark traces/gridlines.
+  function getSelectionFitLineColor() {
+    return getCurrentTheme() === 'dark' ? '#d7dde5' : '#1a1a1a';
   }
 
-  // Mirrors renderSelectionStatsPanel's numbers into a Plotly annotation anchored to each
-  // fit line, so the same stats survive into a PNG export -- the HTML stats panel is
-  // outside Plotly's SVG and invisible to Plotly.downloadImage.
-  function buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis) {
+  // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
+  // survives into a PNG export via Plotly.downloadImage. stackIndex offsets each
+  // simultaneous fit (multiple Y channels selected at once) further from the selection
+  // box's corner, so they start out legible instead of stacked directly on each other;
+  // the user can still drag any of them further (config.edits.annotationTail).
+  function buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
     const theme = getCurrentTheme();
     const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
     const label = getChannelLabel(g.trace.meta.channel);
@@ -812,7 +807,7 @@
       text,
       showarrow: true,
       arrowhead: 2, arrowsize: 1, arrowwidth: 1, arrowcolor: color,
-      ax: 50, ay: -50,
+      ax: 50, ay: -50 - stackIndex * 95,
       align: 'left',
       font: {size: 10, color: theme === 'dark' ? '#e8eef7' : '#0b2545'},
       bgcolor: theme === 'dark' ? 'rgba(26,34,44,0.92)' : 'rgba(255,255,255,0.92)',
@@ -827,6 +822,8 @@
     const shapes = [];
     const annotations = [];
     const validGroups = [];
+    const fitLineColor = getSelectionFitLineColor();
+    let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
@@ -843,10 +840,11 @@
         x0: xMin, x1: xMax,
         y0: fit.slope * xMin + fit.intercept,
         y1: fit.slope * xMax + fit.intercept,
-        line: {color: 'black', width: 2, dash: 'dot'},
+        line: {color: fitLineColor, width: 2, dash: 'dot'},
         layer: 'above'
       });
-      annotations.push(buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis));
+      annotations.push(buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
+      stackIndex += 1;
     });
     if (validGroups.length === 0) {
       clearSelectionFit();
@@ -854,54 +852,12 @@
     }
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
-    renderSelectionStatsPanel(validGroups);
     if (suppressSelectionReentry) return;
     suppressSelectionReentry = true;
     Plotly.relayout(plotDiv, {
       shapes: baseCornerShapesForOverlay.concat(selectionFitShapes),
       annotations: baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations)
     }).then(() => { suppressSelectionReentry = false; });
-  }
-
-  // Lets the user drag the selection-fit panel by its header to wherever it doesn't
-  // obscure the plot. Position is kept in inline left/top (in place of the CSS default
-  // top/right) and clamped to stay inside the plot canvas; it resets on reload.
-  function bindSelectionPanelDrag() {
-    if (!selectionStatsPanel || !selectionStatsHeader) return;
-    const wrap = selectionStatsPanel.offsetParent || selectionStatsPanel.parentElement;
-    let dragging = false;
-    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
-
-    selectionStatsHeader.addEventListener('pointerdown', (ev) => {
-      if (ev.target.closest('.selection-stats-close')) return;
-      const wrapRect = wrap.getBoundingClientRect();
-      const panelRect = selectionStatsPanel.getBoundingClientRect();
-      dragging = true;
-      startX = ev.clientX;
-      startY = ev.clientY;
-      startLeft = panelRect.left - wrapRect.left;
-      startTop = panelRect.top - wrapRect.top;
-      selectionStatsPanel.style.right = 'auto';
-      selectionStatsPanel.style.left = `${startLeft}px`;
-      selectionStatsPanel.style.top = `${startTop}px`;
-      selectionStatsHeader.setPointerCapture(ev.pointerId);
-      ev.preventDefault();
-    });
-
-    selectionStatsHeader.addEventListener('pointermove', (ev) => {
-      if (!dragging) return;
-      const wrapRect = wrap.getBoundingClientRect();
-      const maxLeft = Math.max(0, wrapRect.width - selectionStatsPanel.offsetWidth);
-      const maxTop = Math.max(0, wrapRect.height - selectionStatsPanel.offsetHeight);
-      const newLeft = Math.min(maxLeft, Math.max(0, startLeft + (ev.clientX - startX)));
-      const newTop = Math.min(maxTop, Math.max(0, startTop + (ev.clientY - startY)));
-      selectionStatsPanel.style.left = `${newLeft}px`;
-      selectionStatsPanel.style.top = `${newTop}px`;
-    });
-
-    const endDrag = () => { dragging = false; };
-    selectionStatsHeader.addEventListener('pointerup', endDrag);
-    selectionStatsHeader.addEventListener('pointercancel', endDrag);
   }
 
   function bindMainPlotSelectionSync() {
@@ -1209,7 +1165,12 @@
         plot_bgcolor: '#ffffff',
         font: {color: '#0b2545'},
         xaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'},
-        yaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'}
+        yaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'},
+        // Explicit instead of Plotly's auto-contrast-from-paper_bgcolor default -- that
+        // computation doesn't reliably re-run on a template-only relayout (see
+        // getPlotlyThemeTemplate), so icons could keep the other theme's colors, including
+        // on hover, until some unrelated full redraw happened to recompute them.
+        modebar: {bgcolor: 'rgba(255,255,255,0.9)', color: '#5b7590', activecolor: '#0b2545'}
       }
     },
     dark: {
@@ -1218,7 +1179,8 @@
         plot_bgcolor: '#1a222c',
         font: {color: '#e8eef7'},
         xaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'},
-        yaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'}
+        yaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'},
+        modebar: {bgcolor: 'rgba(26,34,44,0.9)', color: '#9fb0c3', activecolor: '#e8eef7'}
       }
     }
   };
@@ -1325,11 +1287,6 @@
   if (controlsClose) controlsClose.addEventListener('click', () => setControlsOpen(false));
   if (controlsBackdrop) controlsBackdrop.addEventListener('click', () => setControlsOpen(false));
   initThemeToggle();
-  if (selectionStatsClose) selectionStatsClose.addEventListener('click', () => {
-    clearSelectionFit();
-    if (typeof Plotly !== 'undefined' && plotDiv) Plotly.relayout(plotDiv, {selections: []});
-  });
-  bindSelectionPanelDrag();
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
@@ -6737,7 +6694,7 @@
       layout.xaxis.autorange = false;
     }
 
-    layout.hovermode = 'x';
+    layout.hovermode = hoverEnabled ? 'x' : false;
     layout.hoverlabel = { namelength: -1 };
     layout.hoverdistance = 40;
 
