@@ -9,6 +9,8 @@
   const binnedPlotAxisSelect = document.getElementById('binnedPlotAxis');
   const binnedPlotBinWidthInput = document.getElementById('binnedPlotBinWidth');
   const xCustomSelect = document.getElementById('xCustomSelect');
+  const logXAxisInput = document.getElementById('logXAxis');
+  const logYAxisInput = document.getElementById('logYAxis');
   const showMapInput = document.getElementById('showMap');
   const mapColorEnabledInput = document.getElementById('mapColorEnabled');
   const mapColorSelect = document.getElementById('mapColorSelect');
@@ -56,10 +58,6 @@
   const clearBtn = document.getElementById('clearBtn');
   const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
   const plotDiv = document.getElementById('plotDiv');
-  const selectionStatsPanel = document.getElementById('selectionStatsPanel');
-  const selectionStatsBody = document.getElementById('selectionStatsBody');
-  const selectionStatsClose = document.getElementById('selectionStatsClose');
-  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
   const controlsToggle = document.getElementById('controlsToggle');
@@ -119,6 +117,11 @@
   const plotlyConfig = {
     responsive: true,
     displaylogo: false,
+    // Lets the user drag a selection-fit annotation's text box (its arrow stays anchored
+    // to the fit) out from under overlapping data -- Plotly keys draggability off each
+    // annotation's own showarrow: true here for the fit boxes, false for the corner-strip
+    // labels, so only the fit boxes end up draggable.
+    edits: {annotationTail: true},
     modeBarButtonsToRemove: ['select2d', 'lasso2d'],
     modeBarButtonsToAdd: [
       {
@@ -136,6 +139,26 @@
         attr: 'dragmode',
         val: 'lasso',
         click: (gd) => Plotly.relayout(gd, {dragmode: 'lasso'})
+      },
+      {
+        name: 'clearSelectionFit',
+        title: 'Clear Selection & Exit Select Mode',
+        icon: Plotly.Icons.eraseshape,
+        click: (gd) => {
+          clearSelectionFit();
+          Plotly.relayout(gd, {selections: [], dragmode: 'zoom'});
+        }
+      },
+      {
+        name: 'toggleHoverData',
+        title: 'Toggle Hover Data',
+        icon: Plotly.Icons.tooltip_basic,
+        attr: 'hovermode',
+        val: 'x',
+        click: (gd) => {
+          hoverEnabled = !hoverEnabled;
+          Plotly.relayout(gd, {hovermode: hoverEnabled ? 'x' : false});
+        }
       }
     ]
   };
@@ -294,9 +317,15 @@
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
   let baseCornerShapesForOverlay = []; // corner/straight shading shapes, kept separate so selection fit lines can be layered on top
+  let baseCornerAnnotationsForOverlay = []; // corner labels, kept separate so selection fit annotations can be layered on top
   let selectionFitShapes = []; // temporary best-fit line(s) drawn for the current box/lasso selection
+  let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
   let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
+  // Hover tooltips default off on mobile, where they mostly just get in the way of touch
+  // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
+  // modebar button) sticks regardless of later window resizes.
+  let hoverEnabled = window.innerWidth > 980;
   // Plotly.relayout({shapes:...}) internally reapplies ("reselects") the current drag
   // selection, synchronously re-emitting plotly_selected/plotly_deselect from inside that
   // same call. Without this guard, our own relayout-in-response-to-selection would trigger
@@ -462,6 +491,24 @@
       }
 
       if (_applying) return;
+
+      // Selection-fit annotation dragged by the user (tail-drag, config.edits.annotationTail
+      // -- see plotlyConfig). layout.annotations at render time is
+      // baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations), so the eventData
+      // index needs offsetting back to selectionFitAnnotations' own indices. Persisted here
+      // so the dragged position survives the next unrelated re-render instead of snapping
+      // back to its computed default.
+      let annotationDragged = false;
+      Object.keys(eventData).forEach((key) => {
+        const m = key.match(/^annotations\[(\d+)\]\.(ax|ay|x|y)$/);
+        if (!m) return;
+        annotationDragged = true;
+        const idx = Number(m[1]) - baseCornerAnnotationsForOverlay.length;
+        if (idx >= 0 && idx < selectionFitAnnotations.length) {
+          selectionFitAnnotations[idx][m[2]] = eventData[key];
+        }
+      });
+      if (annotationDragged) return;
 
       // X axis reset — restore full-data Y range
       if (Object.prototype.hasOwnProperty.call(eventData, 'xaxis.autorange') && eventData['xaxis.autorange']) {
@@ -717,117 +764,100 @@
   function clearSelectionFit() {
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
-    if (selectionStatsPanel) selectionStatsPanel.hidden = true;
-    if (selectionStatsBody) selectionStatsBody.innerHTML = '';
+    selectionFitAnnotations = [];
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
-      Plotly.relayout(plotDiv, {shapes: baseCornerShapesForOverlay}).then(() => { suppressSelectionReentry = false; });
+      Plotly.relayout(plotDiv, {
+        shapes: baseCornerShapesForOverlay,
+        annotations: baseCornerAnnotationsForOverlay
+      }).then(() => { suppressSelectionReentry = false; });
     }
   }
 
-  function renderSelectionStatsPanel(groups) {
-    if (!selectionStatsPanel || !selectionStatsBody) return;
-    const parts = [];
-    groups.forEach((g) => {
-      if (g.xs.length < 2) return;
-      const [xMin, xMax] = arrayMinMax(g.xs);
-      const [yMin, yMax] = arrayMinMax(g.ys);
-      const fit = computeLinearFit(g.xs, g.ys);
-      const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
-      const label = getChannelLabel(g.trace.meta.channel);
-      const name = g.trace.name || label;
-      const fitRows = fit
-        ? `<div class="selection-stats-row">slope: ${formatStatValue(fit.slope)}</div>
-           <div class="selection-stats-row">R²: ${fit.r2.toFixed(3)}</div>`
-        : `<div class="selection-stats-row">slope: n/a (no x spread)</div>`;
-      parts.push(`<div class="selection-stats-group">
-        <div class="selection-stats-group-title"><span class="selection-stats-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(name)}</div>
-        <div class="selection-stats-row">n = ${g.xs.length} pts</div>
-        <div class="selection-stats-row">${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}</div>
-        <div class="selection-stats-row">${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}</div>
-        ${fitRows}
-      </div>`);
-    });
-    if (parts.length === 0) {
-      clearSelectionFit();
-      return;
-    }
-    selectionStatsBody.innerHTML = parts.join('');
-    selectionStatsPanel.hidden = false;
+  // Fit line color needs to stay readable against the plot background in both themes --
+  // a plain black line all but vanishes on the dark background's dark traces/gridlines.
+  function getSelectionFitLineColor() {
+    return getCurrentTheme() === 'dark' ? '#d7dde5' : '#1a1a1a';
+  }
+
+  // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
+  // survives into a PNG export via Plotly.downloadImage. stackIndex offsets each
+  // simultaneous fit (multiple Y channels selected at once) further from the selection
+  // box's corner, so they start out legible instead of stacked directly on each other;
+  // the user can still drag any of them further (config.edits.annotationTail).
+  function buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
+    const theme = getCurrentTheme();
+    const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
+    const label = getChannelLabel(g.trace.meta.channel);
+    const name = g.trace.name || label;
+    const text = [
+      `<b>${escapeHtml(name)}</b>`,
+      `n = ${g.xs.length} pts`,
+      `${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}`,
+      `${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}`,
+      `slope: ${formatStatValue(fit.slope)}`,
+      `R²: ${fit.r2.toFixed(3)}`
+    ].join('<br>');
+    // Anchored to the selection box's top-right corner (not a point on the fit line
+    // itself), then pushed further up-and-right in pixel space -- so the label sits
+    // outside the selected data instead of covering it.
+    return {
+      x: xMax, y: yMax,
+      xref: xaxis, yref: yaxis,
+      text,
+      showarrow: true,
+      arrowhead: 2, arrowsize: 1, arrowwidth: 1, arrowcolor: color,
+      ax: 50, ay: -50 - stackIndex * 95,
+      align: 'left',
+      font: {size: 10, color: theme === 'dark' ? '#e8eef7' : '#0b2545'},
+      bgcolor: theme === 'dark' ? 'rgba(26,34,44,0.92)' : 'rgba(255,255,255,0.92)',
+      bordercolor: color,
+      borderwidth: 1,
+      borderpad: 4
+    };
   }
 
   function applySelectionFit(points) {
     const groups = groupSelectedPointsByTrace(points);
     const shapes = [];
+    const annotations = [];
     const validGroups = [];
+    const fitLineColor = getSelectionFitLineColor();
+    let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
       const fit = computeLinearFit(g.xs, g.ys);
       if (!fit) return;
       const [xMin, xMax] = arrayMinMax(g.xs);
+      const [yMin, yMax] = arrayMinMax(g.ys);
+      const xaxis = g.trace.xaxis || 'x';
+      const yaxis = g.trace.yaxis || 'y';
       shapes.push({
         type: 'line',
-        xref: g.trace.xaxis || 'x',
-        yref: g.trace.yaxis || 'y',
+        xref: xaxis,
+        yref: yaxis,
         x0: xMin, x1: xMax,
         y0: fit.slope * xMin + fit.intercept,
         y1: fit.slope * xMax + fit.intercept,
-        line: {color: 'black', width: 2, dash: 'dot'},
+        line: {color: fitLineColor, width: 2, dash: 'dot'},
         layer: 'above'
       });
+      annotations.push(buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
+      stackIndex += 1;
     });
     if (validGroups.length === 0) {
       clearSelectionFit();
       return;
     }
     selectionFitShapes = shapes;
-    renderSelectionStatsPanel(validGroups);
+    selectionFitAnnotations = annotations;
     if (suppressSelectionReentry) return;
     suppressSelectionReentry = true;
-    Plotly.relayout(plotDiv, {shapes: baseCornerShapesForOverlay.concat(selectionFitShapes)})
-      .then(() => { suppressSelectionReentry = false; });
-  }
-
-  // Lets the user drag the selection-fit panel by its header to wherever it doesn't
-  // obscure the plot. Position is kept in inline left/top (in place of the CSS default
-  // top/right) and clamped to stay inside the plot canvas; it resets on reload.
-  function bindSelectionPanelDrag() {
-    if (!selectionStatsPanel || !selectionStatsHeader) return;
-    const wrap = selectionStatsPanel.offsetParent || selectionStatsPanel.parentElement;
-    let dragging = false;
-    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
-
-    selectionStatsHeader.addEventListener('pointerdown', (ev) => {
-      if (ev.target.closest('.selection-stats-close')) return;
-      const wrapRect = wrap.getBoundingClientRect();
-      const panelRect = selectionStatsPanel.getBoundingClientRect();
-      dragging = true;
-      startX = ev.clientX;
-      startY = ev.clientY;
-      startLeft = panelRect.left - wrapRect.left;
-      startTop = panelRect.top - wrapRect.top;
-      selectionStatsPanel.style.right = 'auto';
-      selectionStatsPanel.style.left = `${startLeft}px`;
-      selectionStatsPanel.style.top = `${startTop}px`;
-      selectionStatsHeader.setPointerCapture(ev.pointerId);
-      ev.preventDefault();
-    });
-
-    selectionStatsHeader.addEventListener('pointermove', (ev) => {
-      if (!dragging) return;
-      const wrapRect = wrap.getBoundingClientRect();
-      const maxLeft = Math.max(0, wrapRect.width - selectionStatsPanel.offsetWidth);
-      const maxTop = Math.max(0, wrapRect.height - selectionStatsPanel.offsetHeight);
-      const newLeft = Math.min(maxLeft, Math.max(0, startLeft + (ev.clientX - startX)));
-      const newTop = Math.min(maxTop, Math.max(0, startTop + (ev.clientY - startY)));
-      selectionStatsPanel.style.left = `${newLeft}px`;
-      selectionStatsPanel.style.top = `${newTop}px`;
-    });
-
-    const endDrag = () => { dragging = false; };
-    selectionStatsHeader.addEventListener('pointerup', endDrag);
-    selectionStatsHeader.addEventListener('pointercancel', endDrag);
+    Plotly.relayout(plotDiv, {
+      shapes: baseCornerShapesForOverlay.concat(selectionFitShapes),
+      annotations: baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations)
+    }).then(() => { suppressSelectionReentry = false; });
   }
 
   function bindMainPlotSelectionSync() {
@@ -1135,7 +1165,12 @@
         plot_bgcolor: '#ffffff',
         font: {color: '#0b2545'},
         xaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'},
-        yaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'}
+        yaxis: {gridcolor: '#e7edf5', linecolor: '#cbd6e2', zerolinecolor: '#cbd6e2'},
+        // Explicit instead of Plotly's auto-contrast-from-paper_bgcolor default -- that
+        // computation doesn't reliably re-run on a template-only relayout (see
+        // getPlotlyThemeTemplate), so icons could keep the other theme's colors, including
+        // on hover, until some unrelated full redraw happened to recompute them.
+        modebar: {bgcolor: 'rgba(255,255,255,0.9)', color: '#5b7590', activecolor: '#0b2545'}
       }
     },
     dark: {
@@ -1144,7 +1179,8 @@
         plot_bgcolor: '#1a222c',
         font: {color: '#e8eef7'},
         xaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'},
-        yaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'}
+        yaxis: {gridcolor: '#29323d', linecolor: '#34424f', zerolinecolor: '#3a4652'},
+        modebar: {bgcolor: 'rgba(26,34,44,0.9)', color: '#9fb0c3', activecolor: '#e8eef7'}
       }
     }
   };
@@ -1251,11 +1287,6 @@
   if (controlsClose) controlsClose.addEventListener('click', () => setControlsOpen(false));
   if (controlsBackdrop) controlsBackdrop.addEventListener('click', () => setControlsOpen(false));
   initThemeToggle();
-  if (selectionStatsClose) selectionStatsClose.addEventListener('click', () => {
-    clearSelectionFit();
-    if (typeof Plotly !== 'undefined' && plotDiv) Plotly.relayout(plotDiv, {selections: []});
-  });
-  bindSelectionPanelDrag();
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
@@ -3989,7 +4020,7 @@
     return null;
   }
 
-  function buildChannelAxisConfig(ycols, mainDomain) {
+  function buildChannelAxisConfig(ycols, mainDomain, logY) {
     const channelToRef = new Map();
     const axisLayout = {};
     const axisChannels = new Map();
@@ -4023,6 +4054,7 @@
 
     if (!ycols || ycols.length === 0) {
       axisLayout.yaxis = {title:titleObject('Value'), domain: mainDomain, automargin:true};
+      if (logY) axisLayout.yaxis.type = 'log';
       return {channelToRef, axisLayout, marginLeft: baseMarginLeft, marginRight: baseMarginRight};
     }
 
@@ -4093,6 +4125,7 @@
       const axisKey = axisRef === 'y' ? 'yaxis' : `yaxis${axisRef.slice(1)}`;
       if (!axisLayout[axisKey]) continue;
       axisLayout[axisKey].title = titleObject(formatAxisTitle(axisRef));
+      if (logY) axisLayout[axisKey].type = 'log';
     }
 
     const marginStep = mobile ? 18 : 40;
@@ -5725,17 +5758,17 @@
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
 
-  function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip) {
+  function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY) {
     const mobile = window.innerWidth <= 980;
     const mainDomainTop = showCornerStrip ? (CORNER_STRIP_DOMAIN[0] - CORNER_STRIP_GAP) : 1;
     const mainDomain = includeTimeSlip ? (mobile ? [0.48,mainDomainTop] : [0.23,mainDomainTop]) : [0,mainDomainTop];
     const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
-    const axisCfg = buildChannelAxisConfig(ycols, mainDomain);
+    const axisCfg = buildChannelAxisConfig(ycols, mainDomain, logY);
 
     if (!includeTimeSlip) {
       const layout = {
         margin:{t:30},
-        xaxis:{title:{text: mainXTitle, standoff: 8}, automargin:true},
+        xaxis:{title:{text: mainXTitle, standoff: 8}, automargin:true, type: logX ? 'log' : 'linear'},
         showlegend:false,
         height: getFigureHeight(false)
       };
@@ -5747,8 +5780,8 @@
 
     const layout = {
       margin:{t:30},
-      xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y'},
-      xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false},
+      xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y', type: logX ? 'log' : 'linear'},
+      xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false, type: logX ? 'log' : 'linear'},
       yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain: timeSlipDomain},
       showlegend:false,
       height: getFigureHeight(true)
@@ -5757,6 +5790,58 @@
     layout.margin.r = axisCfg.marginRight;
     Object.assign(layout, axisCfg.axisLayout);
     return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop};
+  }
+
+  // Plotly's built-in autorange breaks catastrophically (producing a range spanning
+  // hundreds of decades) when a log-type axis has any shape/annotation anchored to it
+  // via xref/yref -- e.g. this app's corner strip (xref:'x') or a selection linear-fit
+  // (xref/yref of the fitted trace's axis). Computing the range ourselves from the actual
+  // plotted values sidesteps that Plotly bug entirely.
+  function computeLogAxisRange(values) {
+    let lo = null, hi = null;
+    for (const v of values) {
+      if (typeof v !== 'number' || !isFinite(v) || v <= 0) continue;
+      if (lo === null || v < lo) lo = v;
+      if (hi === null || v > hi) hi = v;
+    }
+    if (lo === null) return null;
+    const logLo = Math.log10(lo);
+    const logHi = Math.log10(hi);
+    const pad = (logHi - logLo) * 0.05 || 0.3;
+    return [logLo - pad, logHi + pad];
+  }
+
+  function applyLogAxisRanges(layout, traces, tsPreview, logX, logY) {
+    if (logX && !layout.xaxis.range) {
+      const xs = [];
+      traces.concat(tsPreview).forEach(t => (t.x || []).forEach(v => xs.push(v)));
+      const range = computeLogAxisRange(xs);
+      if (range) {
+        layout.xaxis.range = range;
+        layout.xaxis.autorange = false;
+        if (layout.xaxis2) {
+          layout.xaxis2.range = range.slice();
+          layout.xaxis2.autorange = false;
+        }
+      }
+    }
+    if (logY) {
+      const byAxis = new Map();
+      traces.forEach(t => {
+        const axisRef = t.yaxis || 'y';
+        if (!byAxis.has(axisRef)) byAxis.set(axisRef, []);
+        (t.y || []).forEach(v => byAxis.get(axisRef).push(v));
+      });
+      byAxis.forEach((ys, axisRef) => {
+        const axisKey = axisRef === 'y' ? 'yaxis' : `yaxis${axisRef.slice(1)}`;
+        if (!layout[axisKey]) return;
+        const range = computeLogAxisRange(ys);
+        if (range) {
+          layout[axisKey].range = range;
+          layout[axisKey].autorange = false;
+        }
+      });
+    }
   }
 
   function getXSeriesForMode(log, maskIdx, xMode, customXCol) {
@@ -6530,7 +6615,9 @@
     let ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
-    const xRangeSignature = `${xMode}|${xMode === 'custom' ? (customXCol || '') : ''}`;
+    const logX = !!(logXAxisInput && logXAxisInput.checked);
+    const logY = !!(logYAxisInput && logYAxisInput.checked);
+    const xRangeSignature = `${xMode}|${xMode === 'custom' ? (customXCol || '') : ''}|${logX}`;
     if (mainPlotXRangeSignature !== xRangeSignature) {
       mainPlotXRangeSignature = xRangeSignature;
       mainPlotXRange = null;
@@ -6596,7 +6683,7 @@
     activeCornerDataForFitting = cornerData;
     activeCornerReferenceForFitting = cornerRef;
 
-    const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip);
+    const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY);
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
@@ -6607,7 +6694,7 @@
       layout.xaxis.autorange = false;
     }
 
-    layout.hovermode = 'x';
+    layout.hovermode = hoverEnabled ? 'x' : false;
     layout.hoverlabel = { namelength: -1 };
     layout.hoverdistance = 40;
 
@@ -6615,7 +6702,7 @@
       const shadeOpacityPct = cornerShadeOpacityInput ? Number(cornerShadeOpacityInput.value) : 10;
       const cornerVis = buildCornerShapesAndAnnotations(cornerData, built.mainDomainTop, shadeOpacityPct);
       baseCornerShapesForOverlay = cornerVis.shapes;
-      layout.annotations = cornerVis.annotations;
+      baseCornerAnnotationsForOverlay = cornerVis.annotations;
       activeCornerHeadingSegments = cornerVis.clickTargets;
 
       const cornerTotals = computeCornerTotals(cornerData);
@@ -6624,11 +6711,12 @@
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = formatCornerSummary(cornerVenue, cornerData, cornerTotals);
     } else {
       baseCornerShapesForOverlay = [];
-      layout.annotations = [];
+      baseCornerAnnotationsForOverlay = [];
       activeCornerHeadingSegments = [];
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
     }
     layout.shapes = baseCornerShapesForOverlay.concat(selectionFitShapes);
+    layout.annotations = baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations);
     mainPlotXAxisTitle = mainXTitle;
     // Plotly.react takes a fresh layout object each call; without this, any re-render
     // while the select tool is active (e.g. toggling a lap) would silently drop back to
@@ -6781,6 +6869,8 @@
       });
     }
 
+    applyLogAxisRanges(layout, traces, tsPreview, logX, logY);
+
     currentTsTraces = tsPreview.slice();
     // uirevision controls when Plotly.react resets the user's zoom/pan.
     // Keyed on axis config + loaded files, but NOT lap selection — so toggling
@@ -6851,6 +6941,8 @@
     if (xCustomSelect) xCustomSelect.disabled = (r.value !== 'custom' || !r.checked);
     updatePlot();
   }));
+  if (logXAxisInput) logXAxisInput.addEventListener('change', ()=> updatePlot());
+  if (logYAxisInput) logYAxisInput.addEventListener('change', ()=> updatePlot());
   const shadeBox = document.getElementById('shadeLaps');
   if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
   if (showCornersInput) showCornersInput.addEventListener('change', ()=> updatePlot());
