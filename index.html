@@ -87,11 +87,13 @@
             <label><input type="radio" name="xaxis" value="distance" checked /> Distance</label>
             <label><input type="radio" name="xaxis" value="custom" /> Channel</label>
             <select id="xCustomSelect"></select>
+            <label><input type="checkbox" id="logXAxis" /> Log Scale</label>
           </div>
 
           <div>
             <strong>Y Channels:</strong>
             <select id="ySelect" multiple size="6"></select>
+            <label><input type="checkbox" id="logYAxis" /> Log Scale</label>
             <div id="selectedYColors" class="selected-y-colors"></div>
 
             <div class="color-axis-controls">
@@ -343,7 +345,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-20g</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-07-21a</div>
     </section>
 
     <section class="plot">
