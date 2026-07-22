@@ -1,4 +1,4 @@
-GP Bikes CSV Plotter~
+GP Bikes CSV Plotter~~
 
 A small static web app that lets you upload one or more CSV logs and plot channels using Plotly.
 
