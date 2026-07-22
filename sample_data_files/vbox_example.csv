@@ -1,0 +1,11 @@
+﻿[File]
+4. U26-0010-10 L2.vbo
+[Information]
+File created on 09/06/2026 @ 14:46
+[Unit]
+num,state,state,state,state,seconds,m.m',m.m',km/h,deg,m,km/h,,km/h,seconds,num,num,g,g,m,seconds
+[Column name]
+Satellites,BrakeTrigger,DGPS,Rtk,WavFile,Time,Latitude,Longitude,Velocity,Heading,Height,Vertical_velocity,Solution_Type,Velocity_Quality,Event_1_Time,Gps_Satellites,Glonass_Satellites,LongAccel,LatAccel,Distance,Elapsed_Time
+015,0,0,0,0,71869.82,+2079.67778000,+5204.86674000,000.056,282.94,+00158.62,000.130,001,000.222,0.000000,009,006,+00.00,+00.00,+0.000000E+00,0.00,
+015,0,0,0,0,71869.83,+2079.67778000,+5204.86674000,000.093,305.33,+00158.62,000.000,001,000.222,0.000000,009,006,+00.00,+00.00,+2.069444E-04,0.01,
+015,0,0,0,0,71869.84,+2079.67778000,+5204.86674000,000.130,312.29,+00158.62,000.000,001,000.222,0.000000,009,006,+00.00,+00.00,+5.166667E-04,0.02,

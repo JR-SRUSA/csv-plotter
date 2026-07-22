@@ -150,6 +150,17 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .file-decoder-edit:hover{background:var(--edit-bg-hover)}
 .file-decoder-selector{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .file-decoder-select{font-size:0.82em;padding:2px 4px;max-width:160px}
+.file-startfinish-row{display:flex;align-items:center;gap:6px;flex:0 0 100%;margin-left:26px;margin-top:4px;flex-wrap:wrap}
+.file-startfinish-edit-btn{padding:2px 8px;font-size:0.82em;border-radius:4px;cursor:pointer}
+.file-startfinish-edit-btn.is-active{background:var(--accent-active-bg);border-color:var(--accent-active-border);color:var(--accent-active-text)}
+.file-startfinish-badge{color:var(--text-muted);background:var(--bg-surface-alt);border:1px solid var(--border-dashed);border-radius:3px;padding:1px 6px;font-size:0.82em;white-space:nowrap}
+.file-startfinish-clear-btn{padding:1px 6px;font-size:0.8em;color:var(--danger-text);border-color:var(--danger-border);background:var(--danger-bg);cursor:pointer}
+.file-startfinish-clear-btn:hover{background:var(--danger-bg-hover)}
+.file-startfinish-editor{flex:0 0 100%;margin-left:26px;margin-top:6px;border:1px solid var(--border);border-radius:4px;padding:6px 8px;background:var(--bg-subtle);display:flex;flex-direction:column;gap:6px}
+.file-startfinish-status{font-size:0.82em;color:var(--text-muted)}
+.file-startfinish-editor-btns{display:flex;gap:6px}
+.file-startfinish-apply-btn,.file-startfinish-cancel-btn{padding:3px 10px;font-size:0.82em;border-radius:4px;cursor:pointer}
+.file-startfinish-apply-btn:disabled{opacity:0.5;cursor:not-allowed}
 .plots-body select{width:100%}
 .plots-body #xCustomSelect{margin-top:6px}
 .color-axis-controls{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border-dashed)}
@@ -363,6 +374,7 @@ body.sidebar-collapsed .controls{display:none}
 .lap-item input[type=checkbox]{width:16px;height:16px}
 .lap-color-input{width:22px;height:22px;padding:0;border:none;background:transparent;cursor:pointer;flex:0 0 auto}
 .lap-label{font-weight:500}
+.lap-warning{cursor:help;font-size:0.9em}
 .file-lap-group{margin-top:8px}
 .file-lap-heading{font-size:0.82em;font-weight:600;color:var(--text-muted);margin-bottom:4px;word-break:break-all}
 

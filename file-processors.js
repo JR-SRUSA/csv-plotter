@@ -7,6 +7,15 @@
   const SMT_CALC_MOTOR_POWER_TOTAL_COL = 'Motor Power Total (calc)';
   const SMT_CALC_EFFICIENCY_COL = 'Efficiency (calc)';
   const TOTAL_ACCEL_CALC_COL = 'Total Acceleration (calc)';
+  // Racelogic VBOX raw channel name -> this app's canonical channel-map displayName, so
+  // resolveChannelForLog's fallback (used for every format besides GP Bikes/AiM/MoTeC)
+  // picks these up automatically for corner detection, map coloring defaults, etc.
+  const VBOX_CHANNEL_RENAMES = {
+    Velocity: 'Speed',
+    Height: 'Altitude',
+    LatAccel: 'LatAcc',
+    LongAccel: 'LongAcc'
+  };
 
   function normalizedCells(row) {
     if (!Array.isArray(row)) return [];
@@ -210,6 +219,30 @@
     return /time/i.test(headerCells[0]);
   }
 
+  // Finds the row index of a "[Section Name]" marker line (VBOX's ASCII export uses these
+  // instead of the key,value metadata rows other formats have) within the first
+  // searchLimit rows. The row after it holds that section's actual content.
+  function findVBoxSectionRowIndex(rows, sectionPattern, searchLimit = 40) {
+    const limit = Math.max(0, Math.min(rows.length, searchLimit));
+    for (let i = 0; i < limit; i++) {
+      const cells = normalizedCells(rows[i]);
+      if (cells.length === 1 && sectionPattern.test(cells[0].replace(/^\uFEFF/, ''))) return i;
+    }
+    return -1;
+  }
+
+  // Racelogic VBOX ASCII export: bracket-delimited metadata sections ([File],
+  // [Information], [Unit], [Column name]) rather than the key,value preamble other
+  // formats use. Detected from the original log's filename (recorded verbatim in the
+  // [File] section) ending in .vbo -- the upload itself is typically a re-exported/
+  // converted .csv, so the extension on disk can't be used the way it is for .dat/.vbo.
+  function isVBoxFormat(rows) {
+    const fileSectionIdx = findVBoxSectionRowIndex(rows, /^\[file\]$/i, 5);
+    if (fileSectionIdx < 0) return false;
+    const nextCells = normalizedCells(rows[fileSectionIdx + 1]);
+    return nextCells.length >= 1 && /\.vbo$/i.test(nextCells[0]);
+  }
+
   function isStandardFormat(rows, headerRowIndex, metadata = {}) {
     const format = getMetadataValue(metadata, 'format');
     if (isGPBikesFormat(format) || isAiMFormat(format) || isMoTeCFormat(format)) return false;
@@ -265,6 +298,13 @@
 
     if (isMoTeCFormat(format)) {
       return processMoTeCRows(rows, headerRowIndex, { source, format, metadata });
+    }
+
+    // Checked before the generic detectors below -- VBOX's bracket-sectioned preamble
+    // doesn't look like a key,value metadata block, so headerRowIndex/metadata above are
+    // meaningless for it; processVBoxRows re-scans rows for its own section markers.
+    if (isVBoxFormat(rows)) {
+      return processVBoxRows(rows, { source, format, metadata });
     }
 
     if (isVIGradeFormat(rows, headerRowIndex)) {
@@ -336,6 +376,88 @@
     );
     filterAllZeroColumns(processed);
     return processed;
+  }
+
+  // Racelogic VBOX ASCII export (see isVBoxFormat). Structurally nothing like the other
+  // formats' "metadata rows then one header row" shape, so this bypasses
+  // processRowsWithCurrentMethod entirely and builds data/cols/units from the [Unit] and
+  // [Column name] sections directly.
+  function processVBoxRows(rows, details = {}) {
+    const source = details.source || 'VBOX';
+    const format = details.format || 'VBOX File';
+    const metadata = details.metadata || {};
+
+    const unitSectionIdx = findVBoxSectionRowIndex(rows, /^\[unit\]$/i);
+    const columnSectionIdx = findVBoxSectionRowIndex(rows, /^\[column\s*names?\]$/i);
+    if (unitSectionIdx < 0 || columnSectionIdx < 0) {
+      // Malformed/unexpected preamble -- fall back to the generic path rather than throw.
+      return processGenericRows(rows, findHeaderRowIndex(rows), details);
+    }
+
+    const rawUnits = (rows[unitSectionIdx + 1] || []).map(c => (c == null ? '' : String(c).trim()));
+    const rawCols = (rows[columnSectionIdx + 1] || [])
+      .map(c => (c == null ? '' : String(c).trim()))
+      .filter(c => c !== '');
+
+    const cols = rawCols.map(c => VBOX_CHANNEL_RENAMES[c] || c);
+    const units = {};
+    rawCols.forEach((rawCol, i) => {
+      units[cols[i]] = rawUnits[i] || '';
+    });
+
+    const latIdx = rawCols.indexOf('Latitude');
+    const lonIdx = rawCols.indexOf('Longitude');
+    // Lat/lon convert from VBOX's raw arc-minutes into decimal degrees (see the
+    // channel-renames comment above); the unit label needs to follow that conversion.
+    if (latIdx >= 0) units['Latitude'] = 'deg';
+    if (lonIdx >= 0) units['Longitude'] = 'deg';
+
+    const dataStart = columnSectionIdx + 2;
+    const data = [];
+    for (let r = dataStart; r < rows.length; r++) {
+      const cells = rows[r];
+      if (!Array.isArray(cells) || cells.length < rawCols.length) continue;
+
+      const obj = {};
+      cols.forEach((displayCol, i) => {
+        // PapaParse's dynamicTyping requires a bare leading "-", not "+" -- VBOX's ASCII
+        // export signs every positive number explicitly (e.g. "+00158.62"), so those cells
+        // arrive as untouched strings and need converting by hand here.
+        const raw = cells[i];
+        const num = toFiniteNumber(raw);
+        obj[displayCol] = num !== null ? num : (raw == null ? '' : String(raw).trim());
+      });
+
+      if (latIdx >= 0) {
+        const rawLat = toFiniteNumber(cells[latIdx]);
+        obj['Latitude'] = Number.isFinite(rawLat) ? rawLat / 60 : null;
+      }
+      if (lonIdx >= 0) {
+        const rawLon = toFiniteNumber(cells[lonIdx]);
+        // VBOX stores longitude in arc-minutes with positive = WEST -- inverted from the
+        // standard signed-degrees (positive = East) convention the map elsewhere assumes.
+        obj['Longitude'] = Number.isFinite(rawLon) ? -(rawLon / 60) : null;
+      }
+
+      // (0, 0) -- "null island" -- is what a GPS receiver reports before it gets a fix,
+      // not a real position; scrub it so it doesn't show up as a bogus point/spike on the
+      // map or a false start/finish-line crossing.
+      if (latIdx >= 0 && lonIdx >= 0 && obj['Latitude'] === 0 && obj['Longitude'] === 0) {
+        obj['Latitude'] = null;
+        obj['Longitude'] = null;
+      }
+
+      data.push(obj);
+    }
+
+    const meta = analyzeColumns(data, cols, units);
+    meta.units = units;
+    meta.source = source;
+    meta.format = format;
+    meta.metadata = metadata;
+    computeLaps(meta, metadata);
+
+    return { data, cols, units, meta, source, format };
   }
 
   function filterAllZeroColumns(processed) {
@@ -1100,6 +1222,56 @@
     meta.lapDurations = lapDurations;
   }
 
+  // Same lap-splitting shape as computeLapsFromBeacons, for laps derived from a
+  // user-drawn start/finish line crossing the GPS track (app.js computes the actual
+  // crossing timestamps -- this just turns them into lapNum/lapTime/lapRelDist/
+  // lapDurations, the same way beacon markers do). Kept as its own function rather than
+  // reusing computeLapsFromBeacons because that one assumes meta._time is already
+  // 0-based at the start of the session; a crossing-based log's raw Time channel isn't
+  // guaranteed to be (e.g. VBOX's Time column is seconds-since-midnight), so lap 0's
+  // baseline here is the first sample's own timestamp instead of a hardcoded 0.
+  function computeLapsFromCrossingTimes(meta, crossingTimes) {
+    const t = meta._time || [];
+    const d = meta._dist || [];
+    const firstTime = Number.isFinite(t[0]) ? t[0] : 0;
+
+    const lapNum = [];
+    const lapTime = [];
+    const lapRelDist = [];
+
+    let markerIdx = 0;
+    let lapStartDist = Number.isFinite(d[0]) ? d[0] : 0;
+
+    for (let i = 0; i < t.length; i++) {
+      const ti = Number.isFinite(t[i])
+        ? t[i]
+        : (i > 0 ? t[i - 1] : firstTime);
+      const di = Number.isFinite(d[i])
+        ? d[i]
+        : (i > 0 ? d[i - 1] : 0);
+
+      const prevMarkerIdx = markerIdx;
+      while (markerIdx < crossingTimes.length && ti >= crossingTimes[markerIdx]) {
+        markerIdx++;
+      }
+      if (markerIdx !== prevMarkerIdx) {
+        lapStartDist = di;
+      }
+
+      const lapStartTime = markerIdx > 0 ? crossingTimes[markerIdx - 1] : firstTime;
+
+      lapNum.push(markerIdx);
+      lapTime.push(Math.max(0, ti - lapStartTime));
+      lapRelDist.push(di - lapStartDist);
+    }
+
+    const lapDurations = crossingTimes.map((ct, idx) => ct - (idx > 0 ? crossingTimes[idx - 1] : firstTime));
+
+    meta.lapNum = lapNum;
+    meta.lapTime = lapTime;
+    meta.lapRelDist = lapRelDist;
+    meta.lapDurations = lapDurations;
+  }
 
   function findLapStartDistanceByTime(meta, lapStartTime, upToIndex) {
     const t = meta._time || [];
@@ -1221,6 +1393,7 @@
     { name: 'MoTeC', label: 'MoTeC' },
     { name: 'VIGrade', label: 'VIGrade' },
     { name: 'ScanMyTesla', label: 'ScanMyTesla' },
+    { name: 'VBOX', label: 'VBOX' },
     { name: 'Standard', label: 'Standard CSV' },
     { name: 'TSV', label: 'TSV (Tab-Separated)' },
     { name: 'Generic', label: 'Generic (fallback)' }
@@ -1246,6 +1419,8 @@
         return processMoTeCRows(rows, headerRowIndex, { source, format, metadata });
       case 'VIGrade':
         return processVIGradeRows(rows, headerRowIndex, { source, format, metadata });
+      case 'VBOX':
+        return processVBoxRows(rows, { source, format, metadata });
       case 'ScanMyTesla':
         return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata }, {
           resampleHz: parsedOptions.scanMyTeslaHz
@@ -1271,8 +1446,11 @@
     isStandardFormat,
     isScanMyTeslaFormat,
     isVIGradeFormat,
+    isVBoxFormat,
     isTsvFormat,
     addTotalAccelerationCalculatedChannel,
-    detectFieldDelimiter
+    detectFieldDelimiter,
+    computeLapsFromCrossingTimes,
+    computeCrashFlags
   };
 })();
