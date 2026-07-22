@@ -196,6 +196,89 @@
   const OSM_TILE_URL_DARK = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
   const OSM_TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
 
+  // Esri's World Imagery tile server has uneven native resolution -- deep zoom over a
+  // race track's parking lot or infield often has no source imagery yet. Rather than a
+  // 404, it returns this exact placeholder graphic with a normal 200 status (confirmed
+  // identical bytes at every out-of-coverage location tested, from a rural track to the
+  // middle of the ocean), so Leaflet's own error handling never sees it as a failure.
+  // EsriOverzoomTileLayer below fingerprints it by byte size and steps back a zoom level
+  // (cropping/scaling the shallower tile to fill the request) instead of showing it.
+  // (Deliberately not also hashing the bytes: crypto.subtle needs a secure context --
+  // HTTPS or localhost -- and this app also ships as a standalone ESP32 build, typically
+  // reached over plain http:// on the local network. The byte length alone is already
+  // distinctive enough against real tiles, which run 12-15KB.)
+  const ESRI_NO_DATA_TILE_BYTE_LENGTH = 2521;
+  const ESRI_OVERZOOM_MIN_ZOOM = 0; // hard floor on how far back the fallback will step
+
+  function isEsriNoDataTile(buffer) {
+    return buffer.byteLength === ESRI_NO_DATA_TILE_BYTE_LENGTH;
+  }
+
+  // Esri World Imagery layer that "overzooms" past its real coverage: when the tile for
+  // the requested zoom is the no-data placeholder, it fetches the same location one zoom
+  // level shallower and crops/scales the matching quadrant to fill the tile, repeating
+  // until it finds real imagery (or hits ESRI_OVERZOOM_MIN_ZOOM). This is only wired up
+  // for the Esri layer -- OSM/CARTO have full global coverage and never hit this gap.
+  const EsriOverzoomTileLayer = L.TileLayer.extend({
+    createTile: function (coords, done) {
+      const tile = document.createElement('img');
+      tile.alt = '';
+      this._loadBestAvailableTile(tile, coords, coords.z, done);
+      return tile;
+    },
+
+    _urlForZoom: function (x, y, z) {
+      return this._url.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+    },
+
+    _loadBestAvailableTile: function (tile, coords, zoom, done) {
+      if (zoom < ESRI_OVERZOOM_MIN_ZOOM) {
+        done(new Error('No Esri imagery available for this location'), tile);
+        return;
+      }
+      const scaleFactor = Math.pow(2, coords.z - zoom);
+      const sourceX = Math.floor(coords.x / scaleFactor);
+      const sourceY = Math.floor(coords.y / scaleFactor);
+      fetch(this._urlForZoom(sourceX, sourceY, zoom))
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.arrayBuffer();
+        })
+        .then((buffer) => {
+          if (isEsriNoDataTile(buffer)) {
+            this._loadBestAvailableTile(tile, coords, zoom - 1, done);
+            return;
+          }
+          const objectUrl = URL.createObjectURL(new Blob([buffer]));
+          if (scaleFactor === 1) {
+            tile.onload = () => { URL.revokeObjectURL(objectUrl); done(null, tile); };
+            tile.onerror = (err) => { URL.revokeObjectURL(objectUrl); done(err, tile); };
+            tile.src = objectUrl;
+            return;
+          }
+          // Requested tile is deeper than the real imagery found -- crop the matching
+          // quadrant out of the shallower tile and scale it up to fill this tile's cell.
+          const img = new Image();
+          img.onload = () => {
+            const size = this.getTileSize().x;
+            const cropSize = size / scaleFactor;
+            const sx = (coords.x % scaleFactor) * cropSize;
+            const sy = (coords.y % scaleFactor) * cropSize;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            canvas.getContext('2d').drawImage(img, sx, sy, cropSize, cropSize, 0, 0, size, size);
+            URL.revokeObjectURL(objectUrl);
+            tile.onload = () => done(null, tile);
+            tile.src = canvas.toDataURL('image/jpeg', 0.85);
+          };
+          img.onerror = (err) => { URL.revokeObjectURL(objectUrl); done(err, tile); };
+          img.src = objectUrl;
+        })
+        .catch((err) => done(err, tile));
+    }
+  });
+
   const logs = []; // {id, name, data: [rows], cols: [names], meta: {timeCol, distCol, latCol, lonCol, computedDistance}}
 
   // Fallback channel mapping if channel-map.json is unavailable.
@@ -271,7 +354,7 @@
   // corners" is checked -- thickness in track meters (~5-10m) and opacity, both tuned
   // here rather than exposed as UI controls.
   const CORNER_MAP_BACKGROUND_WIDTH_M = 8;
-  const CORNER_MAP_BACKGROUND_ALPHA = 0.4;
+  const CORNER_MAP_BACKGROUND_ALPHA = 0.2;
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
   const CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
@@ -5070,11 +5153,14 @@
       // Geo mode with map tiles.
       leafletMap = L.map(leafletMapDiv, { zoomControl: false }).setView([40.0, -75.0], 10);
 
-      const satelliteLayer = L.tileLayer(
+      // maxZoom is higher than Esri's own native resolution -- EsriOverzoomTileLayer
+      // handles the gap by cropping/scaling the deepest real imagery it can find rather
+      // than showing Esri's "not yet available" placeholder tile.
+      const satelliteLayer = new EsriOverzoomTileLayer(
         'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
         {
           attribution: '&copy; <a href="https://www.esri.com/">Esri</a>, DigitalGlobe, Earthstar Geographics',
-          maxZoom: 20
+          maxZoom: 22
         }
       ).addTo(leafletMap);
 
