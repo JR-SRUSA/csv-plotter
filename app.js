@@ -267,6 +267,11 @@
   const CORNER_RIGHT_COLOR = COLORS[1]; // orange
   const CORNER_LEFT_COLOR = COLORS[4]; // purple
   const CORNER_TYPE_LABELS = { straight: 'Straight', left: 'Left', right: 'Right' };
+  // Corner/straight background trace drawn behind the map's lap lines when "Show
+  // corners" is checked -- thickness in track meters (~5-10m) and opacity, both tuned
+  // here rather than exposed as UI controls.
+  const CORNER_MAP_BACKGROUND_WIDTH_M = 8;
+  const CORNER_MAP_BACKGROUND_ALPHA = 0.4;
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
   const CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
@@ -275,6 +280,13 @@
     alpha: 1.0, // curvature-smoothness weight
     beta: 1.0   // data-fidelity weight
   };
+  // Shared straight/left/right -> color mapping for anything that shades by corner type
+  // (the corner strip above the main plot, and the map's corner background trace).
+  function cornerTypeColor(type) {
+    if (type === 'right') return CORNER_RIGHT_COLOR;
+    if (type === 'left') return CORNER_LEFT_COLOR;
+    return CORNER_STRAIGHT_COLOR;
+  }
   let mapHoverLookup = new Map(); // key -> {x, y}
   let mapHoverMarkerVisible = false;
   let isApplyingAutoOffset = false;
@@ -290,6 +302,8 @@
   let mapViewState = null;
   let leafletMap = null;
   let leafletLayers = []; // array of layer groups
+  let leafletCornerBgLayers = []; // [{layer, refLat}] current corner/straight background polylines, rescaled on zoom
+  let leafletCornerBgMode = null; // 'geo' | 'xy' -- which meters->pixels formula applies to leafletCornerBgLayers
   let leafletViewState = null;
   let leafletViewStateUserSet = false;
   let leafletXYViewState = null;
@@ -5711,6 +5725,87 @@
       leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
       leafletLayers = [];
     }
+    leafletCornerBgLayers = [];
+  }
+
+  // Web Mercator meters-per-pixel at zoom 0, equator (the standard constant tile
+  // providers are built around); scales by 1/2^zoom and by cos(latitude) elsewhere.
+  const WEB_MERCATOR_ZOOM0_METERS_PER_PIXEL = 156543.03392;
+
+  // Converts a real-world track distance (meters) into the Leaflet polyline `weight`
+  // (pixels) that currently represents it, so the corner background trace reads as a
+  // constant physical width on the ground rather than a constant pixel width. 'xy' mode
+  // uses CRS.Simple, where 1 data unit (meter) is already 2^zoom pixels; 'geo' mode uses
+  // the standard Web Mercator meters-per-pixel formula at the reference latitude.
+  function metersToLeafletWeight(meters, mode, zoom, refLat) {
+    const MIN_WEIGHT_PX = 1.5;
+    if (!Number.isFinite(zoom)) return meters;
+    if (mode === 'xy') {
+      return Math.max(MIN_WEIGHT_PX, meters * Math.pow(2, zoom));
+    }
+    const lat = Number.isFinite(refLat) ? refLat : 0;
+    const metersPerPixel = WEB_MERCATOR_ZOOM0_METERS_PER_PIXEL * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+    if (!Number.isFinite(metersPerPixel) || metersPerPixel <= 0) return meters;
+    return Math.max(MIN_WEIGHT_PX, meters / metersPerPixel);
+  }
+
+  // Re-applies the corner background trace's pixel weight after a zoom change, so its
+  // ~5-10m real-world width stays correct rather than the fixed pixel width Leaflet
+  // would otherwise keep across zoom levels.
+  function refreshCornerBackgroundWeights() {
+    if (!leafletMap || leafletCornerBgLayers.length === 0) return;
+    const zoom = leafletMap.getZoom();
+    leafletCornerBgLayers.forEach(({ layer, refLat }) => {
+      layer.setStyle({ weight: metersToLeafletWeight(CORNER_MAP_BACKGROUND_WIDTH_M, leafletCornerBgMode, zoom, refLat) });
+    });
+  }
+
+  // Builds one polyline-worth of points per corner/straight segment along the reference
+  // lap used for corner detection -- a single line (not one per selected lap) so the
+  // background trace's alpha doesn't stack up where laps overlap. Consecutive segments
+  // share their boundary point so the colored chain has no visible gaps.
+  function buildLeafletCornerBackgroundSegments(cornerData, cornerRef, mode) {
+    if (!cornerData || !Array.isArray(cornerData.segments) || cornerData.segments.length === 0 || !cornerRef) return [];
+    const { log, lap } = cornerRef;
+    if (!Array.isArray(log.meta.lapNum) || !Array.isArray(log.meta.lapRelDist)) return [];
+
+    const latLonSource = mode === 'geo' ? getLeafletLatLonSource(log) : null;
+    const mapSource = mode === 'xy' ? getMapSourceForLog(log) : null;
+    if (mode === 'geo' && !latLonSource) return [];
+    if (mode === 'xy' && !mapSource) return [];
+
+    const maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
+    const points = [];
+    maskIdx.forEach((i) => {
+      const dist = Number(log.meta.lapRelDist[i]);
+      const lat = mode === 'geo' ? latLonSource.latAt(i) : mapSource.yAt(i);
+      const lon = mode === 'geo' ? latLonSource.lonAt(i) : mapSource.xAt(i);
+      if (Number.isFinite(dist) && Number.isFinite(lat) && Number.isFinite(lon)) {
+        points.push({ dist, latlng: [lat, lon] });
+      }
+    });
+    if (points.length < 2) return [];
+    points.sort((a, b) => a.dist - b.dist);
+
+    const result = [];
+    let pointIdx = 0;
+    let prevPoint = null;
+    cornerData.segments.forEach((seg) => {
+      const segPoints = prevPoint ? [prevPoint] : [];
+      while (pointIdx < points.length && points[pointIdx].dist <= seg.endDist) {
+        if (points[pointIdx].dist >= seg.startDist) segPoints.push(points[pointIdx]);
+        pointIdx += 1;
+      }
+      if (segPoints.length >= 2) {
+        result.push({
+          color: cornerTypeColor(seg.type),
+          latlngs: segPoints.map(p => p.latlng),
+          refLat: segPoints[0].latlng[0]
+        });
+      }
+      if (segPoints.length > 0) prevPoint = segPoints[segPoints.length - 1];
+    });
+    return result;
   }
 
   function updateLeafletMap(selFiles, selectedLaps, mode) {
@@ -5718,10 +5813,17 @@
     syncLeafletContainerHeight();
 
     initLeafletMap(mode);
-    
+
+    if (!leafletMap.__cornerBgZoomBound) {
+      leafletMap.__cornerBgZoomBound = true;
+      leafletMap.on('zoomend', refreshCornerBackgroundWeights);
+    }
+
     // Clear existing layers
     leafletLayers.forEach(layer => leafletMap.removeLayer(layer));
     leafletLayers = [];
+    leafletCornerBgLayers = [];
+    leafletCornerBgMode = mode;
     const nextLeafletHoverLookup = new Map();
     const mapColorEnabled = !!(mapColorEnabledInput && mapColorEnabledInput.checked);
     const mapColorChannel = mapColorSelect ? mapColorSelect.value : '';
@@ -5759,7 +5861,27 @@
       : null;
     
     let bounds = null;
-    
+
+    // Corner/straight background trace, added first so it renders behind every lap's
+    // line -- see resolveCornerDataForRender/buildLeafletCornerBackgroundSegments.
+    if (showCornersInput && showCornersInput.checked) {
+      const resolvedCorners = resolveCornerDataForRender(selFiles, selectedLaps);
+      const bgSegments = buildLeafletCornerBackgroundSegments(resolvedCorners.cornerData, resolvedCorners.cornerRef, mode);
+      const initialZoom = leafletMap.getZoom();
+      bgSegments.forEach((seg) => {
+        const layer = L.polyline(seg.latlngs, {
+          color: seg.color,
+          weight: metersToLeafletWeight(CORNER_MAP_BACKGROUND_WIDTH_M, mode, initialZoom, seg.refLat),
+          opacity: CORNER_MAP_BACKGROUND_ALPHA,
+          lineCap: 'butt',
+          lineJoin: 'miter',
+          interactive: false
+        }).addTo(leafletMap);
+        leafletLayers.push(layer);
+        leafletCornerBgLayers.push({ layer, refLat: seg.refLat });
+      });
+    }
+
     selFiles.forEach((log, fileIdx) => {
       const latLonSource = mode === 'geo' ? getLeafletLatLonSource(log) : null;
       const mapSource = mode === 'xy' ? getMapSourceForLog(log) : null;
@@ -5860,6 +5982,9 @@
         }
       });
     }
+    // fitBounds/setView above may have changed zoom -- rescale the corner background
+    // trace's pixel weight now so it reflects its real-world width at the final zoom.
+    refreshCornerBackgroundWeights();
 
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
@@ -6212,6 +6337,34 @@
       });
     });
     return best;
+  }
+
+  // Resolves the corner/straight segmentation to render for the current file/lap
+  // selection -- reference lap, auto-detected segments, any manual venue override, and
+  // any in-progress corner-editor preview. Shared by the main plot's corner strip and
+  // the map's corner background trace so both agree on the same segmentation.
+  function resolveCornerDataForRender(selFiles, selectedLaps) {
+    const cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
+    if (!cornerRef) return { cornerData: null, cornerRef: null, cornerVenueKeyForRender: '' };
+
+    const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
+    const autoData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
+    const venue = getLogVenue(cornerRef.log);
+    const cornerVenueKeyForRender = normalizeVenueKey(venue);
+
+    let cornerData;
+    if (cornerEditMode && cornerEditorSegments && cornerEditorVenueKey === cornerVenueKeyForRender) {
+      cornerData = buildCornerDataFromSegments(cornerEditorSegments, autoData ? autoData.trackLength : 0);
+    } else {
+      const override = getCornerOverrideForVenue(venue);
+      if (override) {
+        const trackLength = autoData ? autoData.trackLength : override.trackLength;
+        cornerData = buildCornerDataFromSegments(clampSegmentsToTrackLength(override.segments, trackLength), trackLength);
+      } else {
+        cornerData = autoData;
+      }
+    }
+    return { cornerData, cornerRef, cornerVenueKeyForRender };
   }
 
   function buildCornerShapesAndAnnotations(cornerData, mainDomainTop, shadeOpacityPct) {
@@ -7058,26 +7211,10 @@
     let cornerRef = null;
     let cornerVenueKeyForRender = '';
     if (cornersEnabled && xMode === 'distance') {
-      cornerRef = getReferenceLapForCorners(selFiles, selectedLaps);
-      if (cornerRef) {
-        const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
-        const autoData = computeCornerSegments(cornerRef.log, cornerRef.lap, swapLeftRight);
-        const venue = getLogVenue(cornerRef.log);
-        cornerVenueKeyForRender = normalizeVenueKey(venue);
-
-        if (cornerEditMode && cornerEditorSegments && cornerEditorVenueKey === cornerVenueKeyForRender) {
-          // Live preview of in-progress edits, not yet reflected in computeCornerSegments.
-          cornerData = buildCornerDataFromSegments(cornerEditorSegments, autoData ? autoData.trackLength : 0);
-        } else {
-          const override = getCornerOverrideForVenue(venue);
-          if (override) {
-            const trackLength = autoData ? autoData.trackLength : override.trackLength;
-            cornerData = buildCornerDataFromSegments(clampSegmentsToTrackLength(override.segments, trackLength), trackLength);
-          } else {
-            cornerData = autoData;
-          }
-        }
-      }
+      const resolved = resolveCornerDataForRender(selFiles, selectedLaps);
+      cornerData = resolved.cornerData;
+      cornerRef = resolved.cornerRef;
+      cornerVenueKeyForRender = resolved.cornerVenueKeyForRender;
     }
     // The editor is bound to one venue at a time; close it if the selection no longer
     // resolves to that venue (different file/lap picked, corners toggled off, or X axis
