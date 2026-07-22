@@ -326,6 +326,17 @@
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
   let hoverEnabled = window.innerWidth > 980;
+
+  // Start/finish-line lap editor state -- lets a log's laps be recomputed from where its
+  // GPS track crosses a user-drawn line, instead of trusting the file format's own
+  // (sometimes unreliable, e.g. VBOX) lap splitter. Only one file's line can be actively
+  // drawn/edited at a time.
+  let startFinishEditLogId = null; // id of the log currently being edited, or null
+  let startFinishDrawPoints = []; // [{lat,lon}, ...] 0-2 points placed so far this session
+  let startFinishDrawMarkers = []; // draggable Leaflet markers for the points above
+  let startFinishDrawLine = null; // connecting Leaflet polyline, once both points exist
+  let startFinishMapClickHandler = null; // bound fn currently attached to leafletMap's click event
+  let startFinishEditStatusMessage = ''; // status/error text shown in the inline editor panel
   // Plotly.relayout({shapes:...}) internally reapplies ("reselects") the current drag
   // selection, synchronously re-emitting plotly_selected/plotly_deselect from inside that
   // same call. Without this guard, our own relayout-in-response-to-selection would trigger
@@ -1470,7 +1481,12 @@
         }
 
         const id = idForName(file.name);
-        logs.push(buildLogRecord(id, file.name, processed, rows));
+        const newLog = buildLogRecord(id, file.name, processed, rows);
+        const savedStartFinishLine = getStartFinishLineForLog(newLog);
+        if (savedStartFinishLine) {
+          applyStartFinishLineToLog(newLog, { p1: savedStartFinishLine.p1, p2: savedStartFinishLine.p2 });
+        }
+        logs.push(newLog);
         renderFilesList();
         populateYSelect();
         populateXCustomSelect();
@@ -1580,6 +1596,73 @@
 
       el.appendChild(label);
       el.appendChild(decoderRow);
+
+      const startFinishRow = document.createElement('div');
+      startFinishRow.className = 'file-startfinish-row';
+
+      const isEditingThis = startFinishEditLogId === log.id;
+      const startFinishEditBtn = document.createElement('button');
+      startFinishEditBtn.type = 'button';
+      startFinishEditBtn.className = 'file-startfinish-edit-btn';
+      startFinishEditBtn.dataset.startfinishEdit = log.id;
+      startFinishEditBtn.textContent = isEditingThis ? 'Close' : 'Edit Start/Finish';
+      if (isEditingThis) startFinishEditBtn.classList.add('is-active');
+      startFinishRow.appendChild(startFinishEditBtn);
+
+      const savedStartFinishLine = getStartFinishLineForLog(log);
+      if (savedStartFinishLine && !isEditingThis) {
+        const badge = document.createElement('span');
+        badge.className = 'file-startfinish-badge';
+        badge.textContent = 'Custom start/finish line';
+        startFinishRow.appendChild(badge);
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'file-startfinish-clear-btn';
+        clearBtn.dataset.startfinishClear = log.id;
+        clearBtn.textContent = 'Clear Line';
+        startFinishRow.appendChild(clearBtn);
+      }
+
+      el.appendChild(startFinishRow);
+
+      if (isEditingThis) {
+        const editorPanel = document.createElement('div');
+        editorPanel.className = 'file-startfinish-editor';
+
+        const status = document.createElement('div');
+        status.className = 'file-startfinish-status';
+        status.textContent = startFinishEditStatusMessage || (
+          startFinishDrawPoints.length === 0
+            ? 'Click a point on the map where the start/finish line begins.'
+            : startFinishDrawPoints.length === 1
+              ? 'Click the second point to complete the line.'
+              : 'Drag either point on the map to adjust, then Apply.'
+        );
+        editorPanel.appendChild(status);
+
+        const btnRow = document.createElement('div');
+        btnRow.className = 'file-startfinish-editor-btns';
+
+        const applyBtn = document.createElement('button');
+        applyBtn.type = 'button';
+        applyBtn.className = 'file-startfinish-apply-btn';
+        applyBtn.dataset.startfinishApply = log.id;
+        applyBtn.textContent = 'Apply';
+        applyBtn.disabled = startFinishDrawPoints.length !== 2;
+        btnRow.appendChild(applyBtn);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'file-startfinish-cancel-btn';
+        cancelBtn.dataset.startfinishCancel = log.id;
+        cancelBtn.textContent = 'Cancel';
+        btnRow.appendChild(cancelBtn);
+
+        editorPanel.appendChild(btnRow);
+        el.appendChild(editorPanel);
+      }
+
       filesList.appendChild(el);
     });
   }
@@ -2675,6 +2758,21 @@
     return max;
   }
 
+  // Laps containing a negative lapRelDist sample -- typically time spent in the pits
+  // (or otherwise off the lap's normal path) rather than a real hot lap. Surfaced so
+  // renderLapsList can default those laps unchecked without hiding them outright.
+  function getLapsWithNegativeDistance(meta) {
+    const result = new Set();
+    const lapNum = meta && meta.lapNum;
+    const lapRelDist = meta && meta.lapRelDist;
+    if (!Array.isArray(lapNum) || !Array.isArray(lapRelDist)) return result;
+    for (let i = 0; i < lapNum.length; i++) {
+      const d = lapRelDist[i];
+      if (Number.isFinite(d) && d < 0) result.add(lapNum[i]);
+    }
+    return result;
+  }
+
   function renderLapsList() {
     const container = document.getElementById('lapsList');
     if (!container) return;
@@ -2715,16 +2813,23 @@
       if (fileLaps.length === 0) return;
       html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
       const totalFileLaps = fileLaps.length;
+      const negativeDistLaps = getLapsWithNegativeDistance(log.meta);
       fileLaps.forEach((n, idx) => {
         const color = getLapColor(log.id, n);
         const dur = getLapDuration(log.meta, n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
-        // Uncheck first and last lap (in/out laps) when there are 3 or more laps
+        // Uncheck first and last lap (in/out laps) when there are 3 or more laps, and any
+        // lap containing negative lap distance (e.g. a pit-lane pass) -- still selectable,
+        // just not shown by default.
         const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
-        const checkedAttr = isInOutLap ? '' : ' checked';
+        const hasNegativeDistance = negativeDistLaps.has(n);
+        const checkedAttr = (isInOutLap || hasNegativeDistance) ? '' : ' checked';
+        const warningBadge = hasNegativeDistance
+          ? ` <span class="lap-warning" title="Contains negative lap distance (e.g. a pit-lane pass) -- unchecked by default">⚠</span>`
+          : '';
         html.push(
           `<div class="lap-item">` +
-          `<label class="lap-toggle"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span></label>` +
+          `<label class="lap-toggle"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span>${warningBadge}</label>` +
           `<input type="color" class="lap-color-input" data-id="${log.id}" data-lap="${n}" value="${color}" aria-label="Color for lap ${n} (${escapeHtml(log.name)})" />` +
           `</div>`
         );
@@ -3978,8 +4083,7 @@
       if (deltas.every(v => v == null || isNaN(v))) continue;
       const validDeltas = deltas.filter(v => v != null && !isNaN(v));
       if (validDeltas.length > 0) {
-        const traceMax = Math.max(...validDeltas);
-        const traceMin = Math.min(...validDeltas);
+        const [traceMin, traceMax] = arrayMinMax(validDeltas);
         if (allMaxDelta == null || traceMax > allMaxDelta) allMaxDelta = traceMax;
         if (allMinDelta == null || traceMin < allMinDelta) allMinDelta = traceMin;
         if (!s.isCrashLap && (nonCrashMaxDelta == null || traceMax > nonCrashMaxDelta)) {
@@ -5470,13 +5574,20 @@
     leafletColorLegendControl = control;
   }
 
+  // Plain Number(v) turns a missing/scrubbed value (null, e.g. a filtered-out GPS 0,0
+  // pre-lock sample) into 0 -- silently reintroducing the very bad point that was nulled
+  // out. NaN propagates correctly through every Number.isFinite check downstream instead.
+  function numberOrNaN(v) {
+    return v == null ? NaN : Number(v);
+  }
+
   function getLeafletLatLonSource(log) {
     if (!log || !Array.isArray(log.cols)) return null;
 
     if (log.cols.includes(DERIVED_LAT_COL) && log.cols.includes(DERIVED_LON_COL)) {
       return {
-        latAt: (index) => Number(log.data[index][DERIVED_LAT_COL]),
-        lonAt: (index) => Number(log.data[index][DERIVED_LON_COL]),
+        latAt: (index) => numberOrNaN(log.data[index][DERIVED_LAT_COL]),
+        lonAt: (index) => numberOrNaN(log.data[index][DERIVED_LON_COL]),
         source: 'derived'
       };
     }
@@ -5485,8 +5596,8 @@
     if (!cols) return null;
 
     return {
-      latAt: (index) => Number(log.data[index][cols.latCol]),
-      lonAt: (index) => Number(log.data[index][cols.lonCol]),
+      latAt: (index) => numberOrNaN(log.data[index][cols.latCol]),
+      lonAt: (index) => numberOrNaN(log.data[index][cols.lonCol]),
       source: 'native'
     };
   }
@@ -6092,7 +6203,8 @@
           .map((n, i) => n === lap ? Number(log.meta.lapRelDist[i]) : NaN)
           .filter(Number.isFinite);
         if (dists.length < 2) return;
-        const span = Math.max(...dists) - Math.min(...dists);
+        const [distMin, distMax] = arrayMinMax(dists);
+        const span = distMax - distMin;
         if (span > bestSpan) {
           bestSpan = span;
           best = { log, lap };
@@ -6277,6 +6389,301 @@
     if (!(venueKey in store)) return;
     delete store[venueKey];
     try { localStorage.setItem(TRACK_CORNER_OVERRIDES_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
+  // A drawn start/finish line is stored keyed by venue when the log's metadata has one --
+  // shared automatically by every log from that track, same as the corner overrides above
+  // -- falling back to the filename when it doesn't (e.g. VBOX logs carry no venue
+  // metadata at all), scoped to just that one file in that case.
+  const START_FINISH_LINE_STORAGE_KEY = 'startFinishLineOverrides';
+
+  function getStartFinishLineKey(log) {
+    const venueKey = normalizeVenueKey(getLogVenue(log));
+    if (venueKey) return `venue:${venueKey}`;
+    const nameKey = String((log && log.name) || '').trim().toLowerCase();
+    return nameKey ? `file:${nameKey}` : '';
+  }
+
+  function getStartFinishLineLabel(log) {
+    const venue = getLogVenue(log);
+    return venue || (log && log.name) || '';
+  }
+
+  function loadStartFinishLineStore() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(START_FINISH_LINE_STORAGE_KEY) || '{}');
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function getStartFinishLineForLog(log) {
+    const key = getStartFinishLineKey(log);
+    if (!key) return null;
+    const entry = loadStartFinishLineStore()[key];
+    if (!entry || !entry.p1 || !entry.p2) return null;
+    return entry;
+  }
+
+  function setStartFinishLineForLog(log, p1, p2) {
+    const key = getStartFinishLineKey(log);
+    if (!key) return;
+    const store = loadStartFinishLineStore();
+    store[key] = { label: getStartFinishLineLabel(log), p1, p2, savedAt: new Date().toISOString() };
+    try { localStorage.setItem(START_FINISH_LINE_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
+  function clearStartFinishLineForKey(key) {
+    if (!key) return;
+    const store = loadStartFinishLineStore();
+    if (!(key in store)) return;
+    delete store[key];
+    try { localStorage.setItem(START_FINISH_LINE_STORAGE_KEY, JSON.stringify(store)); } catch {}
+  }
+
+  // Segment-crossing test done directly in raw lat/lon degrees -- whether two segments
+  // cross, and the fraction along each at the crossing point, are both invariant under any
+  // linear (even anisotropic) coordinate scaling, so no projection to meters is needed just
+  // to find where the vehicle's path crosses the drawn line.
+  function segmentCrossingFraction(p1, p2, a, b) {
+    const d1x = p2.lon - p1.lon, d1y = p2.lat - p1.lat;
+    const d2x = b.lon - a.lon, d2y = b.lat - a.lat;
+    const denom = d1x * d2y - d1y * d2x;
+    if (Math.abs(denom) < 1e-15) return null;
+    const t = ((a.lon - p1.lon) * d2y - (a.lat - p1.lat) * d2x) / denom;
+    const u = ((a.lon - p1.lon) * d1y - (a.lat - p1.lat) * d1x) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return u;
+  }
+
+  // Minimum gap enforced between accepted crossings, to absorb GPS jitter that could
+  // otherwise register as several crossings in quick succession right at the line (e.g. a
+  // slow pit-lane pass near the drawn line). No real lap is anywhere near this short.
+  const START_FINISH_MIN_LAP_SECONDS = 10;
+
+  function computeStartFinishCrossingTimes(log, line) {
+    const latLonSource = getLeafletLatLonSource(log);
+    if (!latLonSource || !log || !Array.isArray(log.data)) return [];
+    const times = (log.meta && log.meta._time) || [];
+    const n = Math.min(log.data.length, times.length);
+    const crossings = [];
+    let prev = null;
+    for (let i = 0; i < n; i++) {
+      const lat = latLonSource.latAt(i);
+      const lon = latLonSource.lonAt(i);
+      const time = times[i];
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(time)) {
+        prev = null;
+        continue;
+      }
+      if (prev) {
+        const u = segmentCrossingFraction(line.p1, line.p2, prev, { lat, lon });
+        if (u != null) {
+          const crossTime = prev.time + u * (time - prev.time);
+          const lastCrossing = crossings[crossings.length - 1];
+          if (Number.isFinite(crossTime) && (lastCrossing == null || crossTime - lastCrossing >= START_FINISH_MIN_LAP_SECONDS)) {
+            crossings.push(crossTime);
+          }
+        }
+      }
+      prev = { lat, lon, time };
+    }
+    return crossings;
+  }
+
+  // Keeps the per-row "Lap Time"/"Lap Number" columns (written once at upload time in
+  // buildLogRecord) in sync after meta.lapTime/lapNum get recomputed some other way.
+  function syncLapColumnsFromMeta(log) {
+    if (!log || !Array.isArray(log.data) || !log.meta) return;
+    const lapTime = log.meta.lapTime || [];
+    const lapNum = log.meta.lapNum || [];
+    log.data.forEach((row, i) => {
+      row['Lap Time'] = lapTime[i];
+      row['Lap Number'] = lapNum[i];
+    });
+  }
+
+  // Recomputes a log's laps from where its GPS track crosses a drawn start/finish line,
+  // replacing whatever the file format's own lap splitter produced. The original
+  // computation is snapshotted the first time this runs, so restoreOriginalLapsForLog can
+  // revert it later without needing the file re-uploaded.
+  function applyStartFinishLineToLog(log, line) {
+    if (!log || !log.meta) return false;
+    const crossings = computeStartFinishCrossingTimes(log, line);
+    if (crossings.length === 0) return false;
+
+    if (!log.meta._originalLapComputation) {
+      log.meta._originalLapComputation = {
+        lapNum: log.meta.lapNum ? log.meta.lapNum.slice() : null,
+        lapTime: log.meta.lapTime ? log.meta.lapTime.slice() : null,
+        lapRelDist: log.meta.lapRelDist ? log.meta.lapRelDist.slice() : null,
+        lapDurations: log.meta.lapDurations ? log.meta.lapDurations.slice() : null
+      };
+    }
+
+    const LP = window.LogFileProcessors;
+    LP.computeLapsFromCrossingTimes(log.meta, crossings);
+    LP.computeCrashFlags(log.meta);
+    syncLapColumnsFromMeta(log);
+    return true;
+  }
+
+  function restoreOriginalLapsForLog(log) {
+    if (!log || !log.meta || !log.meta._originalLapComputation) return false;
+    const orig = log.meta._originalLapComputation;
+    if (orig.lapNum) log.meta.lapNum = orig.lapNum.slice();
+    if (orig.lapTime) log.meta.lapTime = orig.lapTime.slice();
+    if (orig.lapRelDist) log.meta.lapRelDist = orig.lapRelDist.slice();
+    if (orig.lapDurations) log.meta.lapDurations = orig.lapDurations.slice();
+    else delete log.meta.lapDurations;
+    delete log.meta._originalLapComputation;
+    const LP = window.LogFileProcessors;
+    if (LP && typeof LP.computeCrashFlags === 'function') LP.computeCrashFlags(log.meta);
+    syncLapColumnsFromMeta(log);
+    return true;
+  }
+
+  function applyStartFinishLineToMatchingLogs(key, line) {
+    logs.forEach((log) => {
+      if (getStartFinishLineKey(log) === key) applyStartFinishLineToLog(log, line);
+    });
+  }
+
+  function setStartFinishEditStatus(message) {
+    startFinishEditStatusMessage = message || '';
+    renderFilesList();
+  }
+
+  const START_FINISH_LINE_COLOR = '#ff2d55';
+
+  function clearStartFinishDrawOverlay() {
+    startFinishDrawMarkers.forEach(m => { if (leafletMap) leafletMap.removeLayer(m); });
+    startFinishDrawMarkers = [];
+    if (startFinishDrawLine && leafletMap) leafletMap.removeLayer(startFinishDrawLine);
+    startFinishDrawLine = null;
+  }
+
+  // Cheap update used during marker drag (fires continuously) -- only moves the connecting
+  // line's endpoints, never touches the markers themselves (rebuilding those mid-drag would
+  // destroy the very marker the user is dragging).
+  function redrawStartFinishLineOnly() {
+    if (startFinishDrawPoints.length !== 2) return;
+    const latlngs = startFinishDrawPoints.map(p => [p.lat, p.lon]);
+    if (startFinishDrawLine) {
+      startFinishDrawLine.setLatLngs(latlngs);
+    } else if (leafletMap) {
+      startFinishDrawLine = L.polyline(latlngs, { color: START_FINISH_LINE_COLOR, weight: 3, dashArray: '6 4' }).addTo(leafletMap);
+    }
+  }
+
+  // Full rebuild of the draw overlay's markers + line -- used when a point is added/removed
+  // (not during a drag, see redrawStartFinishLineOnly above).
+  function redrawStartFinishDrawOverlay() {
+    clearStartFinishDrawOverlay();
+    if (!leafletMap || !startFinishEditLogId) return;
+
+    startFinishDrawPoints.forEach((pt, idx) => {
+      const marker = L.marker([pt.lat, pt.lon], {
+        draggable: true,
+        title: idx === 0 ? 'Start/finish point A -- drag to adjust' : 'Start/finish point B -- drag to adjust'
+      }).addTo(leafletMap);
+      marker.on('drag', (ev) => {
+        const ll = ev.target.getLatLng();
+        startFinishDrawPoints[idx] = { lat: ll.lat, lon: ll.lng };
+        redrawStartFinishLineOnly();
+      });
+      marker.on('dragend', () => setStartFinishEditStatus(''));
+      startFinishDrawMarkers.push(marker);
+    });
+
+    redrawStartFinishLineOnly();
+  }
+
+  function handleStartFinishMapClick(e) {
+    if (!startFinishEditLogId || startFinishDrawPoints.length >= 2) return;
+    startFinishDrawPoints.push({ lat: e.latlng.lat, lon: e.latlng.lng });
+    redrawStartFinishDrawOverlay();
+    setStartFinishEditStatus('');
+  }
+
+  function attachStartFinishMapClickHandler() {
+    if (!leafletMap) return;
+    detachStartFinishMapClickHandler();
+    startFinishMapClickHandler = (e) => handleStartFinishMapClick(e);
+    leafletMap.on('click', startFinishMapClickHandler);
+  }
+
+  function detachStartFinishMapClickHandler() {
+    if (leafletMap && startFinishMapClickHandler) leafletMap.off('click', startFinishMapClickHandler);
+    startFinishMapClickHandler = null;
+  }
+
+  function startStartFinishLineEdit(log) {
+    if (!log) return;
+    if (!getLeafletLatLonSource(log)) {
+      alert('This file has no GPS latitude/longitude data to draw a start/finish line on.');
+      return;
+    }
+    cancelStartFinishLineEdit();
+    if (cornerEditMode) closeCornerEditor();
+
+    startFinishEditLogId = log.id;
+    startFinishEditStatusMessage = '';
+    const existing = getStartFinishLineForLog(log);
+    startFinishDrawPoints = existing ? [{ ...existing.p1 }, { ...existing.p2 }] : [];
+
+    if (showMapInput && !showMapInput.checked) showMapInput.checked = true;
+
+    renderFilesList();
+    renderLapsList();
+    updatePlot();
+
+    attachStartFinishMapClickHandler();
+    redrawStartFinishDrawOverlay();
+  }
+
+  function cancelStartFinishLineEdit() {
+    detachStartFinishMapClickHandler();
+    clearStartFinishDrawOverlay();
+    startFinishEditLogId = null;
+    startFinishDrawPoints = [];
+    startFinishEditStatusMessage = '';
+  }
+
+  function applyStartFinishLineEdit() {
+    if (!startFinishEditLogId || startFinishDrawPoints.length !== 2) return;
+    const log = logs.find(l => l.id === startFinishEditLogId);
+    if (!log) { cancelStartFinishLineEdit(); renderFilesList(); return; }
+
+    const line = { p1: startFinishDrawPoints[0], p2: startFinishDrawPoints[1] };
+    const crossingCount = computeStartFinishCrossingTimes(log, line).length;
+    if (crossingCount === 0) {
+      setStartFinishEditStatus("This line doesn't cross the GPS track for this file -- drag the points onto the track and try again.");
+      return;
+    }
+
+    const key = getStartFinishLineKey(log);
+    setStartFinishLineForLog(log, line.p1, line.p2);
+    applyStartFinishLineToMatchingLogs(key, line);
+
+    cancelStartFinishLineEdit();
+    renderFilesList();
+    renderLapsList();
+    updatePlot();
+  }
+
+  function handleClearStartFinishLine(log) {
+    if (!log) return;
+    const key = getStartFinishLineKey(log);
+    if (key) clearStartFinishLineForKey(key);
+    logs.forEach((l) => {
+      if (getStartFinishLineKey(l) === key) restoreOriginalLapsForLog(l);
+    });
+    if (startFinishEditLogId === log.id) cancelStartFinishLineEdit();
+    renderFilesList();
+    renderLapsList();
+    updatePlot();
   }
 
   // Saves the in-progress editor segments as this venue's override, using the actual
@@ -7183,6 +7590,7 @@
       const id = ev.target.getAttribute('data-remove');
       const idx = logs.findIndex(l=>l.id===id);
       if (idx>=0) {
+        if (startFinishEditLogId === id) cancelStartFinishLineEdit();
         logs.splice(idx,1);
         resetWholeCircuitFitState();
         mapOffsetManuallyAdjusted = false;
@@ -7229,6 +7637,32 @@
       const decoderName = select ? select.value : null;
       if (!decoderName) return;
       handleDecoderSelectionChange(select, id, decoderName);
+      renderFilesList();
+    }
+
+    if (ev.target.matches('button[data-startfinish-edit]')) {
+      const id = ev.target.getAttribute('data-startfinish-edit');
+      if (startFinishEditLogId === id) {
+        cancelStartFinishLineEdit();
+        renderFilesList();
+        return;
+      }
+      const log = logs.find(l => l.id === id);
+      startStartFinishLineEdit(log);
+    }
+
+    if (ev.target.matches('button[data-startfinish-clear]')) {
+      const id = ev.target.getAttribute('data-startfinish-clear');
+      const log = logs.find(l => l.id === id);
+      handleClearStartFinishLine(log);
+    }
+
+    if (ev.target.matches('button[data-startfinish-apply]')) {
+      applyStartFinishLineEdit();
+    }
+
+    if (ev.target.matches('button[data-startfinish-cancel]')) {
+      cancelStartFinishLineEdit();
       renderFilesList();
     }
   });

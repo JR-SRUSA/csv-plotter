@@ -439,6 +439,14 @@
         obj['Longitude'] = Number.isFinite(rawLon) ? -(rawLon / 60) : null;
       }
 
+      // (0, 0) -- "null island" -- is what a GPS receiver reports before it gets a fix,
+      // not a real position; scrub it so it doesn't show up as a bogus point/spike on the
+      // map or a false start/finish-line crossing.
+      if (latIdx >= 0 && lonIdx >= 0 && obj['Latitude'] === 0 && obj['Longitude'] === 0) {
+        obj['Latitude'] = null;
+        obj['Longitude'] = null;
+      }
+
       data.push(obj);
     }
 
@@ -1214,6 +1222,56 @@
     meta.lapDurations = lapDurations;
   }
 
+  // Same lap-splitting shape as computeLapsFromBeacons, for laps derived from a
+  // user-drawn start/finish line crossing the GPS track (app.js computes the actual
+  // crossing timestamps -- this just turns them into lapNum/lapTime/lapRelDist/
+  // lapDurations, the same way beacon markers do). Kept as its own function rather than
+  // reusing computeLapsFromBeacons because that one assumes meta._time is already
+  // 0-based at the start of the session; a crossing-based log's raw Time channel isn't
+  // guaranteed to be (e.g. VBOX's Time column is seconds-since-midnight), so lap 0's
+  // baseline here is the first sample's own timestamp instead of a hardcoded 0.
+  function computeLapsFromCrossingTimes(meta, crossingTimes) {
+    const t = meta._time || [];
+    const d = meta._dist || [];
+    const firstTime = Number.isFinite(t[0]) ? t[0] : 0;
+
+    const lapNum = [];
+    const lapTime = [];
+    const lapRelDist = [];
+
+    let markerIdx = 0;
+    let lapStartDist = Number.isFinite(d[0]) ? d[0] : 0;
+
+    for (let i = 0; i < t.length; i++) {
+      const ti = Number.isFinite(t[i])
+        ? t[i]
+        : (i > 0 ? t[i - 1] : firstTime);
+      const di = Number.isFinite(d[i])
+        ? d[i]
+        : (i > 0 ? d[i - 1] : 0);
+
+      const prevMarkerIdx = markerIdx;
+      while (markerIdx < crossingTimes.length && ti >= crossingTimes[markerIdx]) {
+        markerIdx++;
+      }
+      if (markerIdx !== prevMarkerIdx) {
+        lapStartDist = di;
+      }
+
+      const lapStartTime = markerIdx > 0 ? crossingTimes[markerIdx - 1] : firstTime;
+
+      lapNum.push(markerIdx);
+      lapTime.push(Math.max(0, ti - lapStartTime));
+      lapRelDist.push(di - lapStartDist);
+    }
+
+    const lapDurations = crossingTimes.map((ct, idx) => ct - (idx > 0 ? crossingTimes[idx - 1] : firstTime));
+
+    meta.lapNum = lapNum;
+    meta.lapTime = lapTime;
+    meta.lapRelDist = lapRelDist;
+    meta.lapDurations = lapDurations;
+  }
 
   function findLapStartDistanceByTime(meta, lapStartTime, upToIndex) {
     const t = meta._time || [];
@@ -1391,6 +1449,8 @@
     isVBoxFormat,
     isTsvFormat,
     addTotalAccelerationCalculatedChannel,
-    detectFieldDelimiter
+    detectFieldDelimiter,
+    computeLapsFromCrossingTimes,
+    computeCrashFlags
   };
 })();
