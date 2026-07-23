@@ -354,7 +354,7 @@
   // corners" is checked -- thickness in track meters (~5-10m) and opacity, both tuned
   // here rather than exposed as UI controls.
   const CORNER_MAP_BACKGROUND_WIDTH_M = 8;
-  const CORNER_MAP_BACKGROUND_ALPHA = 0.2;
+  const CORNER_MAP_BACKGROUND_ALPHA = 0.4;
   const CORNER_STRIP_DOMAIN = [0.96, 1];
   const CORNER_STRIP_GAP = 0.02; // reserved blank space between strip and main plot
   const CURVATURE_SMOOTH_HALF_WINDOW_M = 35;
@@ -1555,7 +1555,49 @@
     setDecoderError(fileItem, 'Could not reprocess this CSV with the selected decoder. See console for details.');
   }
 
+  // Shared tail end of file ingestion: wraps a processed {data,cols,units,meta} result into
+  // a log record and wires it into the UI. Used by both the CSV/PapaParse path and the
+  // VIGrade .res XML path below.
+  function addProcessedLog(file, processed, rawRows) {
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
+      console.error('Failed to process file:', file.name);
+      return;
+    }
+
+    const id = idForName(file.name);
+    const newLog = buildLogRecord(id, file.name, processed, rawRows);
+    const savedStartFinishLine = getStartFinishLineForLog(newLog);
+    if (savedStartFinishLine) {
+      applyStartFinishLineToLog(newLog, { p1: savedStartFinishLine.p1, p2: savedStartFinishLine.p2 });
+    }
+    logs.push(newLog);
+    renderFilesList();
+    populateYSelect();
+    populateXCustomSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
+    renderLapsList();
+    updatePlot();
+  }
+
   function parseFile(file) {
+    const processors = window.LogFileProcessors;
+
+    // VIGrade .res files are XML (VI-CarRealTime/xrf schema) simulation results, not
+    // delimited text -- they need their own reader instead of PapaParse tokenization.
+    if (/\.res$/i.test(file.name || '')) {
+      if (typeof file.text !== 'function' || !processors || typeof processors.processVIGradeResXml !== 'function') {
+        console.error('Missing LogFileProcessors.processVIGradeResXml; cannot parse file:', file.name);
+        return;
+      }
+      file.text().then((text) => {
+        const processed = processors.processVIGradeResXml(text);
+        addProcessedLog(file, processed, null);
+      }, () => {
+        console.error('Failed to read .res file:', file.name);
+      });
+      return;
+    }
+
     // Set by whichever branch below actually runs, before `complete` fires -- lets
     // processCsvRows() know whether this file was tab-delimited (see isTsvFormat in
     // file-processors.js) without re-sniffing already-tokenized rows itself.
@@ -1572,24 +1614,7 @@
         }
 
         const processed = window.LogFileProcessors.processCsvRows(rows, { delimiter: detectedDelimiter });
-        if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
-          console.error('Failed to process CSV file:', file.name);
-          return;
-        }
-
-        const id = idForName(file.name);
-        const newLog = buildLogRecord(id, file.name, processed, rows);
-        const savedStartFinishLine = getStartFinishLineForLog(newLog);
-        if (savedStartFinishLine) {
-          applyStartFinishLineToLog(newLog, { p1: savedStartFinishLine.p1, p2: savedStartFinishLine.p2 });
-        }
-        logs.push(newLog);
-        renderFilesList();
-        populateYSelect();
-        populateXCustomSelect();
-        populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
-        renderLapsList();
-        updatePlot();
+        addProcessedLog(file, processed, rows);
       }
     };
 
@@ -1598,7 +1623,6 @@
     // just checking for tab characters directly, so that case is sniffed up front.
     // Falls back to handing PapaParse the raw File directly (its normal auto-detect) if
     // the browser lacks file.text() or the processors module isn't loaded yet.
-    const processors = window.LogFileProcessors;
     const forceTsv = /\.dat$/i.test(file.name || '');
     if (typeof file.text === 'function' && processors && typeof processors.detectFieldDelimiter === 'function') {
       // Two-argument .then(onFulfilled, onRejected) rather than .then(onFulfilled).catch(...):

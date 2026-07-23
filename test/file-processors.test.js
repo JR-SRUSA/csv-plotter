@@ -198,3 +198,40 @@ test('processCsvRowsWithDecoder falls back to auto-detect for unknown decoder na
   assert.ok(processed, 'processCsvRowsWithDecoder should return a payload even for unknown decoder');
   assert.ok(Array.isArray(processed.data), 'should have data array');
 });
+
+test('processVIGradeResXml parses a VI-CarRealTime .res XML file', () => {
+  const processors = loadLogFileProcessors();
+  const xmlText = fs.readFileSync(
+    path.join(__dirname, '..', 'sample_data_files', 'vigrade_res_sample.res'),
+    'utf8'
+  );
+
+  const processed = processors.processVIGradeResXml(xmlText);
+  assert.ok(processed, 'processVIGradeResXml should return a payload');
+  assert.ok(Array.isArray(processed.data), 'should have data array');
+  assert.equal(processed.data.length, 6, 'one row per <Step> (1 input + 5 dynamic)');
+
+  // Component ids are 1-based positions within each Step's flattened number array, not a
+  // foreign key into a matching <Data id="..."> element (see processVIGradeResXml comment).
+  assert.ok(processed.cols.includes('Time'), 'time Entity/Component should map to a "Time" column');
+  assert.ok(processed.cols.includes('Animator_Widget.longitudinal_speed'));
+  assert.ok(processed.cols.includes('Animator_Widget.engine_rpm'));
+  assert.ok(processed.cols.includes('Brake.Locked_Damper_Moment.L1'));
+  // Brake.Chamber_Pressure.* is all zero in this fixture (no braking event captured) and
+  // should be dropped by filterAllZeroColumns, same as the existing VIGrade CSV behavior.
+  assert.ok(!processed.cols.includes('Brake.Chamber_Pressure.L1'));
+
+  const rowsByTime = processed.data.slice().sort((a, b) => a.Time - b.Time);
+  // Array.from (this file's own realm) rather than .map (the vm sandbox's realm) --
+  // otherwise deepEqual sees mismatched cross-realm Array prototypes and fails spuriously.
+  assert.deepEqual(Array.from(rowsByTime, r => r.Time), [0, 0.09, 0.1, 0.11, 0.12, 0.13]);
+
+  const t09 = processed.data.find(r => r.Time === 0.09);
+  assert.ok(Math.abs(t09['Animator_Widget.longitudinal_speed'] - 99.9041316859) < 1e-9);
+  assert.ok(Math.abs(t09['Animator_Widget.engine_rpm'] - 6464.19530426) < 1e-9);
+  assert.ok(Math.abs(t09['Brake.Locked_Damper_Moment.L1'] - (-11508.83686)) < 1e-9);
+
+  assert.equal(processed.units['Brake.Locked_Damper_Moment.L1'], 'newton-meter');
+  assert.equal(processed.units['Animator_Widget.longitudinal_speed'], 'km/h');
+  assert.equal(processed.meta.timeCol, 'Time');
+});
