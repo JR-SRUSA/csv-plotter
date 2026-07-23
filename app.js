@@ -2,6 +2,7 @@
   const fileInput = document.getElementById('fileInput');
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
+  const ySelectSearch = document.getElementById('ySelectSearch');
   const selectedYColors = document.getElementById('selectedYColors');
   const colorAxisSelect = document.getElementById('colorAxisSelect');
   const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
@@ -2023,7 +2024,10 @@
   }
 
 
-  function populateYSelectWithSelections(targetSelections) {
+  // Builds the full, unfiltered list of {value, label} entries available for Y Channels
+  // (mapped display names first, then uncovered raw columns sorted) -- shared by
+  // populateYSelect and populateYSelectWithSelections so the two stay in sync.
+  function buildYSelectOptionEntries() {
     const numericCols = new Set();
     logs.forEach(l => {
       l.cols.forEach(col => {
@@ -2047,21 +2051,37 @@
       if (hasMatch) activeMappings.push(mapping);
     });
 
-    const mappedOptions = activeMappings.map(m => {
+    const mappedEntries = activeMappings.map(m => {
       const unit = getUnitForChannel(m.displayName);
       const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
-      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
+      return { value: m.displayName, label };
     });
-    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
+    const rawEntries = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
       let unit = '';
       for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
       const isMathCh = mathChannels.some(mc => mc.name === c);
       const isPreview = c === quickModPreviewName;
       const suffix = isPreview ? ' (preview)' : (isMathCh ? ' (math)' : '');
       const label = unit ? `${c} [${unit}]${suffix}` : `${c}${suffix}`;
-      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
+      return { value: c, label };
     });
-    ySelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+    return mappedEntries.concat(rawEntries);
+  }
+
+  // Renders `entries` into #ySelect as <option>s, filtered by the live search box -- but
+  // any entry whose value is in `keepSelections` is always kept, so narrowing the search
+  // never hides (or drops the selection of) a channel the user already picked.
+  function renderYSelectOptions(entries, keepSelections) {
+    const term = (ySelectSearch && ySelectSearch.value || '').trim().toLowerCase();
+    const filtered = term
+      ? entries.filter(e => keepSelections.has(e.value) || e.label.toLowerCase().includes(term))
+      : entries;
+    ySelect.innerHTML = filtered.map(e => `<option value="${escapeHtml(e.value)}">${escapeHtml(e.label)}</option>`).join('');
+  }
+
+  function populateYSelectWithSelections(targetSelections) {
+    const entries = buildYSelectOptionEntries();
+    renderYSelectOptions(entries, targetSelections);
 
     const opts = Array.from(ySelect.options);
     const valid = new Set(Array.from(targetSelections).filter(v => opts.some(o => o.value === v)));
@@ -2493,51 +2513,8 @@
 
   function populateYSelect() {
     const previousSelections = new Set(Array.from(ySelect.selectedOptions).map(o => o.value));
-    // Collect all numeric columns across logs.
-    const numericCols = new Set();
-    logs.forEach(l => {
-      l.cols.forEach(col => {
-        const sample = l.data.find(r => r[col] !== null && r[col] !== undefined && r[col] !== '');
-        if (sample) {
-          const val = sample[col];
-          if (typeof val === 'number') numericCols.add(col);
-          else if (!isNaN(Number(val))) numericCols.add(col);
-        }
-      });
-    });
-
-    // Determine which raw column names are covered by CHANNEL_MAP entries.
-    // A raw column is "covered" if a CHANNEL_MAP entry maps to it in at least one loaded log.
-    const coveredRawCols = new Set();
-    const activeMappings = []; // mappings that have at least one matching column
-    getChannelMap().forEach(mapping => {
-      let hasMatch = false;
-      logs.forEach(log => {
-        const col = resolveChannelForLog(mapping.displayName, log);
-        if (col && numericCols.has(col)) {
-          coveredRawCols.add(col);
-          hasMatch = true;
-        }
-      });
-      if (hasMatch) activeMappings.push(mapping);
-    });
-
-    // Build options: mapped display names first (sorted), then uncovered raw columns.
-    const mappedOptions = activeMappings.map(m => {
-      const unit = getUnitForChannel(m.displayName);
-      const label = unit ? `${m.displayName} [${unit}]` : m.displayName;
-      return `<option value="${escapeHtml(m.displayName)}">${escapeHtml(label)}</option>`;
-    });
-    const rawOptions = Array.from(numericCols).filter(c => !coveredRawCols.has(c)).sort().map(c => {
-      let unit = '';
-      for (const l of logs) { if (l.meta && l.meta.units && l.meta.units[c]) { unit = l.meta.units[c]; break; } }
-      const isMathCh = mathChannels.some(mc => mc.name === c);
-      const isPreview = c === quickModPreviewName;
-      const suffix = isPreview ? ' (preview)' : (isMathCh ? ' (math)' : '');
-      const label = unit ? `${c} [${unit}]${suffix}` : `${c}${suffix}`;
-      return `<option value="${escapeHtml(c)}">${escapeHtml(label)}</option>`;
-    });
-    ySelect.innerHTML = mappedOptions.concat(rawOptions).join('');
+    const entries = buildYSelectOptionEntries();
+    renderYSelectOptions(entries, previousSelections);
 
     const opts = Array.from(ySelect.options);
     const validPreviousSelections = new Set(Array.from(previousSelections).filter(value => opts.some(o => o.value === value)));
@@ -7782,6 +7759,12 @@
     renderSelectedChannelColorControls();
     updatePlot();
   });
+  if (ySelectSearch) {
+    // Rebuilding via populateYSelect() (rather than filtering in place) reuses its existing
+    // "preserve current selection" logic, so already-picked channels stay selected even
+    // when the search term would otherwise filter their <option> out of the list.
+    ySelectSearch.addEventListener('input', () => populateYSelect());
+  }
   if (selectedYColors) {
     selectedYColors.addEventListener('click', (ev) => {
       const target = ev.target instanceof Element ? ev.target : null;
