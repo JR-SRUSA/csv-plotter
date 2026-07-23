@@ -378,6 +378,113 @@
     return processed;
   }
 
+  // Parses attributes off a raw XML tag/element source string, e.g. turns
+  // `name="L1" unitsValue="" id="12"` into { name: 'L1', unitsValue: '', id: '12' }.
+  function parseXmlTagAttrs(tagSource) {
+    const attrs = {};
+    const re = /([\w:-]+)\s*=\s*"([^"]*)"/g;
+    let m;
+    while ((m = re.exec(tagSource || ''))) {
+      attrs[m[1]] = m[2];
+    }
+    return attrs;
+  }
+
+  // "Pressure (MPa)" -> "MPa" -- used as a fallback when a Component's unitsValue
+  // attribute is blank but its human-readable plotLabel still names the unit.
+  function unitFromPlotLabel(plotLabel) {
+    const m = /\(([^)]+)\)\s*$/.exec(plotLabel || '');
+    return m ? m[1].trim() : '';
+  }
+
+  // VIGrade .res files are XML (VI-CarRealTime/xrf schema), not delimited text, so they
+  // don't go through the tokenized-rows pipeline the rest of this file shares. The
+  // <StepMap> declares every logged channel as an <Entity>/<Component> pair with an "id"
+  // -- crucially, that id is NOT a foreign key to a matching <Data id="..."> element (the
+  // Data/Step "id"/"name" values are just a sequential save-set counter that coincidentally
+  // overlaps with low Component ids). Instead every <Data><Step> holds one flattened,
+  // whitespace-separated array of every channel's value at one time sample, and a
+  // Component's "id" is the 1-based *position* of its value within that array.
+  function parseVIGradeResChannelMap(xmlText) {
+    const stepMapMatch = /<StepMap\b[^>]*>([\s\S]*?)<\/StepMap>/.exec(xmlText);
+    const stepMapBody = stepMapMatch ? stepMapMatch[1] : '';
+
+    const channelsById = new Map();
+    const entityRe = /<Entity\b([^>]*)>([\s\S]*?)<\/Entity>/g;
+    let entityMatch;
+    while ((entityMatch = entityRe.exec(stepMapBody))) {
+      const entityAttrs = parseXmlTagAttrs(entityMatch[1]);
+      const entityBody = entityMatch[2];
+      const entityLabel = (entityAttrs.entity || entityAttrs.name || '').trim();
+      if (!entityLabel) continue;
+      const isTimeEntity = entityLabel.toLowerCase() === 'time';
+
+      const componentRe = /<Component\b([^>]*)\/>/g;
+      let componentMatch;
+      while ((componentMatch = componentRe.exec(entityBody))) {
+        const compAttrs = parseXmlTagAttrs(componentMatch[1]);
+        const id = parseInt(compAttrs.id, 10);
+        if (!Number.isFinite(id)) continue;
+
+        const componentName = (compAttrs.name || '').trim();
+        const colName = isTimeEntity ? 'Time' : `${entityLabel}.${componentName}`;
+        const unit = (compAttrs.unitsValue || '').trim() || unitFromPlotLabel(compAttrs.plotLabel);
+        channelsById.set(id, { colName, unit });
+      }
+    }
+    return channelsById;
+  }
+
+  function processVIGradeResXml(xmlText, details = {}) {
+    const source = details.source || 'VIGrade';
+    const format = details.format || 'VIGrade RES';
+    const metadata = details.metadata || {};
+
+    const channelsById = parseVIGradeResChannelMap(xmlText);
+    const idsInColOrder = Array.from(channelsById.keys()).sort((a, b) => a - b);
+
+    const cols = [];
+    const units = {};
+    idsInColOrder.forEach((id) => {
+      const { colName, unit } = channelsById.get(id);
+      if (!cols.includes(colName)) {
+        cols.push(colName);
+        units[colName] = unit;
+      }
+    });
+
+    const data = [];
+    const stepRe = /<Step\b[^>]*>([\s\S]*?)<\/Step>/g;
+    let stepMatch;
+    while ((stepMatch = stepRe.exec(xmlText))) {
+      const nums = stepMatch[1].split(/\s+/).filter(Boolean).map(Number);
+      if (!nums.length) continue;
+
+      const row = {};
+      idsInColOrder.forEach((id) => {
+        const { colName } = channelsById.get(id);
+        const v = nums[id - 1];
+        row[colName] = Number.isFinite(v) ? v : null;
+      });
+      data.push(row);
+    }
+
+    if (cols.includes('Time')) {
+      data.sort((a, b) => (a.Time ?? 0) - (b.Time ?? 0));
+    }
+
+    const meta = analyzeColumns(data, cols, units);
+    meta.units = units;
+    meta.source = source;
+    meta.format = format;
+    meta.metadata = metadata;
+    computeLaps(meta, metadata);
+
+    const processed = { data, cols, units, meta, source, format };
+    filterAllZeroColumns(processed);
+    return processed;
+  }
+
   // Racelogic VBOX ASCII export (see isVBoxFormat). Structurally nothing like the other
   // formats' "metadata rows then one header row" shape, so this bypasses
   // processRowsWithCurrentMethod entirely and builds data/cols/units from the [Unit] and
@@ -1439,6 +1546,7 @@
   window.LogFileProcessors = {
     processCsvRows,
     processCsvRowsWithDecoder,
+    processVIGradeResXml,
     AVAILABLE_DECODERS,
     isGPBikesFormat,
     isAiMFormat,
