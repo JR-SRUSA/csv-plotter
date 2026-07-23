@@ -309,6 +309,10 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .map-align-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
 .map-align-controls input{width:100%}
 .map-fit-info{margin-top:6px;font-size:12px;color:var(--text-muted);min-height:16px}
+.settings-io-hint{margin:0 0 8px;font-size:12px;color:var(--text-muted)}
+.settings-io-controls{display:flex;gap:8px;flex-wrap:wrap}
+.settings-io-status{margin-top:6px;font-size:12px;color:var(--text-muted);min-height:16px}
+.settings-io-status.is-error{color:var(--danger-text)}
 .controls-version{margin-top:16px;padding-top:12px;border-top:1px solid var(--border-dashed);font-size:12px;color:var(--text-muted)}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:var(--bg-surface);padding:12px;border-radius:6px;box-shadow:0 1px 4px var(--shadow-sm)}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:var(--bg-surface);padding:12px;border-radius:6px;box-shadow:0 1px 4px var(--shadow-sm);display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,20%);grid-template-areas:"plot maps";column-gap:12px;align-items:stretch;transition:background-color 0.15s ease}

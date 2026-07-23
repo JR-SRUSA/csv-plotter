@@ -58,6 +58,10 @@
   const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
   const downloadDisplayedDataBtn = document.getElementById('downloadDisplayedDataBtn');
+  const downloadSettingsBtn = document.getElementById('downloadSettingsBtn');
+  const uploadSettingsBtn = document.getElementById('uploadSettingsBtn');
+  const settingsFileInput = document.getElementById('settingsFileInput');
+  const settingsIoStatus = document.getElementById('settingsIoStatus');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -8045,6 +8049,123 @@
       if (dataFilters.length > 0) renderDataFiltersList();
     } catch {}
   })();
+
+  // localStorage keys that represent user-editable settings/preferences (as opposed to
+  // in-memory-only UI state, or the 'uiFlag7' easter-egg toggle) -- the set the User
+  // section's Download/Upload Settings buttons carry between browsers. Loaded log files
+  // themselves are deliberately excluded: they aren't persisted at all today, and a user
+  // switching browsers still has the original CSV/.res files to re-open there.
+  const SETTINGS_STORAGE_KEYS = [
+    'csvPlotterTheme',
+    'csv-plotter-panel-sizes',
+    'mathChannels',
+    'dataFiltersState',
+    'trackCornerMetadata',
+    'trackCornerOverrides',
+    'startFinishLineOverrides'
+  ];
+
+  function triggerJsonDownload(jsonString, filenamePrefix) {
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function setSettingsIoStatus(message, isError) {
+    if (!settingsIoStatus) return;
+    settingsIoStatus.textContent = message;
+    settingsIoStatus.classList.toggle('is-error', !!isError);
+  }
+
+  // Every SETTINGS_STORAGE_KEYS entry is JSON.stringify'd before being written to
+  // localStorage (applyTheme, saveMathChannels, saveDataFilters, resize-panels.js's
+  // saveSizes, etc.) -- except 'csvPlotterTheme', which app.js writes as a bare raw string
+  // ('dark'/'light', see applyTheme) so index.html's inline anti-flash-of-wrong-theme
+  // script can compare it directly. These two need different (de)serialization on the way
+  // in and out of the settings JSON, hence the special case below.
+  function readSettingValue(key) {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return undefined;
+    if (key === 'csvPlotterTheme') return raw;
+    try { return JSON.parse(raw); } catch { return undefined; }
+  }
+
+  function writeSettingValue(key, value) {
+    if (key === 'csvPlotterTheme') {
+      if (typeof value !== 'string') return false;
+      localStorage.setItem(key, value);
+      return true;
+    }
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  }
+
+  function downloadSettingsJson() {
+    const settings = {};
+    SETTINGS_STORAGE_KEYS.forEach((key) => {
+      const value = readSettingValue(key);
+      if (value !== undefined) settings[key] = value;
+    });
+    const payload = { app: 'csv-plotter-settings', version: 1, exportedAt: new Date().toISOString(), settings };
+    triggerJsonDownload(JSON.stringify(payload, null, 2), 'csv-plotter-settings');
+    setSettingsIoStatus('Settings downloaded.');
+  }
+
+  function importSettingsFromFile(file) {
+    if (typeof file.text !== 'function') {
+      setSettingsIoStatus('This browser cannot read that file.', true);
+      return;
+    }
+    file.text().then((text) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setSettingsIoStatus("Could not read that file -- not valid JSON.", true);
+        return;
+      }
+      if (!parsed || typeof parsed.settings !== 'object' || parsed.settings === null) {
+        setSettingsIoStatus("That file doesn't look like a csv-plotter settings export.", true);
+        return;
+      }
+      let applied = 0;
+      SETTINGS_STORAGE_KEYS.forEach((key) => {
+        if (!(key in parsed.settings)) return;
+        try {
+          if (writeSettingValue(key, parsed.settings[key])) applied += 1;
+        } catch { /* localStorage write failed (quota, etc.) -- skip this key */ }
+      });
+      if (applied === 0) {
+        setSettingsIoStatus('No recognized settings found in that file.', true);
+        return;
+      }
+      // A page reload is the simplest reliable way to apply imported settings: they're each
+      // restored by their own scattered init-time load (theme, math channels, data filters,
+      // resize-panels.js panel sizes, etc.) rather than one central "apply settings" path.
+      setSettingsIoStatus(`Imported ${applied} setting${applied === 1 ? '' : 's'}. Reloading...`);
+      setTimeout(() => location.reload(), 600);
+    }, () => {
+      setSettingsIoStatus('Failed to read that file.', true);
+    });
+  }
+
+  if (downloadSettingsBtn) {
+    downloadSettingsBtn.addEventListener('click', downloadSettingsJson);
+  }
+  if (uploadSettingsBtn && settingsFileInput) {
+    uploadSettingsBtn.addEventListener('click', () => settingsFileInput.click());
+    settingsFileInput.addEventListener('change', () => {
+      const file = settingsFileInput.files && settingsFileInput.files[0];
+      settingsFileInput.value = ''; // allow re-selecting the same file back-to-back
+      if (file) importSettingsFromFile(file);
+    });
+  }
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
