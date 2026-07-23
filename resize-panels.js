@@ -147,16 +147,22 @@
     );
 
     // Restore saved sizes
+    var restoredMapsWidth = null;
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         var sizes = JSON.parse(raw);
         if (sizes.sidebarWidth) controls.style.width = sizes.sidebarWidth + 'px';
-        if (sizes.mapsWidth) setMapsCols(sizes.mapsWidth);
+        if (sizes.mapsWidth) { setMapsCols(sizes.mapsWidth); restoredMapsWidth = sizes.mapsWidth; }
         if (sizes.plotHeight) plotDiv.style.height = sizes.plotHeight + 'px';
       }
     } catch (e) {}
-    savedMapsWidth = Math.round(mapsEl.getBoundingClientRect().width) || 280;
+    // Prefer the just-restored value over a live measurement: if the map column starts out
+    // hidden (no data loaded yet), .plot already has the no-map-column class and the grid
+    // has collapsed to a single column, so mapsEl's rendered width no longer reflects the
+    // width we just restored -- measuring it here would silently clobber that restored
+    // value with the collapsed-layout width before the map is ever shown.
+    savedMapsWidth = restoredMapsWidth || Math.round(mapsEl.getBoundingClientRect().width) || 280;
 
     // Sync to whatever visibility state app.js already applied to .plot before we
     // finished initializing (e.g. map hidden by default before this script's
