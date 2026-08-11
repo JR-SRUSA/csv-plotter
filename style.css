@@ -252,6 +252,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .math-ch-suggestion{padding:5px 10px;cursor:pointer;font-size:0.88em;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .math-ch-suggestion:hover,.math-ch-suggestion.active{background:var(--bg-hover)}
 .data-filters-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
+.file-upsampled-indicator{display:inline-flex;align-items:center;gap:4px;font-size:0.78em;color:var(--warning-text);background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:3px;padding:1px 6px;white-space:nowrap;flex:0 0 auto}
 .data-filters-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 .data-filter-add-btn{padding:2px 8px;font-size:0.82em}
 .data-filter-item{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px dashed var(--border-dashed);font-size:0.85em}
