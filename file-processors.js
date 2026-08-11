@@ -485,6 +485,155 @@
     return processed;
   }
 
+  function buildXmlTagRegex(localTag, flags = '') {
+    return new RegExp(`<(?:[\\w-]+:)?${localTag}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w-]+:)?${localTag}>`, flags);
+  }
+
+  function extractXmlTagText(xmlText, localTag) {
+    const re = buildXmlTagRegex(localTag);
+    const m = re.exec(String(xmlText || ''));
+    return m ? String(m[1] || '').trim() : '';
+  }
+
+  function extractXmlTagBlocks(xmlText, localTag) {
+    const re = buildXmlTagRegex(localTag, 'g');
+    const text = String(xmlText || '');
+    const out = [];
+    let m;
+    while ((m = re.exec(text))) out.push(String(m[1] || ''));
+    return out;
+  }
+
+  function parseGarminTcxXml(xmlText, details = {}) {
+    const source = details.source || 'Garmin TCX';
+    const format = details.format || 'Garmin TCX';
+    const metadata = details.metadata || {};
+
+    const activityMatch = /<Activity\b([^>]*)>([\s\S]*?)<\/Activity>/i.exec(String(xmlText || ''));
+    const activityAttrs = activityMatch ? parseXmlTagAttrs(activityMatch[1]) : {};
+    const activityBody = activityMatch ? activityMatch[2] : String(xmlText || '');
+
+    const lapRe = /<Lap\b([^>]*)>([\s\S]*?)<\/Lap>/ig;
+    const rows = [];
+    const lapDurations = [];
+    let lapMatch;
+    let lapCounter = 0;
+
+    while ((lapMatch = lapRe.exec(activityBody))) {
+      lapCounter += 1;
+      const lapAttrs = parseXmlTagAttrs(lapMatch[1]);
+      const lapBody = lapMatch[2] || '';
+
+      const lapTotal = toFiniteNumber(extractXmlTagText(lapBody, 'TotalTimeSeconds'));
+      lapDurations[lapCounter - 1] = Number.isFinite(lapTotal) ? lapTotal : null;
+
+      const trackpoints = extractXmlTagBlocks(lapBody, 'Trackpoint');
+      trackpoints.forEach((tp) => {
+        const timeRaw = extractXmlTagText(tp, 'Time');
+        const timeSec = parseTimeValue(timeRaw, 's');
+        const distance = toFiniteNumber(extractXmlTagText(tp, 'DistanceMeters'));
+        const altitude = toFiniteNumber(extractXmlTagText(tp, 'AltitudeMeters'));
+        const latitude = toFiniteNumber(extractXmlTagText(tp, 'LatitudeDegrees'));
+        const longitude = toFiniteNumber(extractXmlTagText(tp, 'LongitudeDegrees'));
+        const cadence = toFiniteNumber(extractXmlTagText(tp, 'Cadence'));
+        const speed = toFiniteNumber(extractXmlTagText(tp, 'Speed'));
+
+        const hrBlock = extractXmlTagText(tp, 'HeartRateBpm');
+        const heartRate = toFiniteNumber(extractXmlTagText(hrBlock, 'Value'));
+
+        rows.push({
+          __lap: lapCounter,
+          Time: Number.isFinite(timeSec) ? timeSec : timeRaw,
+          Distance: Number.isFinite(distance) ? distance : null,
+          Latitude: Number.isFinite(latitude) ? latitude : null,
+          Longitude: Number.isFinite(longitude) ? longitude : null,
+          Altitude: Number.isFinite(altitude) ? altitude : null,
+          'Heart Rate': Number.isFinite(heartRate) ? heartRate : null,
+          Cadence: Number.isFinite(cadence) ? cadence : null,
+          Speed: Number.isFinite(speed) ? speed : null
+        });
+      });
+    }
+
+    const cols = ['Time', 'Distance', 'Latitude', 'Longitude', 'Altitude', 'Heart Rate', 'Cadence', 'Speed']
+      .filter((col) => rows.some((row) => row[col] !== null && row[col] !== undefined && row[col] !== ''));
+
+    const units = {
+      Time: 's',
+      Distance: 'm',
+      Latitude: 'deg',
+      Longitude: 'deg',
+      Altitude: 'm',
+      'Heart Rate': 'bpm',
+      Cadence: 'rpm',
+      Speed: 'm/s'
+    };
+
+    const rowObjects = rows.map((row) => {
+      const out = {};
+      cols.forEach((col) => { out[col] = row[col]; });
+      return out;
+    });
+
+    const meta = analyzeColumns(rowObjects, cols, units);
+    meta.units = units;
+    meta.source = source;
+    meta.format = format;
+    meta.metadata = {
+      ...metadata,
+      sport: activityAttrs.Sport || '',
+      activityId: extractXmlTagText(activityBody, 'Id') || ''
+    };
+
+    if (rows.length > 0) {
+      const lapNum = [];
+      const lapTime = [];
+      const lapRelDist = [];
+      const lapStartTimeByLap = new Map();
+      const lapStartDistByLap = new Map();
+
+      for (let i = 0; i < rows.length; i++) {
+        const lap = Number(rows[i].__lap) || 1;
+        const tiRaw = Array.isArray(meta._time) ? meta._time[i] : null;
+        const diRaw = Array.isArray(meta._dist) ? meta._dist[i] : null;
+        const ti = Number.isFinite(tiRaw) ? tiRaw : (i > 0 ? lapTime[i - 1] : 0);
+        const di = Number.isFinite(diRaw) ? diRaw : (i > 0 ? (lapRelDist[i - 1] + (lapStartDistByLap.get(lap) || 0)) : 0);
+
+        if (!lapStartTimeByLap.has(lap)) lapStartTimeByLap.set(lap, ti);
+        if (!lapStartDistByLap.has(lap)) lapStartDistByLap.set(lap, di);
+
+        lapNum.push(lap);
+        lapTime.push(Math.max(0, ti - lapStartTimeByLap.get(lap)));
+        lapRelDist.push(di - lapStartDistByLap.get(lap));
+      }
+
+      const finalLapDurations = [];
+      const maxLap = Math.max(...lapNum);
+      for (let lap = 1; lap <= maxLap; lap++) {
+        const configured = lapDurations[lap - 1];
+        if (Number.isFinite(configured)) {
+          finalLapDurations[lap - 1] = configured;
+          continue;
+        }
+        let lastIdx = -1;
+        for (let i = lapNum.length - 1; i >= 0; i--) {
+          if (lapNum[i] === lap) { lastIdx = i; break; }
+        }
+        finalLapDurations[lap - 1] = lastIdx >= 0 ? lapTime[lastIdx] : null;
+      }
+
+      meta.lapNum = lapNum;
+      meta.lapTime = lapTime;
+      meta.lapRelDist = lapRelDist;
+      meta.lapDurations = finalLapDurations;
+      computeCrashFlags(meta);
+    } else {
+      computeLaps(meta, meta.metadata);
+    }
+
+    return { data: rowObjects, cols, units, meta, source, format };
+  }
+
   // Racelogic VBOX ASCII export (see isVBoxFormat). Structurally nothing like the other
   // formats' "metadata rows then one header row" shape, so this bypasses
   // processRowsWithCurrentMethod entirely and builds data/cols/units from the [Unit] and
@@ -1499,6 +1648,7 @@
     { name: 'AiM', label: 'AiM' },
     { name: 'MoTeC', label: 'MoTeC' },
     { name: 'VIGrade', label: 'VIGrade' },
+    { name: 'Garmin TCX', label: 'Garmin TCX' },
     { name: 'ScanMyTesla', label: 'ScanMyTesla' },
     { name: 'VBOX', label: 'VBOX' },
     { name: 'Standard', label: 'Standard CSV' },
@@ -1547,6 +1697,7 @@
     processCsvRows,
     processCsvRowsWithDecoder,
     processVIGradeResXml,
+    parseGarminTcxXml,
     AVAILABLE_DECODERS,
     isGPBikesFormat,
     isAiMFormat,

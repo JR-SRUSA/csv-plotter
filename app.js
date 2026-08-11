@@ -1644,6 +1644,9 @@
     const normalizedNumeric = Number(normalized);
     if (Number.isFinite(normalizedNumeric)) return normalizedNumeric * scale;
 
+    const parsedEpochMs = Date.parse(normalized);
+    if (!Number.isNaN(parsedEpochMs)) return parsedEpochMs / 1000;
+
     // Supports mm:ss(.sss) and hh:mm:ss(.sss), with optional leading sign.
     if (!/^-?\d+(?::\d{1,2}){1,2}(?:\.\d+)?$/.test(normalized)) return null;
     const sign = normalized.startsWith('-') ? -1 : 1;
@@ -1689,10 +1692,103 @@
     }
   }
 
-  function downsampleProcessedByFrequency(processed, targetHz) {
+  function buildNaturalCubicSpline(xs, ys) {
+    const n = xs.length;
+    if (n < 3) return null;
+
+    const a = ys.slice();
+    const b = new Array(n - 1).fill(0);
+    const c = new Array(n).fill(0);
+    const d = new Array(n - 1).fill(0);
+    const h = new Array(n - 1).fill(0);
+
+    for (let i = 0; i < n - 1; i++) {
+      h[i] = xs[i + 1] - xs[i];
+      if (h[i] <= 0) return null;
+    }
+
+    const alpha = new Array(n).fill(0);
+    for (let i = 1; i < n - 1; i++) {
+      alpha[i] = (3 / h[i]) * (a[i + 1] - a[i]) - (3 / h[i - 1]) * (a[i] - a[i - 1]);
+    }
+
+    const l = new Array(n).fill(0);
+    const mu = new Array(n).fill(0);
+    const z = new Array(n).fill(0);
+    l[0] = 1;
+    for (let i = 1; i < n - 1; i++) {
+      l[i] = 2 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1];
+      if (Math.abs(l[i]) <= 1e-12) return null;
+      mu[i] = h[i] / l[i];
+      z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+    }
+    l[n - 1] = 1;
+    c[n - 1] = 0;
+
+    for (let j = n - 2; j >= 0; j--) {
+      c[j] = z[j] - mu[j] * c[j + 1];
+      b[j] = (a[j + 1] - a[j]) / h[j] - (h[j] * (c[j + 1] + 2 * c[j])) / 3;
+      d[j] = (c[j + 1] - c[j]) / (3 * h[j]);
+    }
+
+    return { x: xs, a, b, c, d };
+  }
+
+  function evaluateNaturalCubicSpline(spline, xq) {
+    const xs = spline.x;
+    const n = xs.length;
+    if (xq <= xs[0]) return spline.a[0];
+    if (xq >= xs[n - 1]) return spline.a[n - 1];
+
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xs[mid] <= xq) lo = mid;
+      else hi = mid;
+    }
+
+    const dx = xq - xs[lo];
+    return spline.a[lo] + spline.b[lo] * dx + spline.c[lo] * dx * dx + spline.d[lo] * dx * dx * dx;
+  }
+
+  function evaluateLinear(xs, ys, xq) {
+    const n = xs.length;
+    if (n === 0) return null;
+    if (n === 1) return ys[0];
+    if (xq <= xs[0]) return ys[0];
+    if (xq >= xs[n - 1]) return ys[n - 1];
+
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (xs[mid] <= xq) lo = mid;
+      else hi = mid;
+    }
+
+    const x0 = xs[lo], x1 = xs[hi], y0 = ys[lo], y1 = ys[hi];
+    if (!Number.isFinite(x0) || !Number.isFinite(x1) || x1 === x0) return y0;
+    const ratio = (xq - x0) / (x1 - x0);
+    return y0 + (y1 - y0) * ratio;
+  }
+
+  function resampleProcessedByFrequency(processed, targetHz) {
     const hz = Number(targetHz);
     if (!Number.isFinite(hz) || hz <= 0) return;
     if (!processed || !Array.isArray(processed.data) || !processed.meta || processed.data.length < 3) return;
+
+    const originalData = processed.data.slice();
+    const originalCols = Array.isArray(processed.cols) ? processed.cols.slice() : [];
+    const originalLapNum = Array.isArray(processed.meta.lapNum) && processed.meta.lapNum.length === originalData.length
+      ? processed.meta.lapNum.slice()
+      : null;
+    const originalLapTime = Array.isArray(processed.meta.lapTime) && processed.meta.lapTime.length === originalData.length
+      ? processed.meta.lapTime.slice()
+      : null;
+    const originalLapRelDist = Array.isArray(processed.meta.lapRelDist) && processed.meta.lapRelDist.length === originalData.length
+      ? processed.meta.lapRelDist.slice()
+      : null;
 
     const timeCol = processed.meta.timeCol;
     let axisValues = null;
@@ -1707,36 +1803,139 @@
     }
     if (!Array.isArray(axisValues) || axisValues.length !== processed.data.length) return;
 
+    const finiteTime = axisValues.filter((v) => Number.isFinite(Number(v))).map(Number);
+    if (finiteTime.length < 2) return;
+    const tStart = finiteTime[0];
+    const tEnd = finiteTime[finiteTime.length - 1];
+    if (!(tEnd > tStart)) return;
+
     const sourceHz = estimateFrequencyHzFromAxisValues(axisValues);
-    if (Number.isFinite(sourceHz) && hz >= sourceHz) return;
+    if (Number.isFinite(sourceHz)) {
+      const ratioDiff = Math.abs(hz - sourceHz) / sourceHz;
+      if (ratioDiff < 0.02) return;
+    }
+    processed.meta.importResampleHz = hz;
+    processed.meta.importUpsampled = Number.isFinite(sourceHz) ? hz > sourceHz : null;
+    processed.meta.importResampleMethod = 'b-spline';
 
-    const minStep = 1 / hz;
-    const keepIndices = [];
-    let lastKeptTime = null;
+    const step = 1 / hz;
+    const grid = [];
+    for (let t = tStart; t <= tEnd + step * 0.5; t += step) {
+      grid.push(Number(t.toFixed(6)));
+    }
+    if (grid.length < 2) return;
 
-    for (let i = 0; i < axisValues.length; i++) {
-      const t = Number(axisValues[i]);
-      if (!Number.isFinite(t)) continue;
-      if (lastKeptTime === null || (t - lastKeptTime) >= minStep) {
-        keepIndices.push(i);
-        lastKeptTime = t;
+    const cols = originalCols.slice();
+    const units = (processed.units && typeof processed.units === 'object') ? processed.units : {};
+    const newRows = grid.map((t) => ({ [timeCol]: t }));
+
+    cols.forEach((col) => {
+      if (col === timeCol) return;
+      const xs = [];
+      const ys = [];
+      for (let i = 0; i < processed.data.length; i++) {
+        const tx = Number(axisValues[i]);
+        const vy = Number(processed.data[i][col]);
+        if (!Number.isFinite(tx) || !Number.isFinite(vy)) continue;
+        const last = xs.length - 1;
+        if (last >= 0 && Math.abs(xs[last] - tx) <= 1e-9) {
+          ys[last] = vy;
+        } else {
+          xs.push(tx);
+          ys.push(vy);
+        }
       }
+      if (xs.length === 0) return;
+
+      const spline = buildNaturalCubicSpline(xs, ys);
+      for (let i = 0; i < grid.length; i++) {
+        const xq = grid[i];
+        const yq = spline ? evaluateNaturalCubicSpline(spline, xq) : evaluateLinear(xs, ys, xq);
+        newRows[i][col] = Number.isFinite(yq) ? yq : null;
+      }
+    });
+
+    processed.data.splice(0, processed.data.length, ...newRows);
+    if (timeCol) units[timeCol] = 's';
+    processed.units = units;
+    processed.meta._time = grid;
+    if (processed.meta.timeCol) processed.meta.timeCol = timeCol;
+
+    const distCol = processed.meta && processed.meta.distCol;
+    if (distCol && cols.includes(distCol)) {
+      processed.meta._dist = processed.data.map((row) => {
+        const n = Number(row[distCol]);
+        return Number.isFinite(n) ? n : null;
+      });
     }
 
-    const lastIndex = processed.data.length - 1;
-    if (keepIndices.length === 0 || keepIndices[keepIndices.length - 1] !== lastIndex) {
-      keepIndices.push(lastIndex);
-    }
-    if (keepIndices.length < 2 || keepIndices.length >= processed.data.length) return;
+    if (originalLapNum && originalLapTime && Array.isArray(axisValues)) {
+      const lapStartTimeByLap = new Map();
+      const lapStartDistByLap = new Map();
+      const lapStartIndexByLap = new Map();
+      for (let i = 0; i < originalLapNum.length; i++) {
+        const lap = originalLapNum[i];
+        const t = Number(axisValues[i]);
+        if (Number.isFinite(t) && !lapStartTimeByLap.has(lap)) {
+          lapStartTimeByLap.set(lap, t);
+          lapStartIndexByLap.set(lap, i);
+        }
+        if (originalLapRelDist && Number.isFinite(Number(originalLapRelDist[i])) && !lapStartDistByLap.has(lap)) {
+          lapStartDistByLap.set(lap, Number(originalLapRelDist[i]));
+        }
+      }
 
-    const originalLength = processed.data.length;
-    const downsampledRows = keepIndices.map((idx) => processed.data[idx]);
-    processed.data.splice(0, processed.data.length, ...downsampledRows);
+      const newLapNum = new Array(grid.length).fill(1);
+      const newLapTime = new Array(grid.length).fill(null);
+      const newLapRelDist = Array.isArray(processed.meta._dist) ? new Array(grid.length).fill(null) : null;
+      const sortedTimes = grid.slice();
+      const sortedOriginal = axisValues.map((t, i) => ({ t: Number(t), lap: originalLapNum[i] }))
+        .filter((entry) => Number.isFinite(entry.t))
+        .sort((a, b) => a.t - b.t);
+
+      const findLapAtTime = (t) => {
+        let lo = 0;
+        let hi = sortedOriginal.length - 1;
+        if (sortedOriginal.length === 0) return 1;
+        if (t <= sortedOriginal[0].t) return sortedOriginal[0].lap;
+        if (t >= sortedOriginal[hi].t) return sortedOriginal[hi].lap;
+        while (hi - lo > 1) {
+          const mid = Math.floor((lo + hi) / 2);
+          if (sortedOriginal[mid].t <= t) lo = mid;
+          else hi = mid;
+        }
+        return sortedOriginal[lo].lap;
+      };
+
+      for (let i = 0; i < sortedTimes.length; i++) {
+        const t = Number(sortedTimes[i]);
+        if (!Number.isFinite(t)) continue;
+        const lap = findLapAtTime(t);
+        newLapNum[i] = lap;
+        const startT = lapStartTimeByLap.get(lap);
+        if (Number.isFinite(startT)) newLapTime[i] = Math.max(0, t - startT);
+        if (newLapRelDist && distCol && processed.cols.includes(distCol)) {
+          const dist = Number(processed.data[i][distCol]);
+          const startD = lapStartDistByLap.get(lap);
+          if (Number.isFinite(dist) && Number.isFinite(startD)) newLapRelDist[i] = dist - startD;
+        }
+      }
+
+      processed.meta.lapNum = newLapNum;
+      processed.meta.lapTime = newLapTime;
+      if (newLapRelDist) processed.meta.lapRelDist = newLapRelDist;
+      const maxLap = Math.max(...newLapNum);
+      processed.meta.lapDurations = Array.from({ length: maxLap }, (_, idx) => {
+        const lap = idx + 1;
+        const values = newLapTime.filter((v, i) => newLapNum[i] === lap && Number.isFinite(v));
+        return values.length > 0 ? Math.max(...values) : null;
+      });
+    }
 
     Object.keys(processed.meta).forEach((key) => {
+      if (key === '_time' || key === '_dist' || key === 'lapNum' || key === 'lapTime' || key === 'lapRelDist' || key === 'lapDurations') return;
       const value = processed.meta[key];
-      if (!Array.isArray(value) || value.length !== originalLength) return;
-      processed.meta[key] = keepIndices.map((idx) => value[idx]);
+      if (Array.isArray(value)) delete processed.meta[key];
     });
   }
 
@@ -1792,7 +1991,7 @@
       dataFrequencyHz: null,
       downsampleHz: existing && Number.isFinite(Number(existing.downsampleHz)) && Number(existing.downsampleHz) > 0
         ? Number(existing.downsampleHz)
-        : null,
+        : (decoderName === 'Garmin TCX' ? 10 : null),
       channels,
       filters
     };
@@ -2010,7 +2209,7 @@
     });
 
     if (Number.isFinite(config.downsampleHz) && config.downsampleHz > 0) {
-      downsampleProcessedByFrequency(processed, config.downsampleHz);
+      resampleProcessedByFrequency(processed, config.downsampleHz);
     }
     processed.meta.importDownsampleHz = Number.isFinite(config.downsampleHz) && config.downsampleHz > 0
       ? config.downsampleHz
@@ -2043,6 +2242,16 @@
       meta.customImporter = normalizedCustomImporter;
     } else {
       delete meta.customImporter;
+    }
+
+    const defaultImportResampleHz = decoderName === 'Garmin TCX' ? 10 : null;
+    const configuredImportResampleHz = normalizedCustomImporter && Number.isFinite(Number(normalizedCustomImporter.downsampleHz)) && Number(normalizedCustomImporter.downsampleHz) > 0
+      ? Number(normalizedCustomImporter.downsampleHz)
+      : null;
+    const importResampleHz = configuredImportResampleHz || defaultImportResampleHz;
+    if (Number.isFinite(importResampleHz) && importResampleHz > 0) {
+      resampleProcessedByFrequency({ data, cols, units, meta }, importResampleHz);
+      meta.importDownsampleHz = importResampleHz;
     }
 
     const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
@@ -2082,9 +2291,10 @@
     meta.lapNum = lapNum;
     meta.lapTime = lapTime;
 
+    deriveAndExposeMapXY(data, cols, meta);
+    addGpsDerivedDynamicsChannels(data, cols, meta);
     addCalculatedCommonChannels(data, cols, meta);
     addCurvatureChannel(data, cols, meta);
-    deriveAndExposeMapXY(data, cols, meta);
     applyAllMathChannelsToLog({ data, cols, meta });
 
     // expose lap columns in data rows and cols list
@@ -2120,14 +2330,34 @@
     if (logIdx < 0) return false;
 
     const log = logs[logIdx];
-    if (!log.rawRows || !window.LogFileProcessors || typeof window.LogFileProcessors.processCsvRowsWithDecoder !== 'function') {
+    const LP = window.LogFileProcessors;
+    if (!LP) {
       console.error('Decoder reprocess unavailable for log:', log && log.name ? log.name : logId);
       return false;
     }
 
     let processed, builtRecord;
     try {
-      processed = window.LogFileProcessors.processCsvRowsWithDecoder(log.rawRows, decoderName);
+      const rawInput = log.rawRows;
+      const rawRows = Array.isArray(rawInput)
+        ? rawInput
+        : (rawInput && rawInput.kind === 'csvRows' && Array.isArray(rawInput.rows) ? rawInput.rows : null);
+
+      if (rawRows) {
+        if (typeof LP.processCsvRowsWithDecoder !== 'function') {
+          console.error('CSV decoder reprocess unavailable for log:', log.name);
+          return false;
+        }
+        processed = LP.processCsvRowsWithDecoder(rawRows, decoderName);
+      } else if (rawInput && rawInput.kind === 'tcxXml' && typeof LP.parseGarminTcxXml === 'function') {
+        processed = LP.parseGarminTcxXml(rawInput.text || '');
+      } else if (rawInput && rawInput.kind === 'resXml' && typeof LP.processVIGradeResXml === 'function') {
+        processed = LP.processVIGradeResXml(rawInput.text || '');
+      } else {
+        console.error('Decoder reprocess unavailable for log:', log.name);
+        return false;
+      }
+
       if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
         console.error('Decoder reprocess returned invalid data for log:', log.name, 'decoder:', decoderName);
         return false;
@@ -2178,16 +2408,19 @@
   }
 
   // Shared tail end of file ingestion: wraps a processed {data,cols,units,meta} result into
-  // a log record and wires it into the UI. Used by both the CSV/PapaParse path and the
-  // VIGrade .res XML path below.
-  function addProcessedLog(file, processed, rawRows) {
+  // a log record and wires it into the UI. rawInput is either:
+  //   { kind:'csvRows', rows:[...] } for delimited files
+  //   { kind:'resXml', text:'...' } for VIGrade RES XML
+  //   { kind:'tcxXml', text:'...' } for Garmin TCX XML
+  // or null for synthetic/runtime-generated logs.
+  function addProcessedLog(file, processed, rawInput) {
     if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols)) {
       console.error('Failed to process file:', file.name);
       return;
     }
 
     const id = idForName(file.name);
-    const newLog = buildLogRecord(id, file.name, processed, rawRows);
+    const newLog = buildLogRecord(id, file.name, processed, rawInput);
     const savedStartFinishLine = getStartFinishLineForLog(newLog);
     if (savedStartFinishLine) {
       applyStartFinishLineToLog(newLog, { p1: savedStartFinishLine.p1, p2: savedStartFinishLine.p2 });
@@ -2204,6 +2437,21 @@
   function parseFile(file) {
     const processors = window.LogFileProcessors;
 
+    // Garmin TCX files are XML activity exports with explicit Lap/Trackpoint nodes.
+    if (/\.tcx$/i.test(file.name || '')) {
+      if (typeof file.text !== 'function' || !processors || typeof processors.parseGarminTcxXml !== 'function') {
+        console.error('Missing LogFileProcessors.parseGarminTcxXml; cannot parse file:', file.name);
+        return;
+      }
+      file.text().then((text) => {
+        const processed = processors.parseGarminTcxXml(text);
+        addProcessedLog(file, processed, { kind: 'tcxXml', text });
+      }, () => {
+        console.error('Failed to read .tcx file:', file.name);
+      });
+      return;
+    }
+
     // VIGrade .res files are XML (VI-CarRealTime/xrf schema) simulation results, not
     // delimited text -- they need their own reader instead of PapaParse tokenization.
     if (/\.res$/i.test(file.name || '')) {
@@ -2213,7 +2461,7 @@
       }
       file.text().then((text) => {
         const processed = processors.processVIGradeResXml(text);
-        addProcessedLog(file, processed, null);
+        addProcessedLog(file, processed, { kind: 'resXml', text });
       }, () => {
         console.error('Failed to read .res file:', file.name);
       });
@@ -2236,7 +2484,7 @@
         }
 
         const processed = window.LogFileProcessors.processCsvRows(rows, { delimiter: detectedDelimiter });
-        addProcessedLog(file, processed, rows);
+        addProcessedLog(file, processed, { kind: 'csvRows', rows });
       }
     };
 
@@ -2297,6 +2545,13 @@
       linePreview.innerHTML = `<svg viewBox="0 0 44 8" aria-hidden="true" focusable="false"><line x1="1" y1="4" x2="43" y2="4" stroke="currentColor" stroke-width="2" stroke-linecap="round"${dashArray ? ` stroke-dasharray="${dashArray}"` : ''}></line></svg>`;
       nameWrap.appendChild(name);
       nameWrap.appendChild(linePreview);
+      if (log.meta && log.meta.importUpsampled) {
+        const upsampleBadge = document.createElement('span');
+        upsampleBadge.className = 'file-upsampled-indicator';
+        upsampleBadge.textContent = '⚠ 10 Hz';
+        upsampleBadge.title = 'Upsampled to 10 Hz with B-splines';
+        nameWrap.appendChild(upsampleBadge);
+      }
       label.appendChild(checkbox);
       label.appendChild(nameWrap);
 
@@ -2858,6 +3113,13 @@
     });
   }
 
+  function applyRowFiltersToMask(log, maskIdx, resolvedDataFilters) {
+    return maskIdx.filter((i) => {
+      if (resolvedDataFilters.length > 0 && !rowPassesDataFilters(log, i, resolvedDataFilters)) return false;
+      return true;
+    });
+  }
+
   // Aggregates every currently displayed row -- lap-selected, data-filter-passing --
   // across ALL currently selected files into one set of bins per Y channel, giving a
   // single point per bin (the mean of everything that landed there). This is deliberately
@@ -2866,19 +3128,16 @@
   // same X) into one clean curve, drawn as an extra overlay trace rather than stored as data.
   function computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, axisChannel, binWidth, channelToRef) {
     if (!axisChannel || !(binWidth > 0) || ycols.length === 0) return [];
-    const enabledFilters = getEnabledDataFilters();
-    const bins = new Map(); // channel -> Map(binKey -> {xSum, ySum, count})
     ycols.forEach(y => bins.set(y, new Map()));
 
     selFiles.forEach((log) => {
       const axisResolvedCol = resolveChannelForLog(axisChannel, log);
-      if (!axisResolvedCol || !log.cols.includes(axisResolvedCol)) return;
       const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
       const lapNumArr = log.meta.lapNum || [];
       const resolvedYCols = ycols.map(y => resolveChannelForLog(y, log));
 
       log.data.forEach((row, i) => {
-        if (!isLapSelected(selectedLaps, log.id, lapNumArr[i])) return;
+        maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
         if (activeFilters.length > 0 && !rowPassesDataFilters(log, i, activeFilters)) return;
         const x = Number(row[axisResolvedCol]);
         if (!Number.isFinite(x)) return;
@@ -3744,6 +4003,180 @@
     }
   }
 
+  function addGpsDerivedDynamicsChannels(data, cols, meta) {
+    if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
+    if (!cols.includes(DERIVED_MAP_X_COL) || !cols.includes(DERIVED_MAP_Y_COL)) return;
+
+    const mappingContext = { meta };
+    const useIsoVehicleLatAxis = meta && meta.format === 'Garmin TCX';
+    const speedCol = resolveChannelForLog('Speed', mappingContext);
+    const timeCol = meta.timeCol;
+    const speedUnit = meta.units && speedCol ? (meta.units[speedCol] || '') : '';
+    const calc = getRacingLineCalculationsApi();
+
+    const signedCurvatureFromPoints = (prev, curr, next) => {
+      if (!prev || !curr || !next) return null;
+      const a = Math.hypot(curr.x - prev.x, curr.y - prev.y);
+      const b = Math.hypot(next.x - curr.x, next.y - curr.y);
+      const c = Math.hypot(next.x - prev.x, next.y - prev.y);
+      if (!(a > 1e-6 && b > 1e-6 && c > 1e-6)) return null;
+      const twiceArea = (curr.x - prev.x) * (next.y - prev.y) - (curr.y - prev.y) * (next.x - prev.x);
+      const curvature = twiceArea / (a * b * c);
+      return Number.isFinite(curvature) ? curvature : null;
+    };
+
+    // Garmin TCX gets a whole-lap periodic spline fit first, then we sample that smooth
+    // curve for curvature so the result is driven by the lap as a whole rather than raw
+    // neighboring points. If the fit cannot be built, we fall back to the local estimate.
+    const buildWholeLapCurvatureValues = () => {
+      if (!calc || meta.format !== 'Garmin TCX') return null;
+      if (typeof calc.buildWholeCircuitFit !== 'function' || typeof calc.evalPeriodicBSpline !== 'function') return null;
+      if (!Array.isArray(meta.lapNum) || !Array.isArray(meta.lapRelDist) || meta.lapNum.length !== data.length) return null;
+
+      const mapSource = getMapSourceForLog({ data, cols, meta });
+      if (!mapSource || typeof mapSource.xAt !== 'function' || typeof mapSource.yAt !== 'function') return null;
+
+      const lapGroups = new Map();
+      for (let i = 0; i < data.length; i++) {
+        const lap = Number(meta.lapNum[i]);
+        const dist = Number(meta.lapRelDist[i]);
+        const x = Number(mapSource.xAt(i));
+        const y = Number(mapSource.yAt(i));
+        if (!Number.isFinite(lap) || !Number.isFinite(dist) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (!lapGroups.has(lap)) lapGroups.set(lap, []);
+        lapGroups.get(lap).push({ index: i, dist });
+      }
+      if (lapGroups.size === 0) return null;
+
+      const fitWeights = { alpha: RACING_LINE_DEFAULT_WEIGHTS.alpha, beta: RACING_LINE_DEFAULT_WEIGHTS.beta };
+      const fitOptions = {};
+      const deps = { getMapSourceForLog };
+      const constants = { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS };
+      const values = new Array(data.length).fill(null);
+
+      lapGroups.forEach((rows, lap) => {
+        if (rows.length < 20) return;
+        const fit = calc.buildWholeCircuitFit({ data, cols, meta }, lap, fitWeights, fitOptions, deps, constants);
+        if (!fit || !fit.control || !Number.isFinite(fit.control.period)) return;
+
+        const period = fit.control.period;
+        const delta = Math.max(1, Math.min(3, period / Math.max(200, rows.length)));
+        rows.forEach(({ index, dist }) => {
+          const prev = calc.evalPeriodicBSpline(fit.control, dist - delta);
+          const curr = calc.evalPeriodicBSpline(fit.control, dist);
+          const next = calc.evalPeriodicBSpline(fit.control, dist + delta);
+          const curvature = signedCurvatureFromPoints(prev, curr, next);
+          if (Number.isFinite(curvature)) values[index] = curvature;
+        });
+      });
+
+      return values.some(Number.isFinite) ? values : null;
+    };
+
+    const toMps = (speedVal) => {
+      const v = Number(speedVal);
+      if (!Number.isFinite(v)) return null;
+      const unit = String(speedUnit || '').toLowerCase();
+      if (unit.includes('km/h') || unit === 'kph') return v / 3.6;
+      if (unit.includes('mph')) return v * 0.44704;
+      if (unit.includes('m/s') || unit.includes('mps')) return v;
+      // Default to m/s for unknown speed units.
+      return v;
+    };
+
+    const curvatureVals = new Array(data.length).fill(null);
+    const latAccVals = new Array(data.length).fill(null);
+    const longAccVals = new Array(data.length).fill(null);
+
+    const wholeLapCurvatureVals = buildWholeLapCurvatureValues();
+    if (wholeLapCurvatureVals) {
+      for (let i = 0; i < curvatureVals.length; i++) {
+        if (Number.isFinite(wholeLapCurvatureVals[i])) curvatureVals[i] = wholeLapCurvatureVals[i];
+      }
+    }
+
+    for (let i = 1; i < data.length - 1; i++) {
+      if (Number.isFinite(curvatureVals[i])) continue;
+      const x0 = Number(data[i - 1][DERIVED_MAP_X_COL]);
+      const y0 = Number(data[i - 1][DERIVED_MAP_Y_COL]);
+      const x1 = Number(data[i][DERIVED_MAP_X_COL]);
+      const y1 = Number(data[i][DERIVED_MAP_Y_COL]);
+      const x2 = Number(data[i + 1][DERIVED_MAP_X_COL]);
+      const y2 = Number(data[i + 1][DERIVED_MAP_Y_COL]);
+      if (![x0, y0, x1, y1, x2, y2].every(Number.isFinite)) continue;
+
+      const a = Math.hypot(x1 - x0, y1 - y0);
+      const b = Math.hypot(x2 - x1, y2 - y1);
+      const c = Math.hypot(x2 - x0, y2 - y0);
+      if (!(a > 1e-6 && b > 1e-6 && c > 1e-6)) continue;
+      const twiceArea = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+      const curvature = twiceArea / (a * b * c);
+      curvatureVals[i] = Number.isFinite(curvature) ? curvature : null;
+    }
+
+    if (data.length > 1) {
+      if (!Number.isFinite(curvatureVals[0])) curvatureVals[0] = curvatureVals[1];
+      if (!Number.isFinite(curvatureVals[data.length - 1])) curvatureVals[data.length - 1] = curvatureVals[data.length - 2];
+    }
+
+    if (speedCol && cols.includes(speedCol)) {
+      for (let i = 0; i < data.length; i++) {
+        const vMps = toMps(data[i][speedCol]);
+        const k = curvatureVals[i];
+        if (!Number.isFinite(vMps) || !Number.isFinite(k)) continue;
+        const latAcc = (vMps * vMps * k) / 9.81;
+        // ISO vehicle axis uses +Y to the left. For Garmin-derived GPS dynamics,
+        // enforce that convention explicitly (left turn = positive lateral accel).
+        latAccVals[i] = useIsoVehicleLatAxis ? -latAcc : latAcc;
+      }
+    }
+
+    if (speedCol && cols.includes(speedCol) && timeCol && cols.includes(timeCol)) {
+      for (let i = 1; i < data.length - 1; i++) {
+        const tPrev = parseTimeLikeSeconds(data[i - 1][timeCol], meta.units ? (meta.units[timeCol] || '') : '');
+        const tNext = parseTimeLikeSeconds(data[i + 1][timeCol], meta.units ? (meta.units[timeCol] || '') : '');
+        const vPrev = toMps(data[i - 1][speedCol]);
+        const vNext = toMps(data[i + 1][speedCol]);
+        if (![tPrev, tNext, vPrev, vNext].every(Number.isFinite)) continue;
+        const dt = tNext - tPrev;
+        if (!(dt > 1e-6)) continue;
+        longAccVals[i] = ((vNext - vPrev) / dt) / 9.81;
+      }
+      if (data.length > 1) {
+        longAccVals[0] = longAccVals[1];
+        longAccVals[data.length - 1] = longAccVals[data.length - 2];
+      }
+    }
+
+    const hasCurvature = cols.includes('Curvature') && data.some((row) => Number.isFinite(Number(row['Curvature'])));
+    const hasLatAcc = cols.includes(COMMON_LAT_ACC_CHANNEL) && data.some((row) => Number.isFinite(Number(row[COMMON_LAT_ACC_CHANNEL])));
+    const hasLongAcc = cols.includes(COMMON_LONG_ACC_CHANNEL) && data.some((row) => Number.isFinite(Number(row[COMMON_LONG_ACC_CHANNEL])));
+
+    if (!hasCurvature && curvatureVals.some(Number.isFinite)) {
+      if (!cols.includes('Curvature')) cols.push('Curvature');
+      data.forEach((row, i) => { row['Curvature'] = Number.isFinite(curvatureVals[i]) ? curvatureVals[i] : null; });
+      if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+      meta.units['Curvature'] = '1/m';
+    }
+
+    if (!hasLatAcc && latAccVals.some(Number.isFinite)) {
+      if (!cols.includes(COMMON_LAT_ACC_CHANNEL)) cols.push(COMMON_LAT_ACC_CHANNEL);
+      data.forEach((row, i) => { row[COMMON_LAT_ACC_CHANNEL] = Number.isFinite(latAccVals[i]) ? latAccVals[i] : null; });
+      if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+      meta.units[COMMON_LAT_ACC_CHANNEL] = 'g';
+      if (useIsoVehicleLatAxis) {
+        meta.latAccPositiveDirection = 'left';
+      }
+    }
+
+    if (!hasLongAcc && longAccVals.some(Number.isFinite)) {
+      if (!cols.includes(COMMON_LONG_ACC_CHANNEL)) cols.push(COMMON_LONG_ACC_CHANNEL);
+      data.forEach((row, i) => { row[COMMON_LONG_ACC_CHANNEL] = Number.isFinite(longAccVals[i]) ? longAccVals[i] : null; });
+      if (!meta.units || typeof meta.units !== 'object') meta.units = {};
+      meta.units[COMMON_LONG_ACC_CHANNEL] = 'g';
+    }
+  }
+
   function addCalculatedCommonChannels(data, cols, meta) {
     if (!Array.isArray(data) || !Array.isArray(cols) || !meta) return;
 
@@ -3942,9 +4375,11 @@
       .sort((a, b) => a.dist - b.dist);
     if (rows.length < 2) return null;
 
+    const positiveMeansRight = !log.meta || log.meta.latAccPositiveDirection !== 'left';
     const typeForRow = (r) => {
       if (!r.isTurning || r.dirSign === 0) return 'straight';
-      const isRight = swapLeftRight ? r.dirSign < 0 : r.dirSign > 0;
+      const isRightBySign = positiveMeansRight ? (r.dirSign > 0) : (r.dirSign < 0);
+      const isRight = swapLeftRight ? !isRightBySign : isRightBySign;
       return isRight ? 'right' : 'left';
     };
 
@@ -4747,19 +5182,21 @@
     }
 
     const lapSeries = [];
+    const enabledFilters = getEnabledDataFilters();
     selFiles.forEach((log, fileIdx) => {
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         if (!Array.isArray(log.meta.lapRelDist)) return;
         const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-        const xArr = maskIdx.map(i => log.meta.lapRelDist[i]);
-        const tArr = maskIdx.map(i => log.meta.lapTime[i]);
-        if (xArr.length > 1) {
+        const activeFilters = resolveDataFiltersForLog(log, enabledFilters);
+        const filteredMaskIdx = applyRowFiltersToMask(log, maskIdx, activeFilters);
+        const xArr = getXSeriesForMode(log, filteredMaskIdx, xMode, '');
+        if (!xArr || xArr.length <= 1) return;
+        const tArr = filteredMaskIdx.map(i => log.meta.lapTime[i]);
           const isCrashLap = !!(log.meta && log.meta.crashLapSet && log.meta.crashLapSet.has(lap));
-          const keys = maskIdx.map(i => rowKey(log.id, lap, i));
+          const keys = filteredMaskIdx.map(i => rowKey(log.id, lap, i));
           lapSeries.push({file: log.name, fileId: log.id, lap, x: xArr, t: tArr, keys, isCrashLap, fileIdx});
-        }
       });
     });
 
@@ -6859,11 +7296,6 @@
     const selectedLaps = getSelectedLaps();
     const selectedYChannels = getSelectedY();
     const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
-    const plotLinesEnabled = !plotTypeLinesInput || plotTypeLinesInput.checked;
-    const plotMarkersEnabled = !!(plotTypeMarkersInput && plotTypeMarkersInput.checked);
-    const traceMode = plotLinesEnabled && plotMarkersEnabled
-      ? 'lines+markers'
-      : (plotMarkersEnabled ? 'markers' : 'lines');
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const xLabel = getXAxisTitle(xMode, customXCol);
@@ -6880,9 +7312,7 @@
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         let maskIdx = log.meta.lapNum.map((n, i) => n === lap ? i : -1).filter(i => i >= 0);
-        if (activeFilters.length > 0) {
-          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeFilters));
-        }
+        maskIdx = applyRowFiltersToMask(log, maskIdx, activeFilters);
         const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
         if (!xArr) return;
         maskIdx.forEach((rowIdx, k) => {
@@ -6897,18 +7327,6 @@
     });
 
     return lines.join('\r\n');
-  }
-
-  function triggerCsvDownload(csv, filenamePrefix) {
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
   }
 
   function downloadDisplayedDataCsv() {
@@ -6932,7 +7350,7 @@
     if (!axisChannel || !Number.isFinite(binWidth) || binWidth <= 0 || ycols.length === 0) return null;
 
     const enabledFilters = getEnabledDataFilters();
-    const bins = new Map(); // binKey -> { xSum, xCount, values: Map(channel -> {sum, count}) }
+    const bins = new Map();
 
     selFiles.forEach((log) => {
       const axisResolvedCol = resolveChannelForLog(axisChannel, log);
@@ -6985,6 +7403,12 @@
     });
 
     return lines.join('\r\n');
+  }
+
+  function downloadBinnedPlotDataCsv() {
+    const csv = buildBinnedPlotCsv();
+    if (!csv) return;
+    triggerCsvDownload(csv, 'binned-plot');
   }
 
   function downloadBinnedPlotDataCsv() {
@@ -8031,9 +8455,7 @@
       lapNums.forEach((lap) => {
         if (!isLapSelected(selectedLaps, log.id, lap)) return;
         let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
-        if (activeDataFilters.length > 0) {
-          maskIdx = maskIdx.filter((i) => rowPassesDataFilters(log, i, activeDataFilters));
-        }
+        maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
         if (canColorByChannel && colorAxisContext.kind === 'discrete') {
           const hiddenSet = colorAxisHiddenCategoriesByChannel.get(colorAxisChannel);
           if (hiddenSet && hiddenSet.size > 0) {
@@ -8112,10 +8534,12 @@
       ycols.forEach(y => {
         const allLapSeries = [];
         selFiles.forEach((log, li) => {
+          const activeDataFilters = resolveDataFiltersForLog(log, enabledDataFilters);
           const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
           lapNums.forEach(lap => {
             if (!isLapSelected(selectedLaps, log.id, lap)) return;
-            const maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+            let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+            maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
             const resolvedCol = resolveChannelForLog(y, log);
             if (!resolvedCol || !log.cols.includes(resolvedCol)) return;
             const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);

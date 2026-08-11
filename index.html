@@ -67,7 +67,7 @@
         <span class="theme-toggle-text sr-only" id="themeToggleLabel">Dark Mode</span>
       </button>
       <label class="file-label">Select CSV files
-        <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel,.tsv,.txt,text/tab-separated-values,text/plain,.dat,.res" multiple />
+        <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel,.tsv,.txt,text/tab-separated-values,text/plain,.dat,.res,.tcx,application/xml,text/xml" multiple />
 
       </label>
 
@@ -367,7 +367,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-11a</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-11b</div>
     </section>
 
     <section class="plot">
@@ -392,7 +392,7 @@
       <div id="importerEditorSubtitle" class="importer-editor-subtitle"></div>
       <div class="importer-editor-frequency-row">
         <span>Data Frequency: <strong id="importerEditorDataFreqValue">n/a</strong></span>
-        <label>Downsample To (Hz)
+        <label>Resample To (Hz)
           <input id="importerEditorDownsampleHz" type="number" min="0.1" step="0.1" placeholder="Keep original" />
         </label>
       </div>

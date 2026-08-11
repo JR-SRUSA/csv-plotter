@@ -235,3 +235,39 @@ test('processVIGradeResXml parses a VI-CarRealTime .res XML file', () => {
   assert.equal(processed.units['Animator_Widget.longitudinal_speed'], 'km/h');
   assert.equal(processed.meta.timeCol, 'Time');
 });
+
+test('parseGarminTcxXml parses lap-based Garmin TCX trackpoints', () => {
+  const processors = loadLogFileProcessors();
+  const tcxText = fs.readFileSync(
+    path.join(__dirname, '..', 'sample_data_files', 'activity_23878134073_sample.tcx.txt'),
+    'utf8'
+  );
+
+  assert.ok(typeof processors.parseGarminTcxXml === 'function', 'parseGarminTcxXml should be exported');
+  const processed = processors.parseGarminTcxXml(tcxText);
+
+  assert.ok(processed, 'parseGarminTcxXml should return a payload');
+  assert.equal(processed.meta.source, 'Garmin TCX');
+  assert.equal(processed.meta.format, 'Garmin TCX');
+  assert.equal(processed.data.length, 5, 'should parse all Trackpoint entries in sample');
+
+  assert.ok(processed.cols.includes('Time'));
+  assert.ok(processed.cols.includes('Distance'));
+  assert.ok(processed.cols.includes('Altitude'));
+  assert.ok(processed.cols.includes('Heart Rate'));
+
+  assert.equal(processed.units.Time, 's');
+  assert.equal(processed.units.Distance, 'm');
+  assert.equal(processed.units['Heart Rate'], 'bpm');
+
+  assert.ok(Array.isArray(processed.meta.lapNum), 'lapNum should be present');
+  assert.ok(Array.isArray(processed.meta.lapTime), 'lapTime should be present');
+  assert.ok(Array.isArray(processed.meta.lapRelDist), 'lapRelDist should be present');
+  assert.equal(processed.meta.lapNum.length, processed.data.length);
+
+  const firstEpoch = Date.parse('2026-08-06T17:18:27.000Z') / 1000;
+  assert.equal(processed.meta._time[0], firstEpoch, 'Time should parse ISO UTC timestamp to epoch seconds');
+  assert.equal(processed.meta.lapTime[0], 0, 'first point of lap should have lapTime 0');
+  assert.equal(processed.meta.lapNum[0], 1, 'sample has one lap, numbered 1');
+  assert.equal(processed.meta.lapDurations[0], 261.904, 'lap duration should come from TotalTimeSeconds');
+});
