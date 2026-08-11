@@ -3,6 +3,8 @@
   const filesList = document.getElementById('filesList');
   const ySelect = document.getElementById('ySelect');
   const ySelectSearch = document.getElementById('ySelectSearch');
+  const plotTypeLinesInput = document.getElementById('plotTypeLines');
+  const plotTypeMarkersInput = document.getElementById('plotTypeMarkers');
   const selectedYColors = document.getElementById('selectedYColors');
   const colorAxisSelect = document.getElementById('colorAxisSelect');
   const colorAxisLegendDiv = document.getElementById('colorAxisLegend');
@@ -114,6 +116,20 @@
   const quickModFilterWindow = document.getElementById('quickModFilterWindow');
   const quickModFilterAxis = document.getElementById('quickModFilterAxis');
   const quickModCreateBtn = document.getElementById('quickModCreateBtn');
+  const importerEditorModal = document.getElementById('importerEditorModal');
+  const importerEditorBackdrop = document.getElementById('importerEditorBackdrop');
+  const importerEditorCloseBtn = document.getElementById('importerEditorClose');
+  const importerEditorCancelBtn = document.getElementById('importerEditorCancel');
+  const importerEditorSaveBtn = document.getElementById('importerEditorSave');
+  const importerEditorSubtitle = document.getElementById('importerEditorSubtitle');
+  const importerEditorDataFreqValue = document.getElementById('importerEditorDataFreqValue');
+  const importerEditorDownsampleHzInput = document.getElementById('importerEditorDownsampleHz');
+  const importerEditorRows = document.getElementById('importerEditorRows');
+  const importerEditorError = document.getElementById('importerEditorError');
+  const importerCustomStandardNameInput = document.getElementById('importerCustomStandardName');
+  const importerCustomStandardUnitInput = document.getElementById('importerCustomStandardUnit');
+  const importerCustomStandardAddBtn = document.getElementById('importerCustomStandardAdd');
+  const importerCustomStandardList = document.getElementById('importerCustomStandardList');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -335,6 +351,27 @@
   };
   let quickModEditorOpen = false;
   let quickModOriginalVisible = true;
+
+  const IMPORTER_FILTER_AXES = ['time', 'distance'];
+  const IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY = 'importerCustomStandardChannels';
+  const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
+    { displayName: 'Time', unit: 's' },
+    { displayName: 'Distance', unit: 'm' },
+    { displayName: 'Latitude', unit: 'deg' },
+    { displayName: 'Longitude', unit: 'deg' },
+    { displayName: 'PosX', unit: 'm' },
+    { displayName: 'PosY', unit: 'm' }
+  ];
+  let importerEditorState = {
+    isOpen: false,
+    logId: null,
+    decoderName: '',
+    dataFrequencyHz: null,
+    downsampleHz: null,
+    channels: {},
+    filters: {}
+  };
+  let customStandardChannels = [];
 
   // Shorthand math names available in expressions (e.g. sin, cos, PI instead of Math.sin etc.)
   const MATH_SCOPE = {
@@ -1402,6 +1439,10 @@
   initThemeToggle();
 
   document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && importerEditorState.isOpen) {
+      closeImporterEditor();
+      return;
+    }
     if (ev.key === 'Escape' && document.body.classList.contains('controls-open')) {
       setControlsOpen(false);
     }
@@ -1442,7 +1483,545 @@
     return matched ? matched.name : '';
   }
 
-  function buildLogRecord(id, name, processed, rawRows, forcedDecoderName = '') {
+  function getDecoderMappingColumnKey(decoderName) {
+    if (decoderName === 'GP Bikes') return 'piboso';
+    if (decoderName === 'AiM') return 'aim';
+    if (decoderName === 'MoTeC') return 'motec';
+    return 'displayName';
+  }
+
+  function getCustomImporterTargetColumn(displayName, decoderName) {
+    const mapping = getChannelMap().find(m => m.displayName === displayName);
+    if (!mapping) return displayName;
+    const key = getDecoderMappingColumnKey(decoderName);
+    if (key === 'motec') return mapping.motec || mapping.displayName || mapping.piboso || displayName;
+    return mapping[key] || mapping.displayName || mapping.piboso || displayName;
+  }
+
+  function normalizeCustomStandardChannelsConfig(config) {
+    if (!Array.isArray(config)) return [];
+    const seen = new Set();
+    const normalized = [];
+    config.forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      const displayName = String(entry.displayName == null ? '' : entry.displayName).trim();
+      const unit = String(entry.unit == null ? '' : entry.unit).trim();
+      if (!displayName) return;
+      const key = displayName.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      normalized.push({ displayName, unit, isUserDefined: true });
+    });
+    return normalized;
+  }
+
+  function loadCustomStandardChannels() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY) || '[]');
+      return normalizeCustomStandardChannelsConfig(parsed);
+    } catch {
+      return [];
+    }
+  }
+
+  function saveCustomStandardChannels() {
+    try {
+      const payload = customStandardChannels.map((entry) => ({
+        displayName: entry.displayName,
+        unit: entry.unit || ''
+      }));
+      localStorage.setItem(IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {}
+  }
+
+  function getImporterStandardChannels() {
+    const seen = new Set();
+    const standards = [];
+    const add = (entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      const displayName = String(entry.displayName == null ? '' : entry.displayName).trim();
+      if (!displayName) return;
+      const key = displayName.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      standards.push({
+        displayName,
+        unit: String(entry.unit == null ? '' : entry.unit).trim(),
+        isUserDefined: !!entry.isUserDefined
+      });
+    };
+
+    IMPORTER_BUILTIN_STANDARD_CHANNELS.forEach(add);
+    getChannelMap().forEach((mapping) => add({ displayName: mapping.displayName, unit: '' }));
+    customStandardChannels.forEach(add);
+    return standards;
+  }
+
+  function getImporterStandardChannelByName(displayName) {
+    const key = String(displayName == null ? '' : displayName).trim().toLowerCase();
+    if (!key) return null;
+    return getImporterStandardChannels().find((entry) => entry.displayName.toLowerCase() === key) || null;
+  }
+
+  function normalizeCustomImporterConfig(config) {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return null;
+    const decoder = String(config.decoder == null ? '' : config.decoder).trim();
+    if (!decoder) return null;
+
+    const channels = {};
+    if (config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)) {
+      Object.keys(config.channels).forEach((standardChannel) => {
+        const source = String(config.channels[standardChannel] == null ? '' : config.channels[standardChannel]).trim();
+        if (source) channels[standardChannel] = source;
+      });
+    }
+
+    const filters = {};
+    if (config.filters && typeof config.filters === 'object' && !Array.isArray(config.filters)) {
+      Object.keys(config.filters).forEach((standardChannel) => {
+        const raw = config.filters[standardChannel];
+        if (!raw || typeof raw !== 'object') return;
+        const axis = IMPORTER_FILTER_AXES.includes(raw.axis) ? raw.axis : 'time';
+        const window = Number(raw.window);
+        filters[standardChannel] = {
+          enabled: !!raw.enabled,
+          axis,
+          window: Number.isFinite(window) && window > 0 ? window : 0
+        };
+      });
+    }
+
+    const downsampleHz = Number(config.downsampleHz);
+
+    return {
+      decoder,
+      channels,
+      filters,
+      downsampleHz: Number.isFinite(downsampleHz) && downsampleHz > 0 ? downsampleHz : null
+    };
+  }
+
+  function estimateFrequencyHzFromAxisValues(values) {
+    if (!Array.isArray(values) || values.length < 3) return null;
+    const dts = [];
+    for (let i = 1; i < values.length; i++) {
+      const prev = Number(values[i - 1]);
+      const next = Number(values[i]);
+      if (!Number.isFinite(prev) || !Number.isFinite(next)) continue;
+      const dt = next - prev;
+      if (dt > 0) dts.push(dt);
+    }
+    if (dts.length < 2) return null;
+    dts.sort((a, b) => a - b);
+    const mid = Math.floor(dts.length / 2);
+    const medianDt = (dts.length % 2 === 0) ? ((dts[mid - 1] + dts[mid]) / 2) : dts[mid];
+    if (!Number.isFinite(medianDt) || medianDt <= 0) return null;
+    const hz = 1 / medianDt;
+    return Number.isFinite(hz) && hz > 0 ? hz : null;
+  }
+
+  function timeUnitScaleToSeconds(unit) {
+    const u = String(unit == null ? '' : unit).trim().toLowerCase();
+    if (!u) return 1;
+    if (u === 's' || u === 'sec' || u === 'secs' || u === 'second' || u === 'seconds') return 1;
+    if (u === 'ms' || u === 'msec' || u === 'millisecond' || u === 'milliseconds') return 0.001;
+    if (u === 'us' || u === 'usec' || u === 'microsecond' || u === 'microseconds') return 0.000001;
+    if (u === 'min' || u === 'mins' || u === 'minute' || u === 'minutes') return 60;
+    if (u === 'h' || u === 'hr' || u === 'hrs' || u === 'hour' || u === 'hours') return 3600;
+    return 1;
+  }
+
+  function parseTimeLikeSeconds(value, unitHint = '') {
+    const scale = timeUnitScaleToSeconds(unitHint);
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric * scale;
+    if (typeof value !== 'string') return null;
+
+    const raw = value.trim();
+    if (!raw) return null;
+
+    const normalized = raw.replace(',', '.');
+    const normalizedNumeric = Number(normalized);
+    if (Number.isFinite(normalizedNumeric)) return normalizedNumeric * scale;
+
+    // Supports mm:ss(.sss) and hh:mm:ss(.sss), with optional leading sign.
+    if (!/^-?\d+(?::\d{1,2}){1,2}(?:\.\d+)?$/.test(normalized)) return null;
+    const sign = normalized.startsWith('-') ? -1 : 1;
+    const token = sign < 0 ? normalized.slice(1) : normalized;
+    const parts = token.split(':');
+    let seconds = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const n = Number(parts[parts.length - 1 - i]);
+      if (!Number.isFinite(n)) return null;
+      seconds += n * Math.pow(60, i);
+    }
+    return sign * seconds;
+  }
+
+  function getImporterEditorTimeAxisValues(log, state = importerEditorState) {
+    if (!log) return null;
+    const chosenTimeCol = state && state.channels ? String(state.channels.Time || '').trim() : '';
+    if (chosenTimeCol && Array.isArray(log.cols) && log.cols.includes(chosenTimeCol)) {
+      const unit = log.meta && log.meta.units ? log.meta.units[chosenTimeCol] : '';
+      return log.data.map((row) => {
+        const n = parseTimeLikeSeconds(row[chosenTimeCol], unit);
+        return Number.isFinite(n) ? n : null;
+      });
+    }
+    const timeCol = log.meta && log.meta.timeCol;
+    if (timeCol && Array.isArray(log.cols) && log.cols.includes(timeCol)) {
+      const unit = log.meta && log.meta.units ? log.meta.units[timeCol] : '';
+      return log.data.map((row) => {
+        const n = parseTimeLikeSeconds(row[timeCol], unit);
+        return Number.isFinite(n) ? n : null;
+      });
+    }
+    return (log.meta && Array.isArray(log.meta._time)) ? log.meta._time : null;
+  }
+
+  function updateImporterEditorFrequencyInfo() {
+    const log = logs.find((entry) => entry.id === importerEditorState.logId);
+    const axisValues = getImporterEditorTimeAxisValues(log, importerEditorState);
+    const hz = estimateFrequencyHzFromAxisValues(axisValues);
+    importerEditorState.dataFrequencyHz = Number.isFinite(hz) ? hz : null;
+    if (importerEditorDataFreqValue) {
+      importerEditorDataFreqValue.textContent = Number.isFinite(hz) ? `${hz.toFixed(2)} Hz` : 'n/a';
+    }
+  }
+
+  function downsampleProcessedByFrequency(processed, targetHz) {
+    const hz = Number(targetHz);
+    if (!Number.isFinite(hz) || hz <= 0) return;
+    if (!processed || !Array.isArray(processed.data) || !processed.meta || processed.data.length < 3) return;
+
+    const timeCol = processed.meta.timeCol;
+    let axisValues = null;
+    if (timeCol && Array.isArray(processed.cols) && processed.cols.includes(timeCol)) {
+      const unit = (processed.meta && processed.meta.units && processed.meta.units[timeCol]) || (processed.units && processed.units[timeCol]) || '';
+      axisValues = processed.data.map((row) => {
+        const n = parseTimeLikeSeconds(row[timeCol], unit);
+        return Number.isFinite(n) ? n : null;
+      });
+    } else if (Array.isArray(processed.meta._time)) {
+      axisValues = processed.meta._time;
+    }
+    if (!Array.isArray(axisValues) || axisValues.length !== processed.data.length) return;
+
+    const sourceHz = estimateFrequencyHzFromAxisValues(axisValues);
+    if (Number.isFinite(sourceHz) && hz >= sourceHz) return;
+
+    const minStep = 1 / hz;
+    const keepIndices = [];
+    let lastKeptTime = null;
+
+    for (let i = 0; i < axisValues.length; i++) {
+      const t = Number(axisValues[i]);
+      if (!Number.isFinite(t)) continue;
+      if (lastKeptTime === null || (t - lastKeptTime) >= minStep) {
+        keepIndices.push(i);
+        lastKeptTime = t;
+      }
+    }
+
+    const lastIndex = processed.data.length - 1;
+    if (keepIndices.length === 0 || keepIndices[keepIndices.length - 1] !== lastIndex) {
+      keepIndices.push(lastIndex);
+    }
+    if (keepIndices.length < 2 || keepIndices.length >= processed.data.length) return;
+
+    const originalLength = processed.data.length;
+    const downsampledRows = keepIndices.map((idx) => processed.data[idx]);
+    processed.data.splice(0, processed.data.length, ...downsampledRows);
+
+    Object.keys(processed.meta).forEach((key) => {
+      const value = processed.meta[key];
+      if (!Array.isArray(value) || value.length !== originalLength) return;
+      processed.meta[key] = keepIndices.map((idx) => value[idx]);
+    });
+  }
+
+  function getCustomImporterConfigForLog(log, decoderName) {
+    const normalized = normalizeCustomImporterConfig(log && log.meta ? log.meta.customImporter : null);
+    if (!normalized) return null;
+    return normalized.decoder === decoderName ? normalized : null;
+  }
+
+  function setImporterEditorError(message) {
+    if (!importerEditorError) return;
+    const text = String(message || '').trim();
+    importerEditorError.textContent = text;
+    importerEditorError.hidden = !text;
+  }
+
+  function buildDefaultImporterEditorState(log, decoderName) {
+    const existing = getCustomImporterConfigForLog(log, decoderName);
+    const baseCols = Array.isArray(log && log.meta && log.meta.baseCols)
+      ? log.meta.baseCols
+      : (Array.isArray(log && log.cols) ? log.cols.slice() : []);
+    const allowedCols = new Set(baseCols);
+    const channels = {};
+    const filters = {};
+
+    getImporterStandardChannels().forEach((standardDef) => {
+      const standard = standardDef.displayName;
+      const existingSource = existing && existing.channels ? existing.channels[standard] : '';
+      const targetCol = getCustomImporterTargetColumn(standard, decoderName);
+
+      if (existingSource && allowedCols.has(existingSource)) {
+        channels[standard] = existingSource;
+      } else if (allowedCols.has(targetCol)) {
+        channels[standard] = targetCol;
+      } else {
+        channels[standard] = '';
+      }
+
+      const existingFilter = existing && existing.filters ? existing.filters[standard] : null;
+      filters[standard] = {
+        enabled: !!(existingFilter && existingFilter.enabled),
+        axis: existingFilter && IMPORTER_FILTER_AXES.includes(existingFilter.axis) ? existingFilter.axis : 'time',
+        window: existingFilter && Number.isFinite(Number(existingFilter.window)) && Number(existingFilter.window) > 0
+          ? Number(existingFilter.window)
+          : 0.5
+      };
+    });
+
+    return {
+      isOpen: true,
+      logId: log ? log.id : null,
+      decoderName,
+      dataFrequencyHz: null,
+      downsampleHz: existing && Number.isFinite(Number(existing.downsampleHz)) && Number(existing.downsampleHz) > 0
+        ? Number(existing.downsampleHz)
+        : null,
+      channels,
+      filters
+    };
+  }
+
+  function renderImporterEditorRows() {
+    if (!importerEditorRows) return;
+    const log = logs.find((entry) => entry.id === importerEditorState.logId);
+    const baseCols = Array.isArray(log && log.meta && log.meta.baseCols)
+      ? log.meta.baseCols.slice()
+      : (Array.isArray(log && log.cols) ? log.cols.slice() : []);
+
+    const colOptions = ['<option value="">(none)</option>']
+      .concat(baseCols.map((col) => `<option value="${escapeHtml(col)}">${escapeHtml(col)}</option>`));
+
+    const rowsHtml = getImporterStandardChannels().map((standardDef) => {
+      const standard = standardDef.displayName;
+      const selectedSource = importerEditorState.channels[standard] || '';
+      const filter = importerEditorState.filters[standard] || { enabled: false, axis: 'time', window: 0.5 };
+      const filterEnabled = !!filter.enabled;
+      const filterAxis = IMPORTER_FILTER_AXES.includes(filter.axis) ? filter.axis : 'time';
+      const filterWindow = Number.isFinite(Number(filter.window)) ? Number(filter.window) : 0.5;
+      const unitSuffix = standardDef.unit ? ` [${standardDef.unit}]` : '';
+      return ''
+        + '<tr>'
+        + `<td>${escapeHtml(standard)}${escapeHtml(unitSuffix)}</td>`
+        + `<td><select data-importer-channel="${escapeHtml(standard)}">${colOptions.join('')}</select></td>`
+        + `<td><label><input type="checkbox" data-importer-filter-enabled="${escapeHtml(standard)}"${filterEnabled ? ' checked' : ''} /> On</label></td>`
+        + `<td><select data-importer-filter-axis="${escapeHtml(standard)}"${filterEnabled ? '' : ' disabled'}><option value="time"${filterAxis === 'time' ? ' selected' : ''}>Time</option><option value="distance"${filterAxis === 'distance' ? ' selected' : ''}>Distance</option></select></td>`
+        + `<td><input type="number" min="0.01" step="0.1" data-importer-filter-window="${escapeHtml(standard)}" value="${Number(filterWindow).toFixed(2)}"${filterEnabled ? '' : ' disabled'} /></td>`
+        + '</tr>';
+    }).join('');
+
+    importerEditorRows.innerHTML = rowsHtml;
+    const channelSelects = importerEditorRows.querySelectorAll('select[data-importer-channel]');
+    channelSelects.forEach((select) => {
+      const standard = select.getAttribute('data-importer-channel');
+      if (!standard) return;
+      select.value = importerEditorState.channels[standard] || '';
+    });
+  }
+
+  function renderImporterCustomStandardList() {
+    if (!importerCustomStandardList) return;
+    if (!Array.isArray(customStandardChannels) || customStandardChannels.length === 0) {
+      importerCustomStandardList.innerHTML = '<div class="importer-custom-standard-empty">No custom standard channels yet.</div>';
+      return;
+    }
+
+    importerCustomStandardList.innerHTML = customStandardChannels.map((entry) => {
+      const unitLabel = entry.unit ? ` [${entry.unit}]` : '';
+      return ''
+        + '<div class="importer-custom-standard-item">'
+        + `<span>${escapeHtml(entry.displayName)}${escapeHtml(unitLabel)}</span>`
+        + `<button type="button" data-importer-custom-remove="${escapeHtml(entry.displayName)}" aria-label="Remove ${escapeHtml(entry.displayName)}">Remove</button>`
+        + '</div>';
+    }).join('');
+  }
+
+  function addUserDefinedStandardChannel(displayName, unit) {
+    const normalizedName = String(displayName == null ? '' : displayName).trim();
+    const normalizedUnit = String(unit == null ? '' : unit).trim();
+    if (!normalizedName) return { ok: false, message: 'Enter a standard channel name.' };
+
+    const alreadyExists = getImporterStandardChannels().some((entry) => (
+      entry.displayName.toLowerCase() === normalizedName.toLowerCase()
+    ));
+    if (alreadyExists) return { ok: false, message: 'That standard channel already exists.' };
+
+    customStandardChannels.push({ displayName: normalizedName, unit: normalizedUnit, isUserDefined: true });
+    customStandardChannels = normalizeCustomStandardChannelsConfig(customStandardChannels);
+    saveCustomStandardChannels();
+    renderImporterCustomStandardList();
+    renderImporterEditorRows();
+    return { ok: true };
+  }
+
+  function removeUserDefinedStandardChannel(displayName) {
+    const key = String(displayName == null ? '' : displayName).trim().toLowerCase();
+    if (!key) return;
+    const before = customStandardChannels.length;
+    customStandardChannels = customStandardChannels.filter((entry) => entry.displayName.toLowerCase() !== key);
+    if (customStandardChannels.length === before) return;
+
+    if (importerEditorState.channels && typeof importerEditorState.channels === 'object') {
+      Object.keys(importerEditorState.channels).forEach((name) => {
+        if (name.toLowerCase() === key) delete importerEditorState.channels[name];
+      });
+    }
+    if (importerEditorState.filters && typeof importerEditorState.filters === 'object') {
+      Object.keys(importerEditorState.filters).forEach((name) => {
+        if (name.toLowerCase() === key) delete importerEditorState.filters[name];
+      });
+    }
+
+    saveCustomStandardChannels();
+    renderImporterCustomStandardList();
+    renderImporterEditorRows();
+  }
+
+  function openImporterEditor(logId) {
+    const log = logs.find((entry) => entry.id === logId);
+    if (!log) return;
+    const decoderName = resolveDecoderName(log.meta) || ((log.meta && log.meta.source) ? log.meta.source : 'Generic');
+    importerEditorState = buildDefaultImporterEditorState(log, decoderName);
+    setImporterEditorError('');
+    if (importerEditorSubtitle) {
+      importerEditorSubtitle.textContent = `${log.name} · ${decoderName}`;
+    }
+    renderImporterCustomStandardList();
+    if (importerCustomStandardNameInput) importerCustomStandardNameInput.value = '';
+    if (importerCustomStandardUnitInput) importerCustomStandardUnitInput.value = '';
+    if (importerEditorDownsampleHzInput) {
+      importerEditorDownsampleHzInput.value = Number.isFinite(importerEditorState.downsampleHz)
+        ? importerEditorState.downsampleHz.toFixed(2)
+        : '';
+    }
+    updateImporterEditorFrequencyInfo();
+    renderImporterEditorRows();
+    if (importerEditorModal) importerEditorModal.hidden = false;
+  }
+
+  function closeImporterEditor() {
+    importerEditorState = {
+      isOpen: false,
+      logId: null,
+      decoderName: '',
+      dataFrequencyHz: null,
+      downsampleHz: null,
+      channels: {},
+      filters: {}
+    };
+    if (importerEditorModal) importerEditorModal.hidden = true;
+    setImporterEditorError('');
+  }
+
+  function applyCustomImporterConfigToProcessed(processed, decoderName, customImporterConfig) {
+    const config = normalizeCustomImporterConfig(customImporterConfig);
+    if (!config || config.decoder !== decoderName) return;
+    if (!processed || !Array.isArray(processed.data) || !Array.isArray(processed.cols) || !processed.meta) return;
+
+    const units = (processed.units && typeof processed.units === 'object') ? processed.units : {};
+    const resolveAxisValues = (axis) => {
+      if (axis === 'distance') {
+        const col = processed.meta && processed.meta.distCol;
+        if (col && processed.cols.includes(col)) {
+          return processed.data.map((row) => {
+            const v = Number(row[col]);
+            return Number.isFinite(v) ? v : null;
+          });
+        }
+        return Array.isArray(processed.meta._dist) ? processed.meta._dist : null;
+      }
+      const col = processed.meta && processed.meta.timeCol;
+      if (col && processed.cols.includes(col)) {
+        const unit = (processed.meta && processed.meta.units && processed.meta.units[col]) || (processed.units && processed.units[col]) || '';
+        return processed.data.map((row) => {
+          const v = parseTimeLikeSeconds(row[col], unit);
+          return Number.isFinite(v) ? v : null;
+        });
+      }
+      return Array.isArray(processed.meta._time) ? processed.meta._time : null;
+    };
+
+    getImporterStandardChannels().forEach((standardDef) => {
+      const standard = standardDef.displayName;
+      const sourceCol = config.channels[standard];
+      if (!sourceCol || !processed.cols.includes(sourceCol)) return;
+
+      const targetCol = getCustomImporterTargetColumn(standard, decoderName);
+      if (!targetCol) return;
+      const filter = config.filters && config.filters[standard] ? config.filters[standard] : null;
+
+      if (filter && filter.enabled && Number.isFinite(Number(filter.window)) && Number(filter.window) > 0) {
+        const axisValues = resolveAxisValues(filter.axis) || resolveAxisValues('time');
+        const sourceVals = processed.data.map((row) => {
+          const v = Number(row[sourceCol]);
+          return Number.isFinite(v) ? v : null;
+        });
+        const smoothed = computeWindowedAverage(sourceVals, axisValues, Number(filter.window));
+        processed.data.forEach((row, i) => {
+          const smoothVal = smoothed[i];
+          row[targetCol] = smoothVal !== null && Number.isFinite(smoothVal) ? smoothVal : row[sourceCol];
+        });
+      } else {
+        processed.data.forEach((row) => { row[targetCol] = row[sourceCol]; });
+      }
+
+      if (!processed.cols.includes(targetCol)) processed.cols.push(targetCol);
+
+      if (standardDef.unit) {
+        if (standard !== 'Time' || !units[sourceCol]) units[targetCol] = standardDef.unit;
+      } else if (!units[targetCol] && units[sourceCol]) {
+        units[targetCol] = units[sourceCol];
+      }
+
+      if (standard === 'Time') {
+        processed.meta.timeCol = targetCol;
+        const timeUnit = units[targetCol] || units[sourceCol] || '';
+        processed.meta._time = processed.data.map((row) => {
+          const n = parseTimeLikeSeconds(row[targetCol], timeUnit);
+          return Number.isFinite(n) ? n : null;
+        });
+      } else if (standard === 'Distance') {
+        processed.meta.distCol = targetCol;
+        processed.meta._dist = processed.data.map((row) => {
+          const n = Number(row[targetCol]);
+          return Number.isFinite(n) ? n : null;
+        });
+      } else if (standard === 'Latitude') {
+        processed.meta.latCol = targetCol;
+      } else if (standard === 'Longitude') {
+        processed.meta.lonCol = targetCol;
+      }
+    });
+
+    if (Number.isFinite(config.downsampleHz) && config.downsampleHz > 0) {
+      downsampleProcessedByFrequency(processed, config.downsampleHz);
+    }
+    processed.meta.importDownsampleHz = Number.isFinite(config.downsampleHz) && config.downsampleHz > 0
+      ? config.downsampleHz
+      : null;
+
+    processed.units = units;
+    if (!processed.meta.units || typeof processed.meta.units !== 'object') processed.meta.units = {};
+    Object.keys(units).forEach((k) => { processed.meta.units[k] = units[k]; });
+  }
+
+  function buildLogRecord(id, name, processed, rawRows, forcedDecoderName = '', customImporterConfig = null) {
     const data = processed.data;
     const cols = [...processed.cols];
     const units = processed.units && typeof processed.units === 'object' ? processed.units : {};
@@ -1456,12 +2035,49 @@
       meta.source = decoderName;
     }
 
+    meta.baseCols = cols.slice();
+
+    const normalizedCustomImporter = normalizeCustomImporterConfig(customImporterConfig);
+    if (normalizedCustomImporter && normalizedCustomImporter.decoder === decoderName) {
+      applyCustomImporterConfigToProcessed({ data, cols, units, meta }, decoderName, normalizedCustomImporter);
+      meta.customImporter = normalizedCustomImporter;
+    } else {
+      delete meta.customImporter;
+    }
+
     const lapNum = (Array.isArray(meta.lapNum) && meta.lapNum.length === data.length)
       ? meta.lapNum
       : data.map(() => 1);
-    const lapTime = (Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
-      ? meta.lapTime
-      : data.map((_, i) => i);
+
+    const recomputeLapTimeFromTimeCol = () => {
+      const timeCol = meta.timeCol;
+      if (!timeCol || !cols.includes(timeCol)) return null;
+      const timeUnit = meta.units && meta.units[timeCol] ? meta.units[timeCol] : '';
+      if (!Array.isArray(lapNum) || lapNum.length !== data.length) return null;
+      const firstTimeByLap = new Map();
+      const computed = new Array(data.length).fill(null);
+      for (let i = 0; i < data.length; i++) {
+        const lap = lapNum[i];
+        const raw = parseTimeLikeSeconds(data[i] && data[i][timeCol], timeUnit);
+        if (!Number.isFinite(raw)) continue;
+        if (!firstTimeByLap.has(lap)) firstTimeByLap.set(lap, raw);
+        let lapT = raw - firstTimeByLap.get(lap);
+        if (!Number.isFinite(lapT) || lapT < 0) {
+          firstTimeByLap.set(lap, raw);
+          lapT = 0;
+        }
+        computed[i] = lapT;
+      }
+      const hasAnyFinite = computed.some((v) => Number.isFinite(v));
+      return hasAnyFinite ? computed : null;
+    };
+
+    const recomputedLapTime = recomputeLapTimeFromTimeCol();
+    const lapTime = (Array.isArray(recomputedLapTime) && recomputedLapTime.length === data.length)
+      ? recomputedLapTime
+      : ((Array.isArray(meta.lapTime) && meta.lapTime.length === data.length)
+        ? meta.lapTime
+        : data.map((_, i) => i));
 
     meta.lapNum = lapNum;
     meta.lapTime = lapTime;
@@ -1499,7 +2115,7 @@
     errorEl.hidden = !text;
   }
 
-  function reprocessLogWithDecoder(logId, decoderName) {
+  function reprocessLogWithDecoder(logId, decoderName, customImporterConfig = null) {
     const logIdx = logs.findIndex(l => l.id === logId);
     if (logIdx < 0) return false;
 
@@ -1516,7 +2132,7 @@
         console.error('Decoder reprocess returned invalid data for log:', log.name, 'decoder:', decoderName);
         return false;
       }
-      builtRecord = buildLogRecord(log.id, log.name, processed, log.rawRows, decoderName);
+      builtRecord = buildLogRecord(log.id, log.name, processed, log.rawRows, decoderName, customImporterConfig);
     } catch (err) {
       console.error('Decoder reprocess threw an error for log:', log.name, 'decoder:', decoderName, err);
       return false;
@@ -1545,9 +2161,10 @@
     const fileItem = selectEl.closest('.file-item');
     const log = logs.find((entry) => entry.id === fileId);
     const previousDecoder = resolveDecoderName(log && log.meta) || '';
+    const customImporterConfig = getCustomImporterConfigForLog(log, decoderName);
 
     setDecoderError(fileItem, '');
-    const ok = reprocessLogWithDecoder(fileId, decoderName);
+    const ok = reprocessLogWithDecoder(fileId, decoderName, customImporterConfig);
     if (ok) {
       setDecoderError(fileItem, '');
       return;
@@ -1718,6 +2335,22 @@
       });
 
       decoderSelector.appendChild(decoderSelect);
+      const importerCustomizeBtn = document.createElement('button');
+      importerCustomizeBtn.type = 'button';
+      importerCustomizeBtn.className = 'file-decoder-edit file-importer-customize-btn';
+      importerCustomizeBtn.setAttribute('data-importer-customize', log.id);
+      importerCustomizeBtn.setAttribute('aria-label', `Customize importer mapping for ${log.name}`);
+      importerCustomizeBtn.setAttribute('title', 'Customize importer mapping and pre-processing filters');
+      importerCustomizeBtn.textContent = '✎';
+      decoderSelector.appendChild(importerCustomizeBtn);
+
+      const hasCustomImporter = !!getCustomImporterConfigForLog(log, decoderName);
+      if (hasCustomImporter) {
+        const customIndicator = document.createElement('span');
+        customIndicator.className = 'file-decoder-custom-indicator';
+        customIndicator.textContent = 'Custom importer';
+        decoderSelector.appendChild(customIndicator);
+      }
       decoderRow.appendChild(decoderSelector);
 
       el.appendChild(label);
@@ -6226,6 +6859,11 @@
     const selectedLaps = getSelectedLaps();
     const selectedYChannels = getSelectedY();
     const ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const plotLinesEnabled = !plotTypeLinesInput || plotTypeLinesInput.checked;
+    const plotMarkersEnabled = !!(plotTypeMarkersInput && plotTypeMarkersInput.checked);
+    const traceMode = plotLinesEnabled && plotMarkersEnabled
+      ? 'lines+markers'
+      : (plotMarkersEnabled ? 'markers' : 'lines');
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const xLabel = getXAxisTitle(xMode, customXCol);
@@ -7264,6 +7902,11 @@
     const selFiles = getSelectedFiles();
     const selectedYChannels = getSelectedY();
     let ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
+    const plotLinesEnabled = !plotTypeLinesInput || plotTypeLinesInput.checked;
+    const plotMarkersEnabled = !!(plotTypeMarkersInput && plotTypeMarkersInput.checked);
+    const traceMode = plotLinesEnabled && plotMarkersEnabled
+      ? 'lines+markers'
+      : (plotMarkersEnabled ? 'markers' : 'lines');
     const xMode = document.querySelector('input[name=xaxis]:checked').value;
     const customXCol = xCustomSelect ? xCustomSelect.value : '';
     const logX = !!(logXAxisInput && logXAxisInput.checked);
@@ -7419,7 +8062,7 @@
             customdata: keyArr,
             yaxis: channelToRef.get(y) || 'y',
             name: `${log.name} — Lap ${lap} — ${y}`,
-            mode: 'lines',
+            mode: traceMode,
             marker:{color: traceColor},
             line:{color: traceColor, dash},
             hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y)),
@@ -7763,6 +8406,25 @@
     renderSelectedChannelColorControls();
     updatePlot();
   });
+
+  const enforcePlotTypeSelection = (changedInput) => {
+    if (!plotTypeLinesInput || !plotTypeMarkersInput) return;
+    if (plotTypeLinesInput.checked || plotTypeMarkersInput.checked) return;
+    changedInput.checked = true;
+  };
+
+  if (plotTypeLinesInput) {
+    plotTypeLinesInput.addEventListener('change', () => {
+      enforcePlotTypeSelection(plotTypeLinesInput);
+      updatePlot();
+    });
+  }
+  if (plotTypeMarkersInput) {
+    plotTypeMarkersInput.addEventListener('change', () => {
+      enforcePlotTypeSelection(plotTypeMarkersInput);
+      updatePlot();
+    });
+  }
   if (ySelectSearch) {
     // Rebuilding via populateYSelect() (rather than filtering in place) reuses its existing
     // "preserve current selection" logic, so already-picked channels stay selected even
@@ -7820,6 +8482,13 @@
   }
 
   filesList.addEventListener('click', (ev)=>{
+    if (ev.target.matches('button[data-importer-customize]')) {
+      const id = ev.target.getAttribute('data-importer-customize');
+      if (!id) return;
+      openImporterEditor(id);
+      return;
+    }
+
     if (ev.target.matches('button[data-remove]')) {
       const id = ev.target.getAttribute('data-remove');
       const idx = logs.findIndex(l=>l.id===id);
@@ -7900,6 +8569,136 @@
       renderFilesList();
     }
   });
+
+  if (importerEditorRows) {
+    importerEditorRows.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+
+      if (target.matches('select[data-importer-channel]')) {
+        const standard = target.getAttribute('data-importer-channel');
+        if (!standard) return;
+        importerEditorState.channels[standard] = target.value || '';
+        if (standard === 'Time') updateImporterEditorFrequencyInfo();
+        return;
+      }
+
+      if (target.matches('input[data-importer-filter-enabled]')) {
+        const standard = target.getAttribute('data-importer-filter-enabled');
+        if (!standard) return;
+        if (!importerEditorState.filters[standard]) importerEditorState.filters[standard] = { enabled: false, axis: 'time', window: 0.5 };
+        importerEditorState.filters[standard].enabled = !!target.checked;
+        const row = target.closest('tr');
+        const axisSelect = row ? row.querySelector('select[data-importer-filter-axis]') : null;
+        const windowInput = row ? row.querySelector('input[data-importer-filter-window]') : null;
+        if (axisSelect) axisSelect.disabled = !target.checked;
+        if (windowInput) windowInput.disabled = !target.checked;
+        return;
+      }
+
+      if (target.matches('select[data-importer-filter-axis]')) {
+        const standard = target.getAttribute('data-importer-filter-axis');
+        if (!standard) return;
+        if (!importerEditorState.filters[standard]) importerEditorState.filters[standard] = { enabled: false, axis: 'time', window: 0.5 };
+        importerEditorState.filters[standard].axis = IMPORTER_FILTER_AXES.includes(target.value) ? target.value : 'time';
+      }
+    });
+
+    importerEditorRows.addEventListener('input', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.matches('input[data-importer-filter-window]')) return;
+      const standard = target.getAttribute('data-importer-filter-window');
+      if (!standard) return;
+      if (!importerEditorState.filters[standard]) importerEditorState.filters[standard] = { enabled: false, axis: 'time', window: 0.5 };
+      const n = Number(target.value);
+      importerEditorState.filters[standard].window = Number.isFinite(n) ? n : 0;
+    });
+  }
+
+  if (importerEditorDownsampleHzInput) {
+    importerEditorDownsampleHzInput.addEventListener('input', () => {
+      const n = Number(importerEditorDownsampleHzInput.value);
+      importerEditorState.downsampleHz = Number.isFinite(n) && n > 0 ? n : null;
+    });
+  }
+
+  if (importerCustomStandardAddBtn) {
+    importerCustomStandardAddBtn.addEventListener('click', () => {
+      const result = addUserDefinedStandardChannel(
+        importerCustomStandardNameInput ? importerCustomStandardNameInput.value : '',
+        importerCustomStandardUnitInput ? importerCustomStandardUnitInput.value : ''
+      );
+      if (!result.ok) {
+        setImporterEditorError(result.message || 'Could not add this standard channel.');
+        return;
+      }
+      setImporterEditorError('');
+      if (importerCustomStandardNameInput) {
+        importerCustomStandardNameInput.value = '';
+        importerCustomStandardNameInput.focus();
+      }
+      if (importerCustomStandardUnitInput) importerCustomStandardUnitInput.value = '';
+    });
+  }
+
+  if (importerCustomStandardNameInput) {
+    importerCustomStandardNameInput.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      if (importerCustomStandardAddBtn) importerCustomStandardAddBtn.click();
+    });
+  }
+  if (importerCustomStandardUnitInput) {
+    importerCustomStandardUnitInput.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      ev.preventDefault();
+      if (importerCustomStandardAddBtn) importerCustomStandardAddBtn.click();
+    });
+  }
+
+  if (importerCustomStandardList) {
+    importerCustomStandardList.addEventListener('click', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.matches('button[data-importer-custom-remove]')) return;
+      const displayName = target.getAttribute('data-importer-custom-remove');
+      if (!displayName) return;
+      removeUserDefinedStandardChannel(displayName);
+    });
+  }
+
+  if (importerEditorBackdrop) importerEditorBackdrop.addEventListener('click', closeImporterEditor);
+  if (importerEditorCloseBtn) importerEditorCloseBtn.addEventListener('click', closeImporterEditor);
+  if (importerEditorCancelBtn) importerEditorCancelBtn.addEventListener('click', closeImporterEditor);
+  if (importerEditorSaveBtn) {
+    importerEditorSaveBtn.addEventListener('click', () => {
+      if (!importerEditorState.isOpen || !importerEditorState.logId || !importerEditorState.decoderName) return;
+
+      const normalized = normalizeCustomImporterConfig({
+        decoder: importerEditorState.decoderName,
+        channels: importerEditorState.channels,
+        filters: importerEditorState.filters,
+        downsampleHz: importerEditorState.downsampleHz
+      });
+      if (!normalized) {
+        setImporterEditorError('Could not save importer config.');
+        return;
+      }
+
+      const hasAnyChannel = Object.values(normalized.channels).some((v) => String(v || '').trim() !== '');
+      const hasDownsample = Number.isFinite(Number(normalized.downsampleHz)) && Number(normalized.downsampleHz) > 0;
+      const payload = (hasAnyChannel || hasDownsample) ? normalized : null;
+      const ok = reprocessLogWithDecoder(importerEditorState.logId, importerEditorState.decoderName, payload);
+      if (!ok) {
+        setImporterEditorError('Could not reprocess this file with the custom importer settings. See console for details.');
+        return;
+      }
+
+      closeImporterEditor();
+      renderFilesList();
+    });
+  }
 
   // update lap list when file selection changes
   filesList.addEventListener('change', (ev)=>{
@@ -7992,6 +8791,7 @@
     if (ev.target.matches('input[type=checkbox]')) updatePlot();
   });
 
+  customStandardChannels = loadCustomStandardChannels();
   loadChannelMapConfig();
   loadTrackMapDefaultsConfig();
 
@@ -8058,6 +8858,7 @@
   const SETTINGS_STORAGE_KEYS = [
     'csvPlotterTheme',
     'csv-plotter-panel-sizes',
+    IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY,
     'mathChannels',
     'dataFiltersState',
     'trackCornerMetadata',
