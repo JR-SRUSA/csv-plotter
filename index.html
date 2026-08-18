@@ -70,6 +70,31 @@
         <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel,.tsv,.txt,text/tab-separated-values,text/plain,.dat,.res,.tcx,application/xml,text/xml" multiple />
 
       </label>
+      <button id="pickUploadedDataBtn" type="button" class="pick-uploaded-btn" title="Pick from previously uploaded files">Pick Uploaded Data</button>
+
+      <!-- Pick Uploaded Data modal -->
+      <div id="pickUploadedModal" class="pick-uploaded-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pickUploadedTitle">
+        <div class="pick-uploaded-backdrop"></div>
+        <div class="pick-uploaded-dialog">
+          <div class="pick-uploaded-header">
+            <span id="pickUploadedTitle" class="pick-uploaded-title">Pick Uploaded Data</span>
+            <button id="pickUploadedCloseBtn" type="button" class="pick-uploaded-close" aria-label="Close">&times;</button>
+          </div>
+          <div class="pick-uploaded-controls">
+            <label class="pick-uploaded-sort-label">Sort by:
+              <select id="pickUploadedSortSelect" class="pick-uploaded-sort-select">
+                <option value="name">Name</option>
+                <option value="date" selected>Date (newest first)</option>
+                <option value="track">Track / Venue</option>
+                <option value="rider">Rider</option>
+                <option value="vehicle">Vehicle</option>
+              </select>
+            </label>
+            <input id="pickUploadedSearch" type="text" class="pick-uploaded-search" placeholder="Filter files…" autocomplete="off" />
+          </div>
+          <div id="pickUploadedList" class="pick-uploaded-list"></div>
+        </div>
+      </div>
 
       <div id="filesList" class="files-list"></div>
 

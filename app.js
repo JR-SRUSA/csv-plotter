@@ -71,6 +71,12 @@
   const dataBackupFileInput = document.getElementById('dataBackupFileInput');
   const deleteAllStoredFilesBtn = document.getElementById('deleteAllStoredFilesBtn');
   const storedFilesStatus = document.getElementById('storedFilesStatus');
+  const pickUploadedDataBtn = document.getElementById('pickUploadedDataBtn');
+  const pickUploadedModal = document.getElementById('pickUploadedModal');
+  const pickUploadedCloseBtn = document.getElementById('pickUploadedCloseBtn');
+  const pickUploadedSortSelect = document.getElementById('pickUploadedSortSelect');
+  const pickUploadedSearch = document.getElementById('pickUploadedSearch');
+  const pickUploadedList = document.getElementById('pickUploadedList');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -2511,6 +2517,21 @@
   function parseFile(file, skipStore = false) {
     const processors = window.LogFileProcessors;
 
+    // Shared helper: store a file in IndexedDB after computing hash and checking for
+    // duplicate content (same hash as an existing entry with a different name).
+    function storeWithHashCheck(name, text, extraMeta) {
+      const hash = computeFileHash(text);
+      const fileMeta = Object.assign(extractCsvFileMetadata(text), extraMeta || {});
+      findDuplicateByHash(hash).then((dup) => {
+        if (dup && dup.name !== name) {
+          setStoredFilesStatus(
+            `"${name}" appears identical to the already-stored "${dup.name}" (same content hash). Both have been stored.`
+          );
+        }
+        storeFileInDB(name, text, hash, fileMeta);
+      });
+    }
+
     // Garmin TCX files are XML activity exports with explicit Lap/Trackpoint nodes.
     if (/\.tcx$/i.test(file.name || '')) {
       if (typeof file.text !== 'function' || !processors || typeof processors.parseGarminTcxXml !== 'function') {
@@ -2520,7 +2541,7 @@
       file.text().then((text) => {
         const processed = processors.parseGarminTcxXml(text);
         addProcessedLog(file, processed, { kind: 'tcxXml', text });
-        if (!skipStore) storeFileInDB(file.name, text);
+        if (!skipStore) storeWithHashCheck(file.name, text);
       }, () => {
         console.error('Failed to read .tcx file:', file.name);
       });
@@ -2537,7 +2558,7 @@
       file.text().then((text) => {
         const processed = processors.processVIGradeResXml(text);
         addProcessedLog(file, processed, { kind: 'resXml', text });
-        if (!skipStore) storeFileInDB(file.name, text);
+        if (!skipStore) storeWithHashCheck(file.name, text);
       }, () => {
         console.error('Failed to read .res file:', file.name);
       });
@@ -2582,7 +2603,7 @@
         // .dat logs are treated as tab-delimited outright rather than sniffed -- they're
         // never a comma CSV in practice, and content-sniffing a short or metadata-heavy
         // file can be less reliable than just knowing from the extension.
-        if (!skipStore) storeFileInDB(file.name, text);
+        if (!skipStore) storeWithHashCheck(file.name, text);
         const delimiter = forceTsv ? 'tab' : processors.detectFieldDelimiter(text);
         detectedDelimiter = delimiter;
         if (delimiter === 'tab') {
@@ -9626,8 +9647,45 @@
   // On startup all stored entries are re-parsed automatically.
 
   const FILE_DB_NAME = 'csvPlotterFiles';
-  const FILE_DB_VERSION = 1;
+  const FILE_DB_VERSION = 2;
   const FILE_STORE = 'files';
+
+  // Lightweight DJB2 hash of a string -- avoids crypto.subtle which requires a
+  // secure context (HTTPS/localhost) not guaranteed in the ESP32 embedded build.
+  function computeFileHash(text) {
+    let h = 5381;
+    for (let i = 0; i < text.length; i++) {
+      h = ((h << 5) + h) ^ text.charCodeAt(i);
+      h = h >>> 0; // keep unsigned 32-bit
+    }
+    return h.toString(16).padStart(8, '0');
+  }
+
+  // Extract key metadata fields from the top of a CSV/TSV file without a full
+  // PapaParse run -- reads the first 50 lines looking for key,value rows.
+  function extractCsvFileMetadata(text) {
+    const lines = text.split(/\r?\n/).slice(0, 50);
+    const meta = {};
+    const FIELDS = ['venue', 'track', 'rider', 'vehicle', 'bike', 'driver', 'car', 'championship', 'event', 'session', 'date'];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      // Support comma- and tab-delimited key,value rows
+      const sep = line.includes('\t') ? '\t' : ',';
+      const parts = line.split(sep);
+      if (parts.length < 2) continue;
+      const key = String(parts[0] == null ? '' : parts[0]).trim().toLowerCase();
+      if (!key || !FIELDS.includes(key)) continue;
+      const value = parts.slice(1).map(p => String(p == null ? '' : p).trim()).filter(Boolean).join(' ');
+      if (value && !Object.prototype.hasOwnProperty.call(meta, key)) {
+        meta[key] = value;
+      }
+    }
+    // Normalise: prefer 'venue' over 'track' but keep both if present
+    const track = meta.venue || meta.track || '';
+    const rider = meta.rider || meta.driver || '';
+    const vehicle = meta.vehicle || meta.bike || meta.car || '';
+    return { track, rider, vehicle, date: meta.date || '', session: meta.session || '', event: meta.event || '' };
+  }
 
   function openFileDB() {
     return new Promise((resolve, reject) => {
@@ -9637,20 +9695,37 @@
         if (!db.objectStoreNames.contains(FILE_STORE)) {
           db.createObjectStore(FILE_STORE, { keyPath: 'name' });
         }
+        // v2 migration: no structural change needed (just adding new fields to records)
       };
       req.onsuccess = (e) => resolve(e.target.result);
       req.onerror = (e) => reject(e.target.error);
     });
   }
 
-  function storeFileInDB(name, text) {
+  // Returns a promise that resolves to the stored entry if a file with the same
+  // hash already exists (but different name), or null otherwise.
+  function findDuplicateByHash(hash) {
+    return getAllFilesFromDB().then((entries) => {
+      return entries.find(e => e.hash && e.hash === hash) || null;
+    });
+  }
+
+  function storeFileInDB(name, text, hash, fileMeta) {
+    const entry = {
+      name,
+      text,
+      storedAt: new Date().toISOString(),
+      hash: hash || computeFileHash(text),
+      fileMeta: fileMeta || extractCsvFileMetadata(text),
+    };
     return openFileDB().then((db) => new Promise((resolve, reject) => {
       const tx = db.transaction(FILE_STORE, 'readwrite');
-      tx.objectStore(FILE_STORE).put({ name, text, storedAt: new Date().toISOString() });
+      tx.objectStore(FILE_STORE).put(entry);
       tx.oncomplete = () => resolve();
       tx.onerror = (e) => reject(e.target.error);
     })).then(() => {
       renderStoredFilesList();
+      renderPickerList();
     }).catch(() => { /* storage failure -- continue silently */ });
   }
 
@@ -9662,6 +9737,7 @@
       tx.onerror = (e) => reject(e.target.error);
     })).then(() => {
       renderStoredFilesList();
+      renderPickerList();
     }).catch(() => {});
   }
 
@@ -9682,6 +9758,7 @@
       tx.onerror = (e) => reject(e.target.error);
     })).then(() => {
       renderStoredFilesList();
+      renderPickerList();
     }).catch(() => {});
   }
 
@@ -9748,6 +9825,147 @@
         parseFile(file, /* skipStore */ true);
       });
     });
+  }
+
+  // ── Pick Uploaded Data modal ──────────────────────────────────────────────
+
+  function openPickerModal() {
+    if (!pickUploadedModal) return;
+    pickUploadedModal.hidden = false;
+    renderPickerList();
+    if (pickUploadedSearch) pickUploadedSearch.focus();
+  }
+
+  function closePickerModal() {
+    if (!pickUploadedModal) return;
+    pickUploadedModal.hidden = true;
+  }
+
+  function renderPickerList() {
+    if (!pickUploadedList) return;
+    const sortBy = pickUploadedSortSelect ? pickUploadedSortSelect.value : 'date';
+    const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
+
+    getAllFilesFromDB().then((entries) => {
+      pickUploadedList.innerHTML = '';
+      if (entries.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = 'No stored files. Upload a CSV file to get started.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+
+      let filtered = entries;
+      if (filter) {
+        filtered = entries.filter((e) => {
+          const fm = e.fileMeta || {};
+          return [e.name, fm.track, fm.rider, fm.vehicle, fm.event, fm.session]
+            .filter(Boolean).join(' ').toLowerCase().includes(filter);
+        });
+      }
+
+      const sorted = filtered.slice().sort((a, b) => {
+        const fa = a.fileMeta || {};
+        const fb = b.fileMeta || {};
+        switch (sortBy) {
+          case 'name':
+            return (a.name || '').localeCompare(b.name || '');
+          case 'track':
+            return (fa.track || '').localeCompare(fb.track || '') || (a.name || '').localeCompare(b.name || '');
+          case 'rider':
+            return (fa.rider || '').localeCompare(fb.rider || '') || (a.name || '').localeCompare(b.name || '');
+          case 'vehicle':
+            return (fa.vehicle || '').localeCompare(fb.vehicle || '') || (a.name || '').localeCompare(b.name || '');
+          default: // 'date' -- newest first
+            return (b.storedAt || '').localeCompare(a.storedAt || '');
+        }
+      });
+
+      if (sorted.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = 'No files match that filter.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+
+      sorted.forEach((entry) => {
+        const fm = entry.fileMeta || {};
+        const tags = [fm.track, fm.rider, fm.vehicle, fm.event, fm.session]
+          .filter(Boolean).join(' · ');
+        const storedDate = entry.storedAt ? new Date(entry.storedAt).toLocaleDateString() : '';
+
+        const item = document.createElement('div');
+        item.className = 'pick-uploaded-item';
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'pick-uploaded-item-meta';
+
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'pick-uploaded-item-name';
+        nameDiv.textContent = entry.name;
+        nameDiv.title = entry.name;
+        metaDiv.appendChild(nameDiv);
+
+        if (tags || storedDate) {
+          const tagsDiv = document.createElement('div');
+          tagsDiv.className = 'pick-uploaded-item-tags';
+          tagsDiv.textContent = [tags, storedDate ? `Stored ${storedDate}` : ''].filter(Boolean).join('  ·  ');
+          metaDiv.appendChild(tagsDiv);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'pick-uploaded-item-actions';
+
+        const loadBtn = document.createElement('button');
+        loadBtn.type = 'button';
+        loadBtn.className = 'pick-uploaded-item-load-btn';
+        loadBtn.textContent = 'Load';
+        loadBtn.title = 'Load this file into the plotter';
+        loadBtn.addEventListener('click', () => {
+          const blob = new Blob([entry.text], { type: 'text/plain' });
+          const file = new File([blob], entry.name, { type: 'text/plain' });
+          parseFile(file, /* skipStore */ true);
+          closePickerModal();
+        });
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'pick-uploaded-item-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = 'Remove from browser storage';
+        removeBtn.addEventListener('click', () => {
+          removeFileFromDB(entry.name).then(() => renderPickerList());
+        });
+
+        actions.appendChild(loadBtn);
+        actions.appendChild(removeBtn);
+        item.appendChild(metaDiv);
+        item.appendChild(actions);
+        pickUploadedList.appendChild(item);
+      });
+    });
+  }
+
+  if (pickUploadedDataBtn) {
+    pickUploadedDataBtn.addEventListener('click', openPickerModal);
+  }
+  if (pickUploadedCloseBtn) {
+    pickUploadedCloseBtn.addEventListener('click', closePickerModal);
+  }
+  if (pickUploadedModal) {
+    const backdrop = pickUploadedModal.querySelector('.pick-uploaded-backdrop');
+    if (backdrop) backdrop.addEventListener('click', closePickerModal);
+    pickUploadedModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closePickerModal();
+    });
+  }
+  if (pickUploadedSortSelect) {
+    pickUploadedSortSelect.addEventListener('change', renderPickerList);
+  }
+  if (pickUploadedSearch) {
+    pickUploadedSearch.addEventListener('input', renderPickerList);
   }
 
   function downloadAllData() {
