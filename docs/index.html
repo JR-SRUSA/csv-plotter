@@ -17,10 +17,12 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="leaflet.css" />
+  <link rel="stylesheet" href="lib/leaflet.min.css" />
   <!-- Loads after Leaflet's CSS so our theme overrides (e.g. dark-mode control colors)
        win the cascade on equal specificity, regardless of shorthand/longhand quirks. -->
   <link rel="stylesheet" href="style.css">
+  <script src="lib/papaparse.min.js"></script>
+  <script src="lib/leaflet.min.js"></script>
 </head>
 <body>
   <header>
@@ -66,6 +68,31 @@
         <input id="fileInput" type="file" accept=".csv,text/csv,application/csv,application/vnd.ms-excel,.tsv,.txt,text/tab-separated-values,text/plain,.dat,.res,.tcx,application/xml,text/xml" multiple />
 
       </label>
+      <button id="pickUploadedDataBtn" type="button" class="pick-uploaded-btn" title="Pick from previously uploaded files">Pick Uploaded Data</button>
+
+      <!-- Pick Uploaded Data modal -->
+      <div id="pickUploadedModal" class="pick-uploaded-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pickUploadedTitle">
+        <div class="pick-uploaded-backdrop"></div>
+        <div class="pick-uploaded-dialog">
+          <div class="pick-uploaded-header">
+            <span id="pickUploadedTitle" class="pick-uploaded-title">Pick Uploaded Data</span>
+            <button id="pickUploadedCloseBtn" type="button" class="pick-uploaded-close" aria-label="Close">&times;</button>
+          </div>
+          <div class="pick-uploaded-controls">
+            <label class="pick-uploaded-sort-label">Sort by:
+              <select id="pickUploadedSortSelect" class="pick-uploaded-sort-select">
+                <option value="name">Name</option>
+                <option value="date" selected>Date (newest first)</option>
+                <option value="track">Track / Venue</option>
+                <option value="rider">Rider</option>
+                <option value="vehicle">Vehicle</option>
+              </select>
+            </label>
+            <input id="pickUploadedSearch" type="text" class="pick-uploaded-search" placeholder="Filter files…" autocomplete="off" />
+          </div>
+          <div id="pickUploadedList" class="pick-uploaded-list"></div>
+        </div>
+      </div>
 
       <div id="filesList" class="files-list"></div>
 
@@ -283,7 +310,19 @@
           <span class="collapsible-caret" aria-hidden="true"></span>
         </summary>
         <div class="collapsible-action-body">
-          <p class="settings-io-hint">Theme, panel sizes, math channels, data filters, and track corner/start-finish overrides -- not your loaded log files.</p>
+          <p class="settings-io-hint">Uploaded data files are saved in your browser. Use the buttons below to load them into the plotter.</p>
+          <div id="storedFilesList" class="stored-files-list"></div>
+          <div class="stored-files-actions">
+            <button id="loadAllStoredFilesBtn" type="button">Load All Stored Files</button>
+            <button id="downloadAllDataBtn" type="button">Download All Data</button>
+            <button id="uploadDataBackupBtn" type="button">Upload Backup</button>
+            <input type="file" id="dataBackupFileInput" accept=".json,application/json" hidden />
+            <button id="deleteAllStoredFilesBtn" type="button">Delete All Stored Files</button>
+          </div>
+          <div id="storedFilesStatus" class="settings-io-status" aria-live="polite"></div>
+
+          <hr class="settings-divider" />
+          <p class="settings-io-hint">Theme, panel sizes, math channels, data filters, and track corner/start-finish overrides.</p>
           <div class="settings-io-controls">
             <button id="downloadSettingsBtn" type="button">Download Settings</button>
             <button id="uploadSettingsBtn" type="button">Upload Settings</button>
@@ -363,7 +402,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-11b</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-18c</div>
     </section>
 
     <section class="plot">
@@ -371,6 +410,13 @@
         <div id="plotDiv"></div>
       </div>
       <div id="colorAxisLegend" class="color-axis-legend" hidden></div>
+      <div id="selectionStatsPanel" class="selection-stats-panel" hidden>
+        <div id="selectionStatsHeader" class="selection-stats-header">
+          <span>Selection Stats</span>
+          <button id="selectionStatsClose" class="selection-stats-close" aria-label="Close selection stats">✕</button>
+        </div>
+        <div id="selectionStatsBody" class="selection-stats-body"></div>
+      </div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>
         <div id="leafletMapDiv" class="map-panel"></div>
