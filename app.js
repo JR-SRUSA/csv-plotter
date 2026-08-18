@@ -9311,6 +9311,158 @@
     URL.revokeObjectURL(url);
   }
 
+  // ── Minimal ZIP builder (store / no compression) ─────────────────────────
+  // Builds a valid ZIP archive entirely in-browser without any external library.
+  // Each entry is stored uncompressed (method 0) to avoid needing DecompressionStream
+  // on the restore path — maximising compatibility with older browsers and the ESP32
+  // build served over plain HTTP.
+
+  function buildZip(entries) {
+    // entries: Array<{ name: string, data: string | Uint8Array }>
+    // Returns a Uint8Array containing the complete ZIP file.
+
+    const enc = new TextEncoder();
+
+    function toBytes(data) {
+      return (typeof data === 'string') ? enc.encode(data) : data;
+    }
+
+    function crc32(bytes) {
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) {
+        crc ^= bytes[i];
+        for (let j = 0; j < 8; j++) {
+          crc = (crc & 1) ? (crc >>> 1) ^ 0xEDB88320 : (crc >>> 1);
+        }
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function u16le(n, buf, off) { buf[off] = n & 0xFF; buf[off+1] = (n >> 8) & 0xFF; }
+    function u32le(n, buf, off) { buf[off] = n & 0xFF; buf[off+1] = (n>>8)&0xFF; buf[off+2] = (n>>16)&0xFF; buf[off+3] = (n>>24)&0xFF; }
+
+    const localHeaders = [];
+    const offsets = [];
+    let offset = 0;
+    const parts = [];
+
+    for (const entry of entries) {
+      const nameBytes = enc.encode(entry.name);
+      const dataBytes = toBytes(entry.data);
+      const crc = crc32(dataBytes);
+      const size = dataBytes.length;
+
+      const local = new Uint8Array(30 + nameBytes.length);
+      u32le(0x04034B50, local, 0);  // local file header signature
+      u16le(20, local, 4);           // version needed: 2.0
+      u16le(0, local, 6);            // general purpose bit flag
+      u16le(0, local, 8);            // compression method: store
+      u16le(0, local, 10);           // last mod time
+      u16le(0, local, 12);           // last mod date
+      u32le(crc, local, 14);
+      u32le(size, local, 18);        // compressed size
+      u32le(size, local, 22);        // uncompressed size
+      u16le(nameBytes.length, local, 26);
+      u16le(0, local, 28);           // extra field length
+      local.set(nameBytes, 30);
+
+      offsets.push(offset);
+      offset += local.length + size;
+      parts.push(local, dataBytes);
+      localHeaders.push({ nameBytes, crc, size });
+    }
+
+    const centralStart = offset;
+    const centralParts = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const { nameBytes, crc, size } = localHeaders[i];
+      const central = new Uint8Array(46 + nameBytes.length);
+      u32le(0x02014B50, central, 0);  // central dir signature
+      u16le(20, central, 4);           // version made by
+      u16le(20, central, 6);           // version needed
+      u16le(0, central, 8);            // flags
+      u16le(0, central, 10);           // method: store
+      u16le(0, central, 12);           // last mod time
+      u16le(0, central, 14);           // last mod date
+      u32le(crc, central, 16);
+      u32le(size, central, 20);        // compressed size
+      u32le(size, central, 24);        // uncompressed size
+      u16le(nameBytes.length, central, 28);
+      u16le(0, central, 30);           // extra field length
+      u16le(0, central, 32);           // file comment length
+      u16le(0, central, 34);           // disk number start
+      u16le(0, central, 36);           // internal attrs
+      u32le(0, central, 38);           // external attrs
+      u32le(offsets[i], central, 42);  // relative offset of local header
+      central.set(nameBytes, 46);
+      centralParts.push(central);
+      offset += central.length;
+    }
+
+    const centralSize = offset - centralStart;
+    const eocd = new Uint8Array(22);
+    u32le(0x06054B50, eocd, 0);  // end of central dir signature
+    u16le(0, eocd, 4);            // disk number
+    u16le(0, eocd, 6);            // disk with central dir
+    u16le(entries.length, eocd, 8);
+    u16le(entries.length, eocd, 10);
+    u32le(centralSize, eocd, 12);
+    u32le(centralStart, eocd, 16);
+    u16le(0, eocd, 20);           // comment length
+
+    const allParts = [...parts, ...centralParts, eocd];
+    const totalLen = allParts.reduce((s, p) => s + p.length, 0);
+    const out = new Uint8Array(totalLen);
+    let pos = 0;
+    for (const p of allParts) { out.set(p, pos); pos += p.length; }
+    return out;
+  }
+
+  function triggerZipDownload(zipBytes, filenamePrefix) {
+    const blob = new Blob([zipBytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ── ZIP reader (store-only, no DEFLATE) ───────────────────────────────────
+  // Reads a ZIP produced by buildZip() above. Returns a Map<name, Uint8Array>.
+  // Only handles method-0 (store) entries; others are skipped gracefully.
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const u8 = new Uint8Array(buffer);
+    const files = new Map();
+
+    let i = 0;
+    while (i + 4 <= buffer.byteLength) {
+      const sig = view.getUint32(i, true);
+      if (sig === 0x04034B50) {
+        const method      = view.getUint16(i + 8,  true);
+        const compSize    = view.getUint32(i + 18, true);
+        const nameLen     = view.getUint16(i + 26, true);
+        const extraLen    = view.getUint16(i + 28, true);
+        const nameStart   = i + 30;
+        const dataStart   = nameStart + nameLen + extraLen;
+        const name = new TextDecoder().decode(u8.slice(nameStart, nameStart + nameLen));
+        if (method === 0) {
+          files.set(name, u8.slice(dataStart, dataStart + compSize));
+        }
+        i = dataStart + compSize;
+      } else if (sig === 0x02014B50 || sig === 0x06054B50) {
+        break; // reached central directory or EOCD
+      } else {
+        i++; // scan forward (shouldn't happen with well-formed ZIP)
+      }
+    }
+    return files;
+  }
+
   function setSettingsIoStatus(message, isError) {
     if (!settingsIoStatus) return;
     settingsIoStatus.textContent = message;
@@ -9526,35 +9678,38 @@
         if (value !== undefined) settings[key] = value;
       });
       const plotterVersion = appVersionLabel ? appVersionLabel.textContent.replace(/^Version\s*/i, '').trim() : '';
-      const payload = {
+
+      // manifest.json references file names only — the actual CSV content lives in
+      // separate files inside the ZIP rather than being inlined in the JSON.
+      const manifest = {
         app: 'csv-plotter-backup',
-        version: 1,
+        version: 2,
         plotterVersion,
         exportedAt: new Date().toISOString(),
-        files: entries,
+        files: entries.map(e => ({ name: e.name, storedAt: e.storedAt || '' })),
         settings
       };
-      triggerJsonDownload(JSON.stringify(payload, null, 2), 'csv-plotter-backup');
+
+      const zipEntries = [
+        { name: 'manifest.json', data: JSON.stringify(manifest, null, 2) },
+        ...entries.map(e => ({ name: e.name, data: e.text || '' }))
+      ];
+
+      triggerZipDownload(buildZip(zipEntries), 'csv-plotter-backup');
       setStoredFilesStatus('Backup downloaded.');
     });
   }
 
   function restoreFromBackup(file) {
-    if (typeof file.text !== 'function') {
+    if (typeof file.arrayBuffer !== 'function' && typeof file.text !== 'function') {
       setStoredFilesStatus('This browser cannot read that file.', true);
       return;
     }
-    file.text().then((text) => {
-      let parsed;
-      try { parsed = JSON.parse(text); } catch {
-        setStoredFilesStatus('Could not read that file — not valid JSON.', true);
-        return;
-      }
-      if (!parsed || parsed.app !== 'csv-plotter-backup' || !Array.isArray(parsed.files)) {
-        setStoredFilesStatus("That file doesn't look like a csv-plotter backup.", true);
-        return;
-      }
-      const storePromises = parsed.files.map((entry) => {
+
+    // Shared finalise step used by both ZIP and JSON restore paths.
+    function applyBackup(parsed, fileEntries) {
+      // fileEntries: Array<{ name, text }>
+      const storePromises = fileEntries.map((entry) => {
         if (!entry.name || typeof entry.text !== 'string') return Promise.resolve();
         return storeFileInDB(entry.name, entry.text).then(() => {
           const alreadyLoaded = new Set(logs.map(l => l.name));
@@ -9566,24 +9721,79 @@
         });
       });
       Promise.all(storePromises).then(() => {
-        if (parsed.settings && typeof parsed.settings === 'object') {
+        if (parsed && parsed.settings && typeof parsed.settings === 'object') {
           let applied = 0;
           SETTINGS_STORAGE_KEYS.forEach((key) => {
             if (!(key in parsed.settings)) return;
             try { if (writeSettingValue(key, parsed.settings[key])) applied += 1; } catch {}
           });
           if (applied > 0) {
-            setStoredFilesStatus(`Restored ${parsed.files.length} file(s) and ${applied} setting(s). Reloading...`);
+            setStoredFilesStatus(`Restored ${fileEntries.length} file(s) and ${applied} setting(s). Reloading...`);
             setTimeout(() => location.reload(), 800);
             return;
           }
         }
-        setStoredFilesStatus(`Restored ${parsed.files.length} file(s).`);
+        setStoredFilesStatus(`Restored ${fileEntries.length} file(s).`);
         renderStoredFilesList();
       });
-    }, () => {
-      setStoredFilesStatus('Failed to read that file.', true);
-    });
+    }
+
+    // ── ZIP backup (version 2+) ──────────────────────────────────────────────
+    if (/\.zip$/i.test(file.name || '')) {
+      (typeof file.arrayBuffer === 'function' ? file.arrayBuffer() : Promise.reject())
+        .then((buffer) => {
+          let zipFiles;
+          try { zipFiles = readZip(buffer); } catch {
+            setStoredFilesStatus('Could not read ZIP — file may be corrupt.', true);
+            return;
+          }
+          const manifestBytes = zipFiles.get('manifest.json');
+          if (!manifestBytes) {
+            setStoredFilesStatus("That ZIP doesn't contain a csv-plotter manifest.", true);
+            return;
+          }
+          let manifest;
+          try { manifest = JSON.parse(new TextDecoder().decode(manifestBytes)); } catch {
+            setStoredFilesStatus('manifest.json inside the ZIP is not valid JSON.', true);
+            return;
+          }
+          if (!manifest || manifest.app !== 'csv-plotter-backup' || !Array.isArray(manifest.files)) {
+            setStoredFilesStatus("That ZIP doesn't look like a csv-plotter backup.", true);
+            return;
+          }
+          const dec = new TextDecoder();
+          const fileEntries = manifest.files
+            .map(ref => {
+              const bytes = zipFiles.get(ref.name);
+              if (!bytes) return null;
+              return { name: ref.name, text: dec.decode(bytes) };
+            })
+            .filter(Boolean);
+          applyBackup(manifest, fileEntries);
+        }, () => {
+          setStoredFilesStatus('Failed to read that ZIP file.', true);
+        });
+      return;
+    }
+
+    // ── Legacy JSON backup (version 1) ─────────────────────────────────────
+    (typeof file.text === 'function' ? file.text() : Promise.reject())
+      .then((text) => {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch {
+          setStoredFilesStatus('Could not read that file — not valid JSON.', true);
+          return;
+        }
+        if (!parsed || parsed.app !== 'csv-plotter-backup' || !Array.isArray(parsed.files)) {
+          setStoredFilesStatus("That file doesn't look like a csv-plotter backup.", true);
+          return;
+        }
+        // v1 format: each file entry has { name, text, storedAt }
+        const fileEntries = parsed.files.filter(e => e.name && typeof e.text === 'string');
+        applyBackup(parsed, fileEntries);
+      }, () => {
+        setStoredFilesStatus('Failed to read that file.', true);
+      });
   }
 
   if (downloadAllDataBtn) {
