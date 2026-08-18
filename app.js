@@ -136,6 +136,10 @@
   const importerCustomStandardUnitInput = document.getElementById('importerCustomStandardUnit');
   const importerCustomStandardAddBtn = document.getElementById('importerCustomStandardAdd');
   const importerCustomStandardList = document.getElementById('importerCustomStandardList');
+  const selectionStatsPanel = document.getElementById('selectionStatsPanel');
+  const selectionStatsBody = document.getElementById('selectionStatsBody');
+  const selectionStatsClose = document.getElementById('selectionStatsClose');
+  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -921,6 +925,7 @@
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
     selectionFitAnnotations = [];
+    if (selectionStatsPanel) selectionStatsPanel.hidden = true;
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
@@ -930,10 +935,69 @@
     }
   }
 
-  // Fit line color needs to stay readable against the plot background in both themes --
-  // a plain black line all but vanishes on the dark background's dark traces/gridlines.
+  // Fit line color is black so it stands out clearly against all channel colors.
   function getSelectionFitLineColor() {
-    return getCurrentTheme() === 'dark' ? '#d7dde5' : '#1a1a1a';
+    return 'black';
+  }
+
+  // Populates the floating HTML selection stats panel with one group block per channel.
+  function updateSelectionStatsPanel(groupFits) {
+    if (!selectionStatsPanel || !selectionStatsBody) return;
+    selectionStatsBody.innerHTML = '';
+    groupFits.forEach(({g, fit, xMin, xMax, yMin, yMax}) => {
+      const label = getChannelLabel(g.trace.meta.channel);
+      const block = document.createElement('div');
+      block.className = 'selection-stats-group';
+      const name = document.createElement('div');
+      name.className = 'selection-stats-group-name';
+      name.textContent = label;
+      block.appendChild(name);
+      const lines = [
+        `n = ${g.xs.length} pts`,
+        `${mainPlotXAxisTitle || 'X'}: ${formatStatValue(xMin)} \u2013 ${formatStatValue(xMax)}`,
+        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`,
+        fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a',
+        fit ? `R\u00b2: ${fit.r2.toFixed(3)}` : 'R\u00b2: n/a'
+      ];
+      lines.forEach((text) => {
+        const row = document.createElement('div');
+        row.className = 'selection-stats-group-line';
+        row.textContent = text;
+        block.appendChild(row);
+      });
+      selectionStatsBody.appendChild(block);
+    });
+    selectionStatsPanel.hidden = false;
+  }
+
+  // Drag-to-reposition the selection stats panel via its header.
+  (() => {
+    if (!selectionStatsPanel || !selectionStatsHeader) return;
+    let dragging = false, ox = 0, oy = 0;
+    selectionStatsHeader.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      const rect = selectionStatsPanel.getBoundingClientRect();
+      // Switch to absolute (pixel) positioning anchored to current location.
+      selectionStatsPanel.style.right = '';
+      selectionStatsPanel.style.left = rect.left + 'px';
+      selectionStatsPanel.style.top = rect.top + 'px';
+      ox = e.clientX - rect.left;
+      oy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      selectionStatsPanel.style.left = (e.clientX - ox) + 'px';
+      selectionStatsPanel.style.top = (e.clientY - oy) + 'px';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+  })();
+
+  if (selectionStatsClose) {
+    selectionStatsClose.addEventListener('click', () => {
+      if (selectionStatsPanel) selectionStatsPanel.hidden = true;
+    });
   }
 
   // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
@@ -978,15 +1042,17 @@
     const shapes = [];
     const annotations = [];
     const validGroups = [];
+    const groupFits = [];
     const fitLineColor = getSelectionFitLineColor();
     let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
       const fit = computeLinearFit(g.xs, g.ys);
-      if (!fit) return;
       const [xMin, xMax] = arrayMinMax(g.xs);
       const [yMin, yMax] = arrayMinMax(g.ys);
+      groupFits.push({g, fit, xMin, xMax, yMin, yMax});
+      if (!fit) return;
       const xaxis = g.trace.xaxis || 'x';
       const yaxis = g.trace.yaxis || 'y';
       shapes.push({
@@ -1006,6 +1072,7 @@
       clearSelectionFit();
       return;
     }
+    updateSelectionStatsPanel(groupFits);
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
     if (suppressSelectionReentry) return;

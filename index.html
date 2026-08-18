@@ -17,14 +17,14 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css" />
+  <link rel="stylesheet" href="lib/leaflet.min.css" />
   <!-- Loads after Leaflet's CSS so our theme overrides (e.g. dark-mode control colors)
        win the cascade on equal specificity, regardless of shorthand/longhand quirks. -->
   <link rel="stylesheet" href="style.css">
   <!-- <script src="https://cdn.plot.ly/plotly-2.20.0.min.js"></script> -->
   <script src="lib/plotly-custom.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js"></script>
+  <script src="lib/papaparse.min.js"></script>
+  <script src="lib/leaflet.min.js"></script>
 </head>
 <body>
   <header>
@@ -378,7 +378,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-11b</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-18b</div>
     </section>
 
     <section class="plot">
@@ -386,6 +386,13 @@
         <div id="plotDiv"></div>
       </div>
       <div id="colorAxisLegend" class="color-axis-legend" hidden></div>
+      <div id="selectionStatsPanel" class="selection-stats-panel" hidden>
+        <div id="selectionStatsHeader" class="selection-stats-header">
+          <span>Selection Stats</span>
+          <button id="selectionStatsClose" class="selection-stats-close" aria-label="Close selection stats">✕</button>
+        </div>
+        <div id="selectionStatsBody" class="selection-stats-body"></div>
+      </div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>
         <div id="leafletMapDiv" class="map-panel"></div>
