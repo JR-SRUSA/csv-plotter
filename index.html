@@ -287,9 +287,10 @@
           <span class="collapsible-caret" aria-hidden="true"></span>
         </summary>
         <div class="collapsible-action-body">
-          <p class="settings-io-hint">Uploaded data files are saved in your browser and reloaded automatically on your next visit.</p>
+          <p class="settings-io-hint">Uploaded data files are saved in your browser. Use the buttons below to load them into the plotter.</p>
           <div id="storedFilesList" class="stored-files-list"></div>
           <div class="stored-files-actions">
+            <button id="loadAllStoredFilesBtn" type="button">Load All Stored Files</button>
             <button id="downloadAllDataBtn" type="button">Download All Data</button>
             <button id="uploadDataBackupBtn" type="button">Upload Backup</button>
             <input type="file" id="dataBackupFileInput" accept=".json,application/json" hidden />

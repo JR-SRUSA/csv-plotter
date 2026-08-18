@@ -65,6 +65,7 @@
   const settingsFileInput = document.getElementById('settingsFileInput');
   const settingsIoStatus = document.getElementById('settingsIoStatus');
   const storedFilesList = document.getElementById('storedFilesList');
+  const loadAllStoredFilesBtn = document.getElementById('loadAllStoredFilesBtn');
   const downloadAllDataBtn = document.getElementById('downloadAllDataBtn');
   const uploadDataBackupBtn = document.getElementById('uploadDataBackupBtn');
   const dataBackupFileInput = document.getElementById('dataBackupFileInput');
@@ -9708,6 +9709,17 @@
         nameSpan.className = 'stored-file-name';
         nameSpan.textContent = entry.name;
         nameSpan.title = `Stored: ${entry.storedAt || ''}`;
+        const loadBtn = document.createElement('button');
+        loadBtn.type = 'button';
+        loadBtn.className = 'stored-file-load-btn';
+        loadBtn.textContent = 'Load';
+        loadBtn.title = 'Load this file into the plotter';
+        loadBtn.addEventListener('click', () => {
+          const blob = new Blob([entry.text], { type: 'text/plain' });
+          const file = new File([blob], entry.name, { type: 'text/plain' });
+          parseFile(file, /* skipStore */ true);
+          setStoredFilesStatus(`Loaded "${entry.name}".`);
+        });
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.className = 'stored-file-remove-btn';
@@ -9718,6 +9730,7 @@
           setStoredFilesStatus(`Removed "${entry.name}" from storage.`);
         });
         row.appendChild(nameSpan);
+        row.appendChild(loadBtn);
         row.appendChild(removeBtn);
         storedFilesList.appendChild(row);
       });
@@ -9863,6 +9876,9 @@
       });
   }
 
+  if (loadAllStoredFilesBtn) {
+    loadAllStoredFilesBtn.addEventListener('click', loadStoredFilesIntoPlotter);
+  }
   if (downloadAllDataBtn) {
     downloadAllDataBtn.addEventListener('click', downloadAllData);
   }
@@ -9882,9 +9898,7 @@
     });
   }
 
-  // Load previously stored files when the app starts up.
   renderStoredFilesList();
-  loadStoredFilesIntoPlotter();
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');

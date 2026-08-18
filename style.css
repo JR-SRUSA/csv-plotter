@@ -348,6 +348,8 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .stored-files-list{margin-bottom:8px}
 .stored-file-row{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px}
 .stored-file-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary)}
+.stored-file-load-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
+.stored-file-load-btn:hover{background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)}
 .stored-file-remove-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .stored-file-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 .stored-files-actions{display:flex;gap:8px;flex-wrap:wrap}
