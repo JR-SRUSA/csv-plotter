@@ -1,4 +1,4 @@
-/lib/
+# /lib/
 *.log
 .DS_Store
 Thumbs.db
