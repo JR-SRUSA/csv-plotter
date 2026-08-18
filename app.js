@@ -64,6 +64,19 @@
   const uploadSettingsBtn = document.getElementById('uploadSettingsBtn');
   const settingsFileInput = document.getElementById('settingsFileInput');
   const settingsIoStatus = document.getElementById('settingsIoStatus');
+  const storedFilesList = document.getElementById('storedFilesList');
+  const loadAllStoredFilesBtn = document.getElementById('loadAllStoredFilesBtn');
+  const downloadAllDataBtn = document.getElementById('downloadAllDataBtn');
+  const uploadDataBackupBtn = document.getElementById('uploadDataBackupBtn');
+  const dataBackupFileInput = document.getElementById('dataBackupFileInput');
+  const deleteAllStoredFilesBtn = document.getElementById('deleteAllStoredFilesBtn');
+  const storedFilesStatus = document.getElementById('storedFilesStatus');
+  const pickUploadedDataBtn = document.getElementById('pickUploadedDataBtn');
+  const pickUploadedModal = document.getElementById('pickUploadedModal');
+  const pickUploadedCloseBtn = document.getElementById('pickUploadedCloseBtn');
+  const pickUploadedSortSelect = document.getElementById('pickUploadedSortSelect');
+  const pickUploadedSearch = document.getElementById('pickUploadedSearch');
+  const pickUploadedList = document.getElementById('pickUploadedList');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -130,6 +143,10 @@
   const importerCustomStandardUnitInput = document.getElementById('importerCustomStandardUnit');
   const importerCustomStandardAddBtn = document.getElementById('importerCustomStandardAdd');
   const importerCustomStandardList = document.getElementById('importerCustomStandardList');
+  const selectionStatsPanel = document.getElementById('selectionStatsPanel');
+  const selectionStatsBody = document.getElementById('selectionStatsBody');
+  const selectionStatsClose = document.getElementById('selectionStatsClose');
+  const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -915,6 +932,7 @@
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
     selectionFitAnnotations = [];
+    if (selectionStatsPanel) selectionStatsPanel.hidden = true;
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
@@ -924,10 +942,69 @@
     }
   }
 
-  // Fit line color needs to stay readable against the plot background in both themes --
-  // a plain black line all but vanishes on the dark background's dark traces/gridlines.
+  // Fit line color is black so it stands out clearly against all channel colors.
   function getSelectionFitLineColor() {
-    return getCurrentTheme() === 'dark' ? '#d7dde5' : '#1a1a1a';
+    return 'black';
+  }
+
+  // Populates the floating HTML selection stats panel with one group block per channel.
+  function updateSelectionStatsPanel(groupFits) {
+    if (!selectionStatsPanel || !selectionStatsBody) return;
+    selectionStatsBody.innerHTML = '';
+    groupFits.forEach(({g, fit, xMin, xMax, yMin, yMax}) => {
+      const label = getChannelLabel(g.trace.meta.channel);
+      const block = document.createElement('div');
+      block.className = 'selection-stats-group';
+      const name = document.createElement('div');
+      name.className = 'selection-stats-group-name';
+      name.textContent = label;
+      block.appendChild(name);
+      const lines = [
+        `n = ${g.xs.length} pts`,
+        `${mainPlotXAxisTitle || 'X'}: ${formatStatValue(xMin)} \u2013 ${formatStatValue(xMax)}`,
+        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`,
+        fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a',
+        fit ? `R\u00b2: ${fit.r2.toFixed(3)}` : 'R\u00b2: n/a'
+      ];
+      lines.forEach((text) => {
+        const row = document.createElement('div');
+        row.className = 'selection-stats-group-line';
+        row.textContent = text;
+        block.appendChild(row);
+      });
+      selectionStatsBody.appendChild(block);
+    });
+    selectionStatsPanel.hidden = false;
+  }
+
+  // Drag-to-reposition the selection stats panel via its header.
+  (() => {
+    if (!selectionStatsPanel || !selectionStatsHeader) return;
+    let dragging = false, ox = 0, oy = 0;
+    selectionStatsHeader.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      const rect = selectionStatsPanel.getBoundingClientRect();
+      // Switch to absolute (pixel) positioning anchored to current location.
+      selectionStatsPanel.style.right = '';
+      selectionStatsPanel.style.left = rect.left + 'px';
+      selectionStatsPanel.style.top = rect.top + 'px';
+      ox = e.clientX - rect.left;
+      oy = e.clientY - rect.top;
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      selectionStatsPanel.style.left = (e.clientX - ox) + 'px';
+      selectionStatsPanel.style.top = (e.clientY - oy) + 'px';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+  })();
+
+  if (selectionStatsClose) {
+    selectionStatsClose.addEventListener('click', () => {
+      if (selectionStatsPanel) selectionStatsPanel.hidden = true;
+    });
   }
 
   // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
@@ -972,15 +1049,17 @@
     const shapes = [];
     const annotations = [];
     const validGroups = [];
+    const groupFits = [];
     const fitLineColor = getSelectionFitLineColor();
     let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
       const fit = computeLinearFit(g.xs, g.ys);
-      if (!fit) return;
       const [xMin, xMax] = arrayMinMax(g.xs);
       const [yMin, yMax] = arrayMinMax(g.ys);
+      groupFits.push({g, fit, xMin, xMax, yMin, yMax});
+      if (!fit) return;
       const xaxis = g.trace.xaxis || 'x';
       const yaxis = g.trace.yaxis || 'y';
       shapes.push({
@@ -1000,6 +1079,7 @@
       clearSelectionFit();
       return;
     }
+    updateSelectionStatsPanel(groupFits);
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
     if (suppressSelectionReentry) return;
@@ -2434,8 +2514,23 @@
     updatePlot();
   }
 
-  function parseFile(file) {
+  function parseFile(file, skipStore = false) {
     const processors = window.LogFileProcessors;
+
+    // Shared helper: store a file in IndexedDB after computing hash and checking for
+    // duplicate content (same hash as an existing entry with a different name).
+    function storeWithHashCheck(name, text, extraMeta) {
+      const hash = computeFileHash(text);
+      const fileMeta = Object.assign(extractCsvFileMetadata(text), extraMeta || {});
+      findDuplicateByHash(hash).then((dup) => {
+        if (dup && dup.name !== name) {
+          setStoredFilesStatus(
+            `"${name}" appears identical to the already-stored "${dup.name}" (same content hash). Both have been stored.`
+          );
+        }
+        storeFileInDB(name, text, hash, fileMeta);
+      });
+    }
 
     // Garmin TCX files are XML activity exports with explicit Lap/Trackpoint nodes.
     if (/\.tcx$/i.test(file.name || '')) {
@@ -2446,6 +2541,7 @@
       file.text().then((text) => {
         const processed = processors.parseGarminTcxXml(text);
         addProcessedLog(file, processed, { kind: 'tcxXml', text });
+        if (!skipStore) storeWithHashCheck(file.name, text);
       }, () => {
         console.error('Failed to read .tcx file:', file.name);
       });
@@ -2462,6 +2558,7 @@
       file.text().then((text) => {
         const processed = processors.processVIGradeResXml(text);
         addProcessedLog(file, processed, { kind: 'resXml', text });
+        if (!skipStore) storeWithHashCheck(file.name, text);
       }, () => {
         console.error('Failed to read .res file:', file.name);
       });
@@ -2506,6 +2603,7 @@
         // .dat logs are treated as tab-delimited outright rather than sniffed -- they're
         // never a comma CSV in practice, and content-sniffing a short or metadata-heavy
         // file can be less reliable than just knowing from the extension.
+        if (!skipStore) storeWithHashCheck(file.name, text);
         const delimiter = forceTsv ? 'tab' : processors.detectFieldDelimiter(text);
         detectedDelimiter = delimiter;
         if (delimiter === 'tab') {
@@ -9302,6 +9400,158 @@
     URL.revokeObjectURL(url);
   }
 
+  // ── Minimal ZIP builder (store / no compression) ─────────────────────────
+  // Builds a valid ZIP archive entirely in-browser without any external library.
+  // Each entry is stored uncompressed (method 0) to avoid needing DecompressionStream
+  // on the restore path — maximising compatibility with older browsers and the ESP32
+  // build served over plain HTTP.
+
+  function buildZip(entries) {
+    // entries: Array<{ name: string, data: string | Uint8Array }>
+    // Returns a Uint8Array containing the complete ZIP file.
+
+    const enc = new TextEncoder();
+
+    function toBytes(data) {
+      return (typeof data === 'string') ? enc.encode(data) : data;
+    }
+
+    function crc32(bytes) {
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < bytes.length; i++) {
+        crc ^= bytes[i];
+        for (let j = 0; j < 8; j++) {
+          crc = (crc & 1) ? (crc >>> 1) ^ 0xEDB88320 : (crc >>> 1);
+        }
+      }
+      return (crc ^ 0xFFFFFFFF) >>> 0;
+    }
+
+    function u16le(n, buf, off) { buf[off] = n & 0xFF; buf[off+1] = (n >> 8) & 0xFF; }
+    function u32le(n, buf, off) { buf[off] = n & 0xFF; buf[off+1] = (n>>8)&0xFF; buf[off+2] = (n>>16)&0xFF; buf[off+3] = (n>>24)&0xFF; }
+
+    const localHeaders = [];
+    const offsets = [];
+    let offset = 0;
+    const parts = [];
+
+    for (const entry of entries) {
+      const nameBytes = enc.encode(entry.name);
+      const dataBytes = toBytes(entry.data);
+      const crc = crc32(dataBytes);
+      const size = dataBytes.length;
+
+      const local = new Uint8Array(30 + nameBytes.length);
+      u32le(0x04034B50, local, 0);  // local file header signature
+      u16le(20, local, 4);           // version needed: 2.0
+      u16le(0, local, 6);            // general purpose bit flag
+      u16le(0, local, 8);            // compression method: store
+      u16le(0, local, 10);           // last mod time
+      u16le(0, local, 12);           // last mod date
+      u32le(crc, local, 14);
+      u32le(size, local, 18);        // compressed size
+      u32le(size, local, 22);        // uncompressed size
+      u16le(nameBytes.length, local, 26);
+      u16le(0, local, 28);           // extra field length
+      local.set(nameBytes, 30);
+
+      offsets.push(offset);
+      offset += local.length + size;
+      parts.push(local, dataBytes);
+      localHeaders.push({ nameBytes, crc, size });
+    }
+
+    const centralStart = offset;
+    const centralParts = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const { nameBytes, crc, size } = localHeaders[i];
+      const central = new Uint8Array(46 + nameBytes.length);
+      u32le(0x02014B50, central, 0);  // central dir signature
+      u16le(20, central, 4);           // version made by
+      u16le(20, central, 6);           // version needed
+      u16le(0, central, 8);            // flags
+      u16le(0, central, 10);           // method: store
+      u16le(0, central, 12);           // last mod time
+      u16le(0, central, 14);           // last mod date
+      u32le(crc, central, 16);
+      u32le(size, central, 20);        // compressed size
+      u32le(size, central, 24);        // uncompressed size
+      u16le(nameBytes.length, central, 28);
+      u16le(0, central, 30);           // extra field length
+      u16le(0, central, 32);           // file comment length
+      u16le(0, central, 34);           // disk number start
+      u16le(0, central, 36);           // internal attrs
+      u32le(0, central, 38);           // external attrs
+      u32le(offsets[i], central, 42);  // relative offset of local header
+      central.set(nameBytes, 46);
+      centralParts.push(central);
+      offset += central.length;
+    }
+
+    const centralSize = offset - centralStart;
+    const eocd = new Uint8Array(22);
+    u32le(0x06054B50, eocd, 0);  // end of central dir signature
+    u16le(0, eocd, 4);            // disk number
+    u16le(0, eocd, 6);            // disk with central dir
+    u16le(entries.length, eocd, 8);
+    u16le(entries.length, eocd, 10);
+    u32le(centralSize, eocd, 12);
+    u32le(centralStart, eocd, 16);
+    u16le(0, eocd, 20);           // comment length
+
+    const allParts = [...parts, ...centralParts, eocd];
+    const totalLen = allParts.reduce((s, p) => s + p.length, 0);
+    const out = new Uint8Array(totalLen);
+    let pos = 0;
+    for (const p of allParts) { out.set(p, pos); pos += p.length; }
+    return out;
+  }
+
+  function triggerZipDownload(zipBytes, filenamePrefix) {
+    const blob = new Blob([zipBytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ── ZIP reader (store-only, no DEFLATE) ───────────────────────────────────
+  // Reads a ZIP produced by buildZip() above. Returns a Map<name, Uint8Array>.
+  // Only handles method-0 (store) entries; others are skipped gracefully.
+  function readZip(buffer) {
+    const view = new DataView(buffer);
+    const u8 = new Uint8Array(buffer);
+    const files = new Map();
+
+    let i = 0;
+    while (i + 4 <= buffer.byteLength) {
+      const sig = view.getUint32(i, true);
+      if (sig === 0x04034B50) {
+        const method      = view.getUint16(i + 8,  true);
+        const compSize    = view.getUint32(i + 18, true);
+        const nameLen     = view.getUint16(i + 26, true);
+        const extraLen    = view.getUint16(i + 28, true);
+        const nameStart   = i + 30;
+        const dataStart   = nameStart + nameLen + extraLen;
+        const name = new TextDecoder().decode(u8.slice(nameStart, nameStart + nameLen));
+        if (method === 0) {
+          files.set(name, u8.slice(dataStart, dataStart + compSize));
+        }
+        i = dataStart + compSize;
+      } else if (sig === 0x02014B50 || sig === 0x06054B50) {
+        break; // reached central directory or EOCD
+      } else {
+        i++; // scan forward (shouldn't happen with well-formed ZIP)
+      }
+    }
+    return files;
+  }
+
   function setSettingsIoStatus(message, isError) {
     if (!settingsIoStatus) return;
     settingsIoStatus.textContent = message;
@@ -9391,6 +9641,482 @@
       if (file) importSettingsFromFile(file);
     });
   }
+
+  // ── Stored Files (IndexedDB) ──────────────────────────────────────────────
+  // Uploaded files are persisted in IndexedDB so they survive page reloads.
+  // On startup all stored entries are re-parsed automatically.
+
+  const FILE_DB_NAME = 'csvPlotterFiles';
+  const FILE_DB_VERSION = 2;
+  const FILE_STORE = 'files';
+
+  // Lightweight DJB2 hash of a string -- avoids crypto.subtle which requires a
+  // secure context (HTTPS/localhost) not guaranteed in the ESP32 embedded build.
+  function computeFileHash(text) {
+    let h = 5381;
+    for (let i = 0; i < text.length; i++) {
+      h = ((h << 5) + h) ^ text.charCodeAt(i);
+      h = h >>> 0; // keep unsigned 32-bit
+    }
+    return h.toString(16).padStart(8, '0');
+  }
+
+  // Extract key metadata fields from the top of a CSV/TSV file without a full
+  // PapaParse run -- reads the first 50 lines looking for key,value rows.
+  function extractCsvFileMetadata(text) {
+    const lines = text.split(/\r?\n/).slice(0, 50);
+    const meta = {};
+    const FIELDS = ['venue', 'track', 'rider', 'vehicle', 'bike', 'driver', 'car', 'championship', 'event', 'session', 'date'];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      // Support comma- and tab-delimited key,value rows
+      const sep = line.includes('\t') ? '\t' : ',';
+      const parts = line.split(sep);
+      if (parts.length < 2) continue;
+      const key = String(parts[0] == null ? '' : parts[0]).trim().toLowerCase();
+      if (!key || !FIELDS.includes(key)) continue;
+      const value = parts.slice(1).map(p => String(p == null ? '' : p).trim()).filter(Boolean).join(' ');
+      if (value && !Object.prototype.hasOwnProperty.call(meta, key)) {
+        meta[key] = value;
+      }
+    }
+    // Normalise: prefer 'venue' over 'track' but keep both if present
+    const track = meta.venue || meta.track || '';
+    const rider = meta.rider || meta.driver || '';
+    const vehicle = meta.vehicle || meta.bike || meta.car || '';
+    return { track, rider, vehicle, date: meta.date || '', session: meta.session || '', event: meta.event || '' };
+  }
+
+  function openFileDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(FILE_DB_NAME, FILE_DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(FILE_STORE)) {
+          db.createObjectStore(FILE_STORE, { keyPath: 'name' });
+        }
+        // v2 migration: no structural change needed (just adding new fields to records)
+      };
+      req.onsuccess = (e) => resolve(e.target.result);
+      req.onerror = (e) => reject(e.target.error);
+    });
+  }
+
+  // Returns a promise that resolves to the stored entry if a file with the same
+  // hash already exists (but different name), or null otherwise.
+  function findDuplicateByHash(hash) {
+    return getAllFilesFromDB().then((entries) => {
+      return entries.find(e => e.hash && e.hash === hash) || null;
+    });
+  }
+
+  function storeFileInDB(name, text, hash, fileMeta) {
+    const entry = {
+      name,
+      text,
+      storedAt: new Date().toISOString(),
+      hash: hash || computeFileHash(text),
+      fileMeta: fileMeta || extractCsvFileMetadata(text),
+    };
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).put(entry);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+      renderPickerList();
+    }).catch(() => { /* storage failure -- continue silently */ });
+  }
+
+  function removeFileFromDB(name) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).delete(name);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+      renderPickerList();
+    }).catch(() => {});
+  }
+
+  function getAllFilesFromDB() {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readonly');
+      const req = tx.objectStore(FILE_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = (e) => reject(e.target.error);
+    })).catch(() => []);
+  }
+
+  function clearAllFilesFromDB() {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+      renderPickerList();
+    }).catch(() => {});
+  }
+
+  function setStoredFilesStatus(message, isError) {
+    if (!storedFilesStatus) return;
+    storedFilesStatus.textContent = message;
+    storedFilesStatus.classList.toggle('is-error', !!isError);
+  }
+
+  function renderStoredFilesList() {
+    if (!storedFilesList) return;
+    getAllFilesFromDB().then((entries) => {
+      storedFilesList.innerHTML = '';
+      if (entries.length === 0) {
+        const hint = document.createElement('p');
+        hint.className = 'settings-io-hint';
+        hint.textContent = 'No stored files.';
+        storedFilesList.appendChild(hint);
+        return;
+      }
+      entries.forEach((entry) => {
+        const row = document.createElement('div');
+        row.className = 'stored-file-row';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'stored-file-name';
+        nameSpan.textContent = entry.name;
+        nameSpan.title = `Stored: ${entry.storedAt || ''}`;
+        const loadBtn = document.createElement('button');
+        loadBtn.type = 'button';
+        loadBtn.className = 'stored-file-load-btn';
+        loadBtn.textContent = 'Load';
+        loadBtn.title = 'Load this file into the plotter';
+        loadBtn.addEventListener('click', () => {
+          const blob = new Blob([entry.text], { type: 'text/plain' });
+          const file = new File([blob], entry.name, { type: 'text/plain' });
+          parseFile(file, /* skipStore */ true);
+          setStoredFilesStatus(`Loaded "${entry.name}".`);
+        });
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'stored-file-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = 'Remove from browser storage';
+        removeBtn.addEventListener('click', () => {
+          removeFileFromDB(entry.name);
+          setStoredFilesStatus(`Removed "${entry.name}" from storage.`);
+        });
+        row.appendChild(nameSpan);
+        row.appendChild(loadBtn);
+        row.appendChild(removeBtn);
+        storedFilesList.appendChild(row);
+      });
+    });
+  }
+
+  function loadStoredFilesIntoPlotter() {
+    getAllFilesFromDB().then((entries) => {
+      if (entries.length === 0) return;
+      const alreadyLoaded = new Set(logs.map(l => l.name));
+      entries.forEach((entry) => {
+        if (alreadyLoaded.has(entry.name)) return;
+        const blob = new Blob([entry.text], { type: 'text/plain' });
+        const file = new File([blob], entry.name, { type: 'text/plain' });
+        parseFile(file, /* skipStore */ true);
+      });
+    });
+  }
+
+  // ── Pick Uploaded Data modal ──────────────────────────────────────────────
+
+  function openPickerModal() {
+    if (!pickUploadedModal) return;
+    pickUploadedModal.hidden = false;
+    renderPickerList();
+    if (pickUploadedSearch) pickUploadedSearch.focus();
+  }
+
+  function closePickerModal() {
+    if (!pickUploadedModal) return;
+    pickUploadedModal.hidden = true;
+  }
+
+  function renderPickerList() {
+    if (!pickUploadedList) return;
+    const sortBy = pickUploadedSortSelect ? pickUploadedSortSelect.value : 'date';
+    const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
+
+    getAllFilesFromDB().then((entries) => {
+      pickUploadedList.innerHTML = '';
+      if (entries.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = 'No stored files. Upload a CSV file to get started.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+
+      let filtered = entries;
+      if (filter) {
+        filtered = entries.filter((e) => {
+          const fm = e.fileMeta || {};
+          return [e.name, fm.track, fm.rider, fm.vehicle, fm.event, fm.session]
+            .filter(Boolean).join(' ').toLowerCase().includes(filter);
+        });
+      }
+
+      const sorted = filtered.slice().sort((a, b) => {
+        const fa = a.fileMeta || {};
+        const fb = b.fileMeta || {};
+        switch (sortBy) {
+          case 'name':
+            return (a.name || '').localeCompare(b.name || '');
+          case 'track':
+            return (fa.track || '').localeCompare(fb.track || '') || (a.name || '').localeCompare(b.name || '');
+          case 'rider':
+            return (fa.rider || '').localeCompare(fb.rider || '') || (a.name || '').localeCompare(b.name || '');
+          case 'vehicle':
+            return (fa.vehicle || '').localeCompare(fb.vehicle || '') || (a.name || '').localeCompare(b.name || '');
+          default: // 'date' -- newest first
+            return (b.storedAt || '').localeCompare(a.storedAt || '');
+        }
+      });
+
+      if (sorted.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = 'No files match that filter.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+
+      sorted.forEach((entry) => {
+        const fm = entry.fileMeta || {};
+        const tags = [fm.track, fm.rider, fm.vehicle, fm.event, fm.session]
+          .filter(Boolean).join(' · ');
+        const storedDate = entry.storedAt ? new Date(entry.storedAt).toLocaleDateString() : '';
+
+        const item = document.createElement('div');
+        item.className = 'pick-uploaded-item';
+
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'pick-uploaded-item-meta';
+
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'pick-uploaded-item-name';
+        nameDiv.textContent = entry.name;
+        nameDiv.title = entry.name;
+        metaDiv.appendChild(nameDiv);
+
+        if (tags || storedDate) {
+          const tagsDiv = document.createElement('div');
+          tagsDiv.className = 'pick-uploaded-item-tags';
+          tagsDiv.textContent = [tags, storedDate ? `Stored ${storedDate}` : ''].filter(Boolean).join('  ·  ');
+          metaDiv.appendChild(tagsDiv);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'pick-uploaded-item-actions';
+
+        const loadBtn = document.createElement('button');
+        loadBtn.type = 'button';
+        loadBtn.className = 'pick-uploaded-item-load-btn';
+        loadBtn.textContent = 'Load';
+        loadBtn.title = 'Load this file into the plotter';
+        loadBtn.addEventListener('click', () => {
+          const blob = new Blob([entry.text], { type: 'text/plain' });
+          const file = new File([blob], entry.name, { type: 'text/plain' });
+          parseFile(file, /* skipStore */ true);
+          closePickerModal();
+        });
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'pick-uploaded-item-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = 'Remove from browser storage';
+        removeBtn.addEventListener('click', () => {
+          removeFileFromDB(entry.name).then(() => renderPickerList());
+        });
+
+        actions.appendChild(loadBtn);
+        actions.appendChild(removeBtn);
+        item.appendChild(metaDiv);
+        item.appendChild(actions);
+        pickUploadedList.appendChild(item);
+      });
+    });
+  }
+
+  if (pickUploadedDataBtn) {
+    pickUploadedDataBtn.addEventListener('click', openPickerModal);
+  }
+  if (pickUploadedCloseBtn) {
+    pickUploadedCloseBtn.addEventListener('click', closePickerModal);
+  }
+  if (pickUploadedModal) {
+    const backdrop = pickUploadedModal.querySelector('.pick-uploaded-backdrop');
+    if (backdrop) backdrop.addEventListener('click', closePickerModal);
+    pickUploadedModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closePickerModal();
+    });
+  }
+  if (pickUploadedSortSelect) {
+    pickUploadedSortSelect.addEventListener('change', renderPickerList);
+  }
+  if (pickUploadedSearch) {
+    pickUploadedSearch.addEventListener('input', renderPickerList);
+  }
+
+  function downloadAllData() {
+    getAllFilesFromDB().then((entries) => {
+      const settings = {};
+      SETTINGS_STORAGE_KEYS.forEach((key) => {
+        const value = readSettingValue(key);
+        if (value !== undefined) settings[key] = value;
+      });
+      const plotterVersion = appVersionLabel ? appVersionLabel.textContent.replace(/^Version\s*/i, '').trim() : '';
+
+      // manifest.json references file names only — the actual CSV content lives in
+      // separate files inside the ZIP rather than being inlined in the JSON.
+      const manifest = {
+        app: 'csv-plotter-backup',
+        version: 2,
+        plotterVersion,
+        exportedAt: new Date().toISOString(),
+        files: entries.map(e => ({ name: e.name, storedAt: e.storedAt || '' })),
+        settings
+      };
+
+      const zipEntries = [
+        { name: 'manifest.json', data: JSON.stringify(manifest, null, 2) },
+        ...entries.map(e => ({ name: e.name, data: e.text || '' }))
+      ];
+
+      triggerZipDownload(buildZip(zipEntries), 'csv-plotter-backup');
+      setStoredFilesStatus('Backup downloaded.');
+    });
+  }
+
+  function restoreFromBackup(file) {
+    if (typeof file.arrayBuffer !== 'function' && typeof file.text !== 'function') {
+      setStoredFilesStatus('This browser cannot read that file.', true);
+      return;
+    }
+
+    // Shared finalise step used by both ZIP and JSON restore paths.
+    function applyBackup(parsed, fileEntries) {
+      // fileEntries: Array<{ name, text }>
+      const storePromises = fileEntries.map((entry) => {
+        if (!entry.name || typeof entry.text !== 'string') return Promise.resolve();
+        return storeFileInDB(entry.name, entry.text).then(() => {
+          const alreadyLoaded = new Set(logs.map(l => l.name));
+          if (!alreadyLoaded.has(entry.name)) {
+            const blob = new Blob([entry.text], { type: 'text/plain' });
+            const fileObj = new File([blob], entry.name, { type: 'text/plain' });
+            parseFile(fileObj, /* skipStore */ true);
+          }
+        });
+      });
+      Promise.all(storePromises).then(() => {
+        if (parsed && parsed.settings && typeof parsed.settings === 'object') {
+          let applied = 0;
+          SETTINGS_STORAGE_KEYS.forEach((key) => {
+            if (!(key in parsed.settings)) return;
+            try { if (writeSettingValue(key, parsed.settings[key])) applied += 1; } catch {}
+          });
+          if (applied > 0) {
+            setStoredFilesStatus(`Restored ${fileEntries.length} file(s) and ${applied} setting(s). Reloading...`);
+            setTimeout(() => location.reload(), 800);
+            return;
+          }
+        }
+        setStoredFilesStatus(`Restored ${fileEntries.length} file(s).`);
+        renderStoredFilesList();
+      });
+    }
+
+    // ── ZIP backup (version 2+) ──────────────────────────────────────────────
+    if (/\.zip$/i.test(file.name || '')) {
+      (typeof file.arrayBuffer === 'function' ? file.arrayBuffer() : Promise.reject())
+        .then((buffer) => {
+          let zipFiles;
+          try { zipFiles = readZip(buffer); } catch {
+            setStoredFilesStatus('Could not read ZIP — file may be corrupt.', true);
+            return;
+          }
+          const manifestBytes = zipFiles.get('manifest.json');
+          if (!manifestBytes) {
+            setStoredFilesStatus("That ZIP doesn't contain a csv-plotter manifest.", true);
+            return;
+          }
+          let manifest;
+          try { manifest = JSON.parse(new TextDecoder().decode(manifestBytes)); } catch {
+            setStoredFilesStatus('manifest.json inside the ZIP is not valid JSON.', true);
+            return;
+          }
+          if (!manifest || manifest.app !== 'csv-plotter-backup' || !Array.isArray(manifest.files)) {
+            setStoredFilesStatus("That ZIP doesn't look like a csv-plotter backup.", true);
+            return;
+          }
+          const dec = new TextDecoder();
+          const fileEntries = manifest.files
+            .map(ref => {
+              const bytes = zipFiles.get(ref.name);
+              if (!bytes) return null;
+              return { name: ref.name, text: dec.decode(bytes) };
+            })
+            .filter(Boolean);
+          applyBackup(manifest, fileEntries);
+        }, () => {
+          setStoredFilesStatus('Failed to read that ZIP file.', true);
+        });
+      return;
+    }
+
+    // ── Legacy JSON backup (version 1) ─────────────────────────────────────
+    (typeof file.text === 'function' ? file.text() : Promise.reject())
+      .then((text) => {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch {
+          setStoredFilesStatus('Could not read that file — not valid JSON.', true);
+          return;
+        }
+        if (!parsed || parsed.app !== 'csv-plotter-backup' || !Array.isArray(parsed.files)) {
+          setStoredFilesStatus("That file doesn't look like a csv-plotter backup.", true);
+          return;
+        }
+        // v1 format: each file entry has { name, text, storedAt }
+        const fileEntries = parsed.files.filter(e => e.name && typeof e.text === 'string');
+        applyBackup(parsed, fileEntries);
+      }, () => {
+        setStoredFilesStatus('Failed to read that file.', true);
+      });
+  }
+
+  if (loadAllStoredFilesBtn) {
+    loadAllStoredFilesBtn.addEventListener('click', loadStoredFilesIntoPlotter);
+  }
+  if (downloadAllDataBtn) {
+    downloadAllDataBtn.addEventListener('click', downloadAllData);
+  }
+  if (uploadDataBackupBtn && dataBackupFileInput) {
+    uploadDataBackupBtn.addEventListener('click', () => dataBackupFileInput.click());
+    dataBackupFileInput.addEventListener('change', () => {
+      const f = dataBackupFileInput.files && dataBackupFileInput.files[0];
+      dataBackupFileInput.value = '';
+      if (f) restoreFromBackup(f);
+    });
+  }
+  if (deleteAllStoredFilesBtn) {
+    deleteAllStoredFilesBtn.addEventListener('click', () => {
+      if (!confirm('Delete all stored files from browser storage? This cannot be undone.')) return;
+      clearAllFilesFromDB();
+      setStoredFilesStatus('All stored files deleted.');
+    });
+  }
+
+  renderStoredFilesList();
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
