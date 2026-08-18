@@ -287,7 +287,18 @@
           <span class="collapsible-caret" aria-hidden="true"></span>
         </summary>
         <div class="collapsible-action-body">
-          <p class="settings-io-hint">Theme, panel sizes, math channels, data filters, and track corner/start-finish overrides -- not your loaded log files.</p>
+          <p class="settings-io-hint">Uploaded data files are saved in your browser and reloaded automatically on your next visit.</p>
+          <div id="storedFilesList" class="stored-files-list"></div>
+          <div class="stored-files-actions">
+            <button id="downloadAllDataBtn" type="button">Download All Data</button>
+            <button id="uploadDataBackupBtn" type="button">Upload Backup</button>
+            <input type="file" id="dataBackupFileInput" accept=".json,application/json" hidden />
+            <button id="deleteAllStoredFilesBtn" type="button">Delete All Stored Files</button>
+          </div>
+          <div id="storedFilesStatus" class="settings-io-status" aria-live="polite"></div>
+
+          <hr class="settings-divider" />
+          <p class="settings-io-hint">Theme, panel sizes, math channels, data filters, and track corner/start-finish overrides.</p>
           <div class="settings-io-controls">
             <button id="downloadSettingsBtn" type="button">Download Settings</button>
             <button id="uploadSettingsBtn" type="button">Upload Settings</button>

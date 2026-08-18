@@ -64,6 +64,12 @@
   const uploadSettingsBtn = document.getElementById('uploadSettingsBtn');
   const settingsFileInput = document.getElementById('settingsFileInput');
   const settingsIoStatus = document.getElementById('settingsIoStatus');
+  const storedFilesList = document.getElementById('storedFilesList');
+  const downloadAllDataBtn = document.getElementById('downloadAllDataBtn');
+  const uploadDataBackupBtn = document.getElementById('uploadDataBackupBtn');
+  const dataBackupFileInput = document.getElementById('dataBackupFileInput');
+  const deleteAllStoredFilesBtn = document.getElementById('deleteAllStoredFilesBtn');
+  const storedFilesStatus = document.getElementById('storedFilesStatus');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -2434,7 +2440,7 @@
     updatePlot();
   }
 
-  function parseFile(file) {
+  function parseFile(file, skipStore = false) {
     const processors = window.LogFileProcessors;
 
     // Garmin TCX files are XML activity exports with explicit Lap/Trackpoint nodes.
@@ -2446,6 +2452,7 @@
       file.text().then((text) => {
         const processed = processors.parseGarminTcxXml(text);
         addProcessedLog(file, processed, { kind: 'tcxXml', text });
+        if (!skipStore) storeFileInDB(file.name, text);
       }, () => {
         console.error('Failed to read .tcx file:', file.name);
       });
@@ -2462,6 +2469,7 @@
       file.text().then((text) => {
         const processed = processors.processVIGradeResXml(text);
         addProcessedLog(file, processed, { kind: 'resXml', text });
+        if (!skipStore) storeFileInDB(file.name, text);
       }, () => {
         console.error('Failed to read .res file:', file.name);
       });
@@ -2506,6 +2514,7 @@
         // .dat logs are treated as tab-delimited outright rather than sniffed -- they're
         // never a comma CSV in practice, and content-sniffing a short or metadata-heavy
         // file can be less reliable than just knowing from the extension.
+        if (!skipStore) storeFileInDB(file.name, text);
         const delimiter = forceTsv ? 'tab' : processors.detectFieldDelimiter(text);
         detectedDelimiter = delimiter;
         if (delimiter === 'tab') {
@@ -9391,6 +9400,214 @@
       if (file) importSettingsFromFile(file);
     });
   }
+
+  // ── Stored Files (IndexedDB) ──────────────────────────────────────────────
+  // Uploaded files are persisted in IndexedDB so they survive page reloads.
+  // On startup all stored entries are re-parsed automatically.
+
+  const FILE_DB_NAME = 'csvPlotterFiles';
+  const FILE_DB_VERSION = 1;
+  const FILE_STORE = 'files';
+
+  function openFileDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(FILE_DB_NAME, FILE_DB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(FILE_STORE)) {
+          db.createObjectStore(FILE_STORE, { keyPath: 'name' });
+        }
+      };
+      req.onsuccess = (e) => resolve(e.target.result);
+      req.onerror = (e) => reject(e.target.error);
+    });
+  }
+
+  function storeFileInDB(name, text) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).put({ name, text, storedAt: new Date().toISOString() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+    }).catch(() => { /* storage failure -- continue silently */ });
+  }
+
+  function removeFileFromDB(name) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).delete(name);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+    }).catch(() => {});
+  }
+
+  function getAllFilesFromDB() {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readonly');
+      const req = tx.objectStore(FILE_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = (e) => reject(e.target.error);
+    })).catch(() => []);
+  }
+
+  function clearAllFilesFromDB() {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      tx.objectStore(FILE_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).then(() => {
+      renderStoredFilesList();
+    }).catch(() => {});
+  }
+
+  function setStoredFilesStatus(message, isError) {
+    if (!storedFilesStatus) return;
+    storedFilesStatus.textContent = message;
+    storedFilesStatus.classList.toggle('is-error', !!isError);
+  }
+
+  function renderStoredFilesList() {
+    if (!storedFilesList) return;
+    getAllFilesFromDB().then((entries) => {
+      storedFilesList.innerHTML = '';
+      if (entries.length === 0) {
+        const hint = document.createElement('p');
+        hint.className = 'settings-io-hint';
+        hint.textContent = 'No stored files.';
+        storedFilesList.appendChild(hint);
+        return;
+      }
+      entries.forEach((entry) => {
+        const row = document.createElement('div');
+        row.className = 'stored-file-row';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'stored-file-name';
+        nameSpan.textContent = entry.name;
+        nameSpan.title = `Stored: ${entry.storedAt || ''}`;
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'stored-file-remove-btn';
+        removeBtn.textContent = '✕';
+        removeBtn.title = 'Remove from browser storage';
+        removeBtn.addEventListener('click', () => {
+          removeFileFromDB(entry.name);
+          setStoredFilesStatus(`Removed "${entry.name}" from storage.`);
+        });
+        row.appendChild(nameSpan);
+        row.appendChild(removeBtn);
+        storedFilesList.appendChild(row);
+      });
+    });
+  }
+
+  function loadStoredFilesIntoPlotter() {
+    getAllFilesFromDB().then((entries) => {
+      if (entries.length === 0) return;
+      const alreadyLoaded = new Set(logs.map(l => l.name));
+      entries.forEach((entry) => {
+        if (alreadyLoaded.has(entry.name)) return;
+        const blob = new Blob([entry.text], { type: 'text/plain' });
+        const file = new File([blob], entry.name, { type: 'text/plain' });
+        parseFile(file, /* skipStore */ true);
+      });
+    });
+  }
+
+  function downloadAllData() {
+    getAllFilesFromDB().then((entries) => {
+      const settings = {};
+      SETTINGS_STORAGE_KEYS.forEach((key) => {
+        const value = readSettingValue(key);
+        if (value !== undefined) settings[key] = value;
+      });
+      const plotterVersion = appVersionLabel ? appVersionLabel.textContent.replace(/^Version\s*/i, '').trim() : '';
+      const payload = {
+        app: 'csv-plotter-backup',
+        version: 1,
+        plotterVersion,
+        exportedAt: new Date().toISOString(),
+        files: entries,
+        settings
+      };
+      triggerJsonDownload(JSON.stringify(payload, null, 2), 'csv-plotter-backup');
+      setStoredFilesStatus('Backup downloaded.');
+    });
+  }
+
+  function restoreFromBackup(file) {
+    if (typeof file.text !== 'function') {
+      setStoredFilesStatus('This browser cannot read that file.', true);
+      return;
+    }
+    file.text().then((text) => {
+      let parsed;
+      try { parsed = JSON.parse(text); } catch {
+        setStoredFilesStatus('Could not read that file — not valid JSON.', true);
+        return;
+      }
+      if (!parsed || parsed.app !== 'csv-plotter-backup' || !Array.isArray(parsed.files)) {
+        setStoredFilesStatus("That file doesn't look like a csv-plotter backup.", true);
+        return;
+      }
+      const storePromises = parsed.files.map((entry) => {
+        if (!entry.name || typeof entry.text !== 'string') return Promise.resolve();
+        return storeFileInDB(entry.name, entry.text).then(() => {
+          const alreadyLoaded = new Set(logs.map(l => l.name));
+          if (!alreadyLoaded.has(entry.name)) {
+            const blob = new Blob([entry.text], { type: 'text/plain' });
+            const fileObj = new File([blob], entry.name, { type: 'text/plain' });
+            parseFile(fileObj, /* skipStore */ true);
+          }
+        });
+      });
+      Promise.all(storePromises).then(() => {
+        if (parsed.settings && typeof parsed.settings === 'object') {
+          let applied = 0;
+          SETTINGS_STORAGE_KEYS.forEach((key) => {
+            if (!(key in parsed.settings)) return;
+            try { if (writeSettingValue(key, parsed.settings[key])) applied += 1; } catch {}
+          });
+          if (applied > 0) {
+            setStoredFilesStatus(`Restored ${parsed.files.length} file(s) and ${applied} setting(s). Reloading...`);
+            setTimeout(() => location.reload(), 800);
+            return;
+          }
+        }
+        setStoredFilesStatus(`Restored ${parsed.files.length} file(s).`);
+        renderStoredFilesList();
+      });
+    }, () => {
+      setStoredFilesStatus('Failed to read that file.', true);
+    });
+  }
+
+  if (downloadAllDataBtn) {
+    downloadAllDataBtn.addEventListener('click', downloadAllData);
+  }
+  if (uploadDataBackupBtn && dataBackupFileInput) {
+    uploadDataBackupBtn.addEventListener('click', () => dataBackupFileInput.click());
+    dataBackupFileInput.addEventListener('change', () => {
+      const f = dataBackupFileInput.files && dataBackupFileInput.files[0];
+      dataBackupFileInput.value = '';
+      if (f) restoreFromBackup(f);
+    });
+  }
+  if (deleteAllStoredFilesBtn) {
+    deleteAllStoredFilesBtn.addEventListener('click', () => {
+      if (!confirm('Delete all stored files from browser storage? This cannot be undone.')) return;
+      clearAllFilesFromDB();
+      setStoredFilesStatus('All stored files deleted.');
+    });
+  }
+
+  // Load previously stored files when the app starts up.
+  renderStoredFilesList();
+  loadStoredFilesIntoPlotter();
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
