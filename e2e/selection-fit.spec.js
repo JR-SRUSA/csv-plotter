@@ -162,6 +162,46 @@ test.describe('selection fit stats panel', () => {
     expect(after.x).toBeCloseTo(before.x + dx, 0);
     expect(after.y).toBeCloseTo(before.y + dy, 0);
   });
+
+  test('supports switching fit type and persists the selected type', async ({ page }) => {
+    await loadSampleFile(page);
+    await selectYChannels(page, ['Speed']);
+    await clickModebarButton(page, 'Box Select');
+    const geom = await getPlotGeometry(page);
+    await dragSelection(page, geom, 0.05, 0.05, 0.95, 0.95);
+    await expect(page.locator('#selectionStatsPanel')).toBeVisible();
+
+    await expect(page.locator('#selectionFitTypeSelect')).toHaveValue('linear');
+    await expect(page.locator('.selection-stats-group').first()).toContainText('slope:');
+
+    await page.selectOption('#selectionFitTypeSelect', 'exponential');
+    await page.waitForTimeout(500);
+    await expect(page.locator('.selection-stats-group').first()).toContainText('τ:');
+    await expect(page.locator('.selection-stats-group').first()).not.toContainText('slope:');
+    const blackPaths = await page.evaluate(() =>
+      (document.getElementById('plotDiv').layout.shapes || [])
+        .filter((s) => s.type === 'path' && s.line && s.line.color === 'black').length
+    );
+    expect(blackPaths).toBeGreaterThan(0);
+
+    const storedType = await page.evaluate(() => localStorage.getItem('selectionFitType'));
+    expect(storedType).toBe('exponential');
+  });
+
+  test('uses last selected fit type from localStorage by default', async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('selectionFitType', 'sinusoidal');
+    });
+    await loadSampleFile(page);
+    await selectYChannels(page, ['Speed']);
+    await clickModebarButton(page, 'Box Select');
+    const geom = await getPlotGeometry(page);
+    await dragSelection(page, geom, 0.05, 0.05, 0.95, 0.95);
+    await expect(page.locator('#selectionStatsPanel')).toBeVisible();
+
+    await expect(page.locator('#selectionFitTypeSelect')).toHaveValue('sinusoidal');
+    await expect(page.locator('.selection-stats-group').first()).toContainText('ω:');
+  });
 });
 
 test.describe('large selections (regression)', () => {

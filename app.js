@@ -147,6 +147,19 @@
   const selectionStatsBody = document.getElementById('selectionStatsBody');
   const selectionStatsClose = document.getElementById('selectionStatsClose');
   const selectionStatsHeader = document.getElementById('selectionStatsHeader');
+  const selectionFitTypeSelect = document.getElementById('selectionFitTypeSelect');
+  const selectionFitEquationRow = document.getElementById('selectionFitEquationRow');
+  const selectionFitFormulaRow = document.getElementById('selectionFitFormulaRow');
+  const selectionFitFormulaInput = document.getElementById('selectionFitFormulaInput');
+  const selectionFitFormulaHint = document.getElementById('selectionFitFormulaHint');
+  const selectionFitFormulaError = document.getElementById('selectionFitFormulaError');
+  const selectionFftEnabledInput = document.getElementById('selectionFftEnabled');
+  const selectionFftHint = document.getElementById('selectionFftHint');
+  const fftPanel = document.getElementById('fftPanel');
+  const fftPanelHeader = document.getElementById('fftPanelHeader');
+  const fftPanelClose = document.getElementById('fftPanelClose');
+  const fftClearForcedBtn = document.getElementById('fftClearForcedBtn');
+  const fftPlotDiv = document.getElementById('fftPlotDiv');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -371,6 +384,11 @@
 
   const IMPORTER_FILTER_AXES = ['time', 'distance'];
   const IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY = 'importerCustomStandardChannels';
+  const SELECTION_FIT_TYPE_STORAGE_KEY = 'selectionFitType';
+  const SELECTION_FIT_FORMULA_STORAGE_KEY = 'selectionFitFormula';
+  const DEFAULT_SELECTION_FIT_TYPE = 'linear';
+  const DEFAULT_SELECTION_FIT_FORMULA = 'p0*sin(p1*t + p2) + p3';
+  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'sineExponential', 'exponential', 'firstOrderResponse', 'secondOrderResponse', 'ellipse', 'formula']);
   const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
     { displayName: 'Time', unit: 's' },
     { displayName: 'Distance', unit: 'm' },
@@ -478,6 +496,12 @@
   let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
   let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
+  let selectionFitType = DEFAULT_SELECTION_FIT_TYPE;
+  let selectionFitFormula = DEFAULT_SELECTION_FIT_FORMULA;
+  let selectionFitLastPoints = [];
+  const SELECTION_FFT_ENABLED_STORAGE_KEY = 'selectionFftEnabled';
+  let selectionFftEnabled = false;
+  let selectionSinFitForcedFreqHz = null; // frequency (Hz), set by clicking a point in the FFT panel
   // Hover tooltips default off on mobile, where they mostly just get in the way of touch
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
@@ -839,25 +863,11 @@
     });
   }
 
-  // Least-squares fit of y = slope*x + intercept, plus R^2 (squared Pearson correlation).
-  // Returns null when the selection has no x spread (a vertical slice), since slope is undefined.
-  function computeLinearFit(xs, ys) {
-    const n = xs.length;
-    if (n < 2) return null;
-    let sumX = 0, sumY = 0;
-    for (let i = 0; i < n; i++) { sumX += xs[i]; sumY += ys[i]; }
-    const meanX = sumX / n, meanY = sumY / n;
-    let sxx = 0, syy = 0, sxy = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = xs[i] - meanX, dy = ys[i] - meanY;
-      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
-    }
-    if (sxx === 0) return null;
-    const slope = sxy / sxx;
-    const intercept = meanY - slope * meanX;
-    const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
-    return {slope, intercept, r2};
-  }
+  // Curve-fitting math (linear/sinusoidal/sine×exponential/exponential/step-response/
+  // ellipse/typed-formula/FFT) lives in fit-functions.js as window.FitFunctions -- see
+  // buildSelectionFitDetails and updateFftPanel below for its call sites. arrayMinMax
+  // stays here since it's also used outside the fitting code (selection ranges, etc.).
+
 
   function formatStatValue(v) {
     if (!Number.isFinite(v)) return 'n/a';
@@ -932,7 +942,13 @@
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
     selectionFitAnnotations = [];
+    selectionFitLastPoints = [];
+    if (selectionFitFormulaError) {
+      selectionFitFormulaError.hidden = true;
+      selectionFitFormulaError.textContent = '';
+    }
     if (selectionStatsPanel) selectionStatsPanel.hidden = true;
+    if (fftPanel) fftPanel.hidden = true;
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
@@ -947,11 +963,195 @@
     return 'black';
   }
 
+  function setSelectionFitFormulaError(message) {
+    if (!selectionFitFormulaError) return;
+    if (!message) {
+      selectionFitFormulaError.hidden = true;
+      selectionFitFormulaError.textContent = '';
+      return;
+    }
+    selectionFitFormulaError.hidden = false;
+    selectionFitFormulaError.textContent = message;
+  }
+
+  function buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, predict, fitLineColor, pointCount = 80) {
+    pointCount = Math.max(2, Math.round(pointCount));
+    const dx = (xMax - xMin) / (pointCount - 1);
+    let path = '';
+    let drewAny = false;
+    for (let i = 0; i < pointCount; i++) {
+      const x = xMin + dx * i;
+      const y = predict(x);
+      if (!Number.isFinite(y)) continue;
+      path += `${drewAny ? 'L' : 'M'} ${x},${y} `;
+      drewAny = true;
+    }
+    if (!drewAny) return null;
+    return {
+      type: 'path',
+      path: path.trim(),
+      xref: xaxis,
+      yref: yaxis,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+  }
+
+  function buildEllipseFitShape(fit, xaxis, yaxis, fitLineColor) {
+    const segments = 96;
+    let path = '';
+    for (let i = 0; i <= segments; i++) {
+      const theta = (2 * Math.PI * i) / segments;
+      const cu = fit.a * Math.cos(theta);
+      const cv = fit.b * Math.sin(theta);
+      const x = fit.centerX + cu * Math.cos(fit.angle) - cv * Math.sin(fit.angle);
+      const y = fit.centerY + cu * Math.sin(fit.angle) + cv * Math.cos(fit.angle);
+      path += `${i === 0 ? 'M' : 'L'} ${x},${y} `;
+    }
+    return {
+      type: 'path',
+      path: `${path.trim()} Z`,
+      xref: xaxis,
+      yref: yaxis,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+  }
+
+  function buildSelectionFitDetails(fitType, g, xMin, xMax, yMin, yMax, fitLineColor, typedFormulaResult) {
+    const detailLines = [];
+    const xaxis = g.trace.xaxis || 'x';
+    const yaxis = g.trace.yaxis || 'y';
+    const out = { detailLines, shape: null };
+    if (fitType === 'sinusoidal') {
+      const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
+      const fit = window.FitFunctions.computeSinusoidalFit(g.xs, g.ys, forcedOmega);
+      if (!fit) {
+        detailLines.push('sin fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.omega, xMin, xMax));
+      return out;
+    }
+    if (fitType === 'sineExponential') {
+      const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
+      const fit = window.FitFunctions.computeSineExpFit(g.xs, g.ys, forcedOmega);
+      if (!fit) {
+        detailLines.push('sin×exp fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.omega, xMin, xMax));
+      return out;
+    }
+    if (fitType === 'exponential') {
+      const fit = window.FitFunctions.computeExponentialFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('exp fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    if (fitType === 'firstOrderResponse') {
+      const fit = window.FitFunctions.computeFirstOrderResponseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('1st-order fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`x0: ${formatStatValue(fit.x0)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    if (fitType === 'secondOrderResponse') {
+      const fit = window.FitFunctions.computeSecondOrderResponseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('2nd-order fit: n/a');
+        return out;
+      }
+      const dampingLabel = fit.zeta < 1 ? 'underdamped' : (fit.zeta > 1 ? 'overdamped' : 'critically damped');
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ζ: ${formatStatValue(fit.zeta)} (${dampingLabel})`);
+      detailLines.push(`ωn: ${formatStatValue(fit.wn)} (${formatStatValue(fit.wn / (2 * Math.PI))} Hz)`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`x0: ${formatStatValue(fit.x0)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.wd, xMin, xMax));
+      return out;
+    }
+    if (fitType === 'ellipse') {
+      const fit = window.FitFunctions.computeEllipseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('ellipse fit: n/a');
+        return out;
+      }
+      detailLines.push(`center: (${formatStatValue(fit.centerX)}, ${formatStatValue(fit.centerY)})`);
+      detailLines.push(`a: ${formatStatValue(fit.a)}`);
+      detailLines.push(`b: ${formatStatValue(fit.b)}`);
+      detailLines.push(`angle(rad): ${formatStatValue(fit.angle)}`);
+      out.shape = buildEllipseFitShape(fit, xaxis, yaxis, fitLineColor);
+      return out;
+    }
+    if (fitType === 'formula') {
+      if (typedFormulaResult.error) {
+        detailLines.push(`formula: ${typedFormulaResult.error}`);
+        return out;
+      }
+      const fit = typedFormulaResult.fit;
+      if (!fit) {
+        detailLines.push('formula fit: n/a');
+        return out;
+      }
+      detailLines.push(`f(t) = ${fit.expression}`);
+      if (fit.paramNames.length === 0) {
+        detailLines.push('params: none');
+      } else {
+        fit.paramNames.forEach((name, i) => detailLines.push(`${name}: ${formatStatValue(fit.params[i])}`));
+      }
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    const fit = window.FitFunctions.computeLinearFit(g.xs, g.ys);
+    detailLines.push(fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a');
+    detailLines.push(fit ? `R²: ${fit.r2.toFixed(3)}` : 'R²: n/a');
+    if (!fit) return out;
+    out.shape = {
+      type: 'line',
+      xref: xaxis,
+      yref: yaxis,
+      x0: xMin, x1: xMax,
+      y0: fit.slope * xMin + fit.intercept,
+      y1: fit.slope * xMax + fit.intercept,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+    return out;
+  }
+
   // Populates the floating HTML selection stats panel with one group block per channel.
   function updateSelectionStatsPanel(groupFits) {
     if (!selectionStatsPanel || !selectionStatsBody) return;
     selectionStatsBody.innerHTML = '';
-    groupFits.forEach(({g, fit, xMin, xMax, yMin, yMax}) => {
+    groupFits.forEach(({g, xMin, xMax, yMin, yMax, detailLines}) => {
       const label = getChannelLabel(g.trace.meta.channel);
       const block = document.createElement('div');
       block.className = 'selection-stats-group';
@@ -962,10 +1162,8 @@
       const lines = [
         `n = ${g.xs.length} pts`,
         `${mainPlotXAxisTitle || 'X'}: ${formatStatValue(xMin)} \u2013 ${formatStatValue(xMax)}`,
-        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`,
-        fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a',
-        fit ? `R\u00b2: ${fit.r2.toFixed(3)}` : 'R\u00b2: n/a'
-      ];
+        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`
+      ].concat(detailLines || []);
       lines.forEach((text) => {
         const row = document.createElement('div');
         row.className = 'selection-stats-group-line';
@@ -978,28 +1176,30 @@
   }
 
   // Drag-to-reposition the selection stats panel via its header.
-  (() => {
-    if (!selectionStatsPanel || !selectionStatsHeader) return;
+  function bindDraggablePanel(panel, header) {
+    if (!panel || !header) return;
     let dragging = false, ox = 0, oy = 0;
-    selectionStatsHeader.addEventListener('mousedown', (e) => {
+    header.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       dragging = true;
-      const rect = selectionStatsPanel.getBoundingClientRect();
+      const rect = panel.getBoundingClientRect();
       // Switch to absolute (pixel) positioning anchored to current location.
-      selectionStatsPanel.style.right = '';
-      selectionStatsPanel.style.left = rect.left + 'px';
-      selectionStatsPanel.style.top = rect.top + 'px';
+      panel.style.right = '';
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
       ox = e.clientX - rect.left;
       oy = e.clientY - rect.top;
       e.preventDefault();
     });
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      selectionStatsPanel.style.left = (e.clientX - ox) + 'px';
-      selectionStatsPanel.style.top = (e.clientY - oy) + 'px';
+      panel.style.left = (e.clientX - ox) + 'px';
+      panel.style.top = (e.clientY - oy) + 'px';
     });
     document.addEventListener('mouseup', () => { dragging = false; });
-  })();
+  }
+  bindDraggablePanel(selectionStatsPanel, selectionStatsHeader);
+  bindDraggablePanel(fftPanel, fftPanelHeader);
 
   if (selectionStatsClose) {
     selectionStatsClose.addEventListener('click', () => {
@@ -1007,12 +1207,178 @@
     });
   }
 
+  // Renders one magnitude-vs-frequency trace per selected channel group into the
+  // floating FFT panel (a separate small Plotly chart below/alongside the main plot).
+  function updateFftPanel(groupFits) {
+    if (!fftPanel || !fftPlotDiv || !selectionFftEnabled) return;
+    const traces = [];
+    groupFits.forEach(({ g }) => {
+      const fft = window.FitFunctions.computeFft(g.xs, g.ys);
+      if (!fft) return;
+      const label = getChannelLabel(g.trace.meta.channel);
+      const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#1f77b4';
+      traces.push({
+        x: fft.freqs, y: fft.mags, type: 'scatter', mode: 'lines',
+        name: label, line: { color, width: 1.5 }
+      });
+    });
+    if (traces.length === 0) {
+      fftPanel.hidden = true;
+      return;
+    }
+    const theme = getCurrentTheme();
+    const fontColor = theme === 'dark' ? '#dde6f2' : '#222';
+    const gridColor = theme === 'dark' ? '#3a4556' : '#e0e0e0';
+    // A vertical marker showing the frequency the sine fit is currently pinned to
+    // (set by clicking a point in this chart) -- only meaningful while fitting sinusoids.
+    const isOscillatingFit = selectionFitType === 'sinusoidal' || selectionFitType === 'sineExponential';
+    const shapes = (isOscillatingFit && Number.isFinite(selectionSinFitForcedFreqHz))
+      ? [{
+          type: 'line', xref: 'x', yref: 'paper',
+          x0: selectionSinFitForcedFreqHz, x1: selectionSinFitForcedFreqHz, y0: 0, y1: 1,
+          line: { color: 'black', width: 1.5, dash: 'dot' }
+        }]
+      : [];
+    fftPanel.hidden = false;
+    Plotly.react(fftPlotDiv, traces, {
+      margin: { l: 45, r: 10, t: 10, b: 35 },
+      showlegend: traces.length > 1,
+      legend: { font: { size: 10, color: fontColor }, orientation: 'h', y: -0.3 },
+      xaxis: { title: { text: 'Frequency (Hz)', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
+      yaxis: { title: { text: 'Amplitude', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
+      shapes,
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: fontColor }
+    }, { responsive: true, displayModeBar: false }).then(bindFftPlotClickHandler);
+    if (fftClearForcedBtn) {
+      fftClearForcedBtn.hidden = !(isOscillatingFit && Number.isFinite(selectionSinFitForcedFreqHz));
+    }
+  }
+
+  function clearFftPanel() {
+    if (fftPanel) fftPanel.hidden = true;
+  }
+
+  // Clicking a point in the FFT chart pins the sine fit to that exact frequency instead
+  // of letting it auto-search -- handy once you've spotted the real oscillation's peak.
+  // Bound lazily (after the first Plotly.react call) since Plotly only attaches `.on` to
+  // the div once it has actually rendered a plot into it.
+  function bindFftPlotClickHandler() {
+    if (!fftPlotDiv || fftPlotDiv.__fftClickBound || typeof fftPlotDiv.on !== 'function') return;
+    fftPlotDiv.__fftClickBound = true;
+    fftPlotDiv.on('plotly_click', (eventData) => {
+      if (!eventData || !Array.isArray(eventData.points) || eventData.points.length === 0) return;
+      const freq = Number(eventData.points[0].x);
+      if (!Number.isFinite(freq) || freq <= 0) return;
+      selectionSinFitForcedFreqHz = freq;
+      if (selectionFitType !== 'sinusoidal' && selectionFitType !== 'sineExponential') {
+        selectionFitType = 'sinusoidal';
+        syncSelectionFitControlsUi();
+        try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
+      }
+      if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+    });
+  }
+
+  if (fftClearForcedBtn) {
+    fftClearForcedBtn.addEventListener('click', () => {
+      selectionSinFitForcedFreqHz = null;
+      fftClearForcedBtn.hidden = true;
+      if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+    });
+  }
+
+  if (fftPanelClose) {
+    fftPanelClose.addEventListener('click', () => { if (fftPanel) fftPanel.hidden = true; });
+  }
+
+  if (selectionFftEnabledInput) {
+    try { selectionFftEnabled = localStorage.getItem(SELECTION_FFT_ENABLED_STORAGE_KEY) === '1'; } catch {}
+    selectionFftEnabledInput.checked = selectionFftEnabled;
+    if (selectionFftHint) selectionFftHint.hidden = !selectionFftEnabled;
+    selectionFftEnabledInput.addEventListener('change', () => {
+      selectionFftEnabled = !!selectionFftEnabledInput.checked;
+      try { localStorage.setItem(SELECTION_FFT_ENABLED_STORAGE_KEY, selectionFftEnabled ? '1' : '0'); } catch {}
+      if (selectionFftHint) selectionFftHint.hidden = !selectionFftEnabled;
+      if (!selectionFftEnabled) {
+        clearFftPanel();
+      } else if (selectionFitLastPoints.length > 0) {
+        applySelectionFit(selectionFitLastPoints);
+      }
+    });
+  }
+
+  function normalizeSelectionFitType(value) {
+    return SELECTION_FIT_TYPE_OPTIONS.has(value) ? value : DEFAULT_SELECTION_FIT_TYPE;
+  }
+
+  // Static equation text shown below the Fit Type dropdown, using the same variable
+  // names as the per-channel stats lines below it (A, ω, φ, offset, etc.).
+  const SELECTION_FIT_EQUATIONS = {
+    linear: 'y = slope · x + intercept',
+    sinusoidal: 'y = A · sin(ω · x + φ) + offset',
+    sineExponential: 'y = A · e^(τ · x) · sin(ω · x + φ) + offset',
+    exponential: 'y = A · e^(τ · x) + offset',
+    firstOrderResponse: 'y = A · (1 − e^(−(x − x0) / τ)) + offset   [x0 = selection start]',
+    secondOrderResponse: 'y = A · (1 − e^(−ζωn(x−x0))·(cos(ωd(x−x0)) + (ζωn/ωd)·sin(ωd(x−x0)))) + offset   [x0 = selection start, ωd = ωn·√|1−ζ²|]',
+    ellipse: '(x,y) on ellipse: center (cx,cy), semi-axes a, b, rotation angle',
+    formula: '' // the typed formula itself is shown per-channel below
+  };
+
+  function syncSelectionFitControlsUi() {
+    const isFormula = selectionFitType === 'formula';
+    if (selectionFitTypeSelect) selectionFitTypeSelect.value = selectionFitType;
+    if (selectionFitEquationRow) selectionFitEquationRow.textContent = SELECTION_FIT_EQUATIONS[selectionFitType] || '';
+    if (selectionFitFormulaRow) selectionFitFormulaRow.hidden = !isFormula;
+    if (selectionFitFormulaHint) selectionFitFormulaHint.hidden = !isFormula;
+    if (selectionFitFormulaInput && !selectionFitFormulaInput.value) {
+      selectionFitFormulaInput.value = selectionFitFormula || DEFAULT_SELECTION_FIT_FORMULA;
+    }
+    if (!isFormula) setSelectionFitFormulaError('');
+  }
+
+  (() => {
+    try {
+      const savedType = localStorage.getItem(SELECTION_FIT_TYPE_STORAGE_KEY);
+      selectionFitType = normalizeSelectionFitType(savedType);
+    } catch {}
+    try {
+      const savedFormula = localStorage.getItem(SELECTION_FIT_FORMULA_STORAGE_KEY);
+      if (typeof savedFormula === 'string' && savedFormula.trim()) selectionFitFormula = savedFormula;
+    } catch {}
+    if (selectionFitFormulaInput) selectionFitFormulaInput.value = selectionFitFormula;
+    syncSelectionFitControlsUi();
+    if (selectionFitTypeSelect) {
+      selectionFitTypeSelect.addEventListener('change', () => {
+        selectionFitType = normalizeSelectionFitType(selectionFitTypeSelect.value);
+        if (selectionFitType !== 'sinusoidal' && selectionFitType !== 'sineExponential') selectionSinFitForcedFreqHz = null;
+        syncSelectionFitControlsUi();
+        try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
+        if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+      });
+    }
+    if (selectionFitFormulaInput) {
+      let pendingApply = null;
+      const onFormulaChange = () => {
+        selectionFitFormula = selectionFitFormulaInput.value || '';
+        try { localStorage.setItem(SELECTION_FIT_FORMULA_STORAGE_KEY, selectionFitFormula); } catch {}
+        if (selectionFitType === 'formula' && selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+      };
+      selectionFitFormulaInput.addEventListener('change', onFormulaChange);
+      selectionFitFormulaInput.addEventListener('input', () => {
+        if (pendingApply) clearTimeout(pendingApply);
+        pendingApply = setTimeout(onFormulaChange, 250);
+      });
+    }
+  })();
+
   // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
   // survives into a PNG export via Plotly.downloadImage. stackIndex offsets each
   // simultaneous fit (multiple Y channels selected at once) further from the selection
   // box's corner, so they start out legible instead of stacked directly on each other;
   // the user can still drag any of them further (config.edits.annotationTail).
-  function buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
+  function buildSelectionFitAnnotation(g, detailLines, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
     const theme = getCurrentTheme();
     const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
     const label = getChannelLabel(g.trace.meta.channel);
@@ -1021,17 +1387,16 @@
       `<b>${escapeHtml(name)}</b>`,
       `n = ${g.xs.length} pts`,
       `${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}`,
-      `${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}`,
-      `slope: ${formatStatValue(fit.slope)}`,
-      `R²: ${fit.r2.toFixed(3)}`
-    ].join('<br>');
+      `${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}`
+    ];
+    (detailLines || []).forEach((line) => text.push(escapeHtml(line)));
     // Anchored to the selection box's top-right corner (not a point on the fit line
     // itself), then pushed further up-and-right in pixel space -- so the label sits
     // outside the selected data instead of covering it.
     return {
       x: xMax, y: yMax,
       xref: xaxis, yref: yaxis,
-      text,
+      text: text.join('<br>'),
       showarrow: true,
       arrowhead: 2, arrowsize: 1, arrowwidth: 1, arrowcolor: color,
       ax: 50, ay: -50 - stackIndex * 95,
@@ -1046,40 +1411,40 @@
 
   function applySelectionFit(points) {
     const groups = groupSelectedPointsByTrace(points);
+    selectionFitLastPoints = Array.isArray(points) ? points.slice() : [];
     const shapes = [];
     const annotations = [];
     const validGroups = [];
     const groupFits = [];
     const fitLineColor = getSelectionFitLineColor();
+    const activeFitType = normalizeSelectionFitType(selectionFitType);
+    const typedFormulaResultByGroup = (activeFitType === 'formula')
+      ? (g) => window.FitFunctions.computeTypedFormulaFit(g.xs, g.ys, selectionFitFormula, MATH_SCOPE_KEYS, MATH_SCOPE_VALS)
+      : () => ({ fit: null, error: null });
     let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
-      const fit = computeLinearFit(g.xs, g.ys);
       const [xMin, xMax] = arrayMinMax(g.xs);
       const [yMin, yMax] = arrayMinMax(g.ys);
-      groupFits.push({g, fit, xMin, xMax, yMin, yMax});
-      if (!fit) return;
+      const fitDetails = buildSelectionFitDetails(activeFitType, g, xMin, xMax, yMin, yMax, fitLineColor, typedFormulaResultByGroup(g));
+      groupFits.push({ g, xMin, xMax, yMin, yMax, detailLines: fitDetails.detailLines });
+      if (!fitDetails.shape) return;
       const xaxis = g.trace.xaxis || 'x';
       const yaxis = g.trace.yaxis || 'y';
-      shapes.push({
-        type: 'line',
-        xref: xaxis,
-        yref: yaxis,
-        x0: xMin, x1: xMax,
-        y0: fit.slope * xMin + fit.intercept,
-        y1: fit.slope * xMax + fit.intercept,
-        line: {color: fitLineColor, width: 2, dash: 'dot'},
-        layer: 'above'
-      });
-      annotations.push(buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
+      shapes.push(fitDetails.shape);
+      annotations.push(buildSelectionFitAnnotation(g, fitDetails.detailLines, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
       stackIndex += 1;
     });
     if (validGroups.length === 0) {
       clearSelectionFit();
       return;
     }
+    setSelectionFitFormulaError(activeFitType === 'formula' && groupFits.length > 0 && /^formula: /.test(groupFits[0].detailLines[0] || '')
+      ? (groupFits[0].detailLines[0] || '').slice('formula: '.length)
+      : '');
     updateSelectionStatsPanel(groupFits);
+    updateFftPanel(groupFits);
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
     if (suppressSelectionReentry) return;
@@ -2512,6 +2877,18 @@
     populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
+    applySavedImporterConfigToLog(file.name, newLog.id);
+  }
+
+  // If this file has a custom importer config (channel mapping, filters, downsample rate)
+  // persisted alongside it in IndexedDB from a previous session, reapply it automatically
+  // so reloading a stored file doesn't require redoing the mapping every time.
+  function applySavedImporterConfigToLog(fileName, logId) {
+    getFileEntryByName(fileName).then((entry) => {
+      const saved = entry && entry.importerConfig;
+      if (!saved || !saved.decoder) return;
+      if (reprocessLogWithDecoder(logId, saved.decoder, saved)) renderFilesList();
+    }).catch(() => {});
   }
 
   function parseFile(file, skipStore = false) {
@@ -9217,6 +9594,11 @@
         return;
       }
 
+      // Persist to IndexedDB (keyed by file name) so it's reapplied automatically the
+      // next time this file is loaded from browser storage -- not just for this session.
+      const savedLog = logs.find((entry) => entry.id === importerEditorState.logId);
+      if (savedLog) saveImporterConfigForFile(savedLog.name, importerEditorState.decoderName, payload);
+
       closeImporterEditor();
       renderFilesList();
     });
@@ -9383,6 +9765,8 @@
     IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY,
     'mathChannels',
     'dataFiltersState',
+    SELECTION_FIT_TYPE_STORAGE_KEY,
+    SELECTION_FIT_FORMULA_STORAGE_KEY,
     'trackCornerMetadata',
     'trackCornerOverrides',
     'startFinishLineOverrides'
@@ -9748,6 +10132,39 @@
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = (e) => reject(e.target.error);
     })).catch(() => []);
+  }
+
+  function getFileEntryByName(name) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readonly');
+      const req = tx.objectStore(FILE_STORE).get(name);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = (e) => reject(e.target.error);
+    })).catch(() => null);
+  }
+
+  // Persists (or, when config is null, clears) the custom importer config -- channel
+  // mapping, filters, downsample rate -- for a stored file, so it's reapplied
+  // automatically the next time that file is loaded (see applySavedImporterConfigToLog).
+  function saveImporterConfigForFile(name, decoderName, config) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      const store = tx.objectStore(FILE_STORE);
+      const getReq = store.get(name);
+      getReq.onsuccess = () => {
+        const entry = getReq.result;
+        if (!entry) { resolve(); return; }
+        if (config) {
+          entry.importerConfig = { decoder: decoderName, channels: config.channels, filters: config.filters, downsampleHz: config.downsampleHz };
+        } else {
+          delete entry.importerConfig;
+        }
+        store.put(entry);
+      };
+      getReq.onerror = (e) => reject(e.target.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).catch(() => {});
   }
 
   function clearAllFilesFromDB() {

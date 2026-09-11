@@ -402,7 +402,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-18c</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-11b</div>
     </section>
 
     <section class="plot">
@@ -415,7 +415,39 @@
           <span>Selection Stats</span>
           <button id="selectionStatsClose" class="selection-stats-close" aria-label="Close selection stats">✕</button>
         </div>
+        <div class="selection-stats-controls">
+          <label class="selection-stats-fit-type-label">Fit Type
+            <select id="selectionFitTypeSelect">
+              <option value="linear">Linear</option>
+              <option value="sinusoidal">Sinusoidal</option>
+              <option value="sineExponential">Sine with Exponential Envelope</option>
+              <option value="exponential">Exponential</option>
+              <option value="firstOrderResponse">1st-Order Step Response</option>
+              <option value="secondOrderResponse">2nd-Order Step Response</option>
+              <option value="ellipse">Ellipse</option>
+              <option value="formula">Typed Formula</option>
+            </select>
+          </label>
+          <div id="selectionFitEquationRow" class="selection-stats-fit-equation"></div>
+          <label id="selectionFitFormulaRow" class="selection-stats-fit-formula-row" hidden>f(t)=
+            <input id="selectionFitFormulaInput" type="text" autocomplete="off" spellcheck="false" value="p0*sin(p1*t + p2) + p3" />
+          </label>
+          <div id="selectionFitFormulaHint" class="selection-stats-fit-formula-hint" hidden>Use <code>t</code> for the x-value, <code>p0</code>–<code>p11</code> for fitted parameters (any subset, any order), and math names like <code>sin cos exp sqrt abs pow PI</code>. Example: a decaying cosine -- <code>p0*exp(-p1*t)*cos(p2*t+p3) + p4</code></div>
+          <div id="selectionFitFormulaError" class="selection-stats-fit-formula-error" hidden></div>
+          <label class="selection-stats-fft-toggle-label">
+            <input type="checkbox" id="selectionFftEnabled" /> Show FFT
+          </label>
+          <div id="selectionFftHint" class="selection-stats-fft-hint" hidden>With Sinusoidal fit selected, click a point in the FFT chart to force the fit to that frequency.</div>
+        </div>
         <div id="selectionStatsBody" class="selection-stats-body"></div>
+      </div>
+      <div id="fftPanel" class="fft-panel" hidden>
+        <div id="fftPanelHeader" class="selection-stats-header">
+          <span>FFT of Selection</span>
+          <button id="fftClearForcedBtn" class="fft-clear-forced-btn" hidden title="Return the sine fit to auto-searching for the best frequency">Auto</button>
+          <button id="fftPanelClose" class="selection-stats-close" aria-label="Close FFT panel">✕</button>
+        </div>
+        <div id="fftPlotDiv" class="fft-plot-div"></div>
       </div>
       <div class="maps-container">
         <div id="mapDiv" class="map-panel"></div>
