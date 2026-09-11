@@ -148,9 +148,17 @@
   const selectionStatsClose = document.getElementById('selectionStatsClose');
   const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const selectionFitTypeSelect = document.getElementById('selectionFitTypeSelect');
+  const selectionFitEquationRow = document.getElementById('selectionFitEquationRow');
   const selectionFitFormulaRow = document.getElementById('selectionFitFormulaRow');
   const selectionFitFormulaInput = document.getElementById('selectionFitFormulaInput');
   const selectionFitFormulaError = document.getElementById('selectionFitFormulaError');
+  const selectionFftEnabledInput = document.getElementById('selectionFftEnabled');
+  const selectionFftHint = document.getElementById('selectionFftHint');
+  const fftPanel = document.getElementById('fftPanel');
+  const fftPanelHeader = document.getElementById('fftPanelHeader');
+  const fftPanelClose = document.getElementById('fftPanelClose');
+  const fftClearForcedBtn = document.getElementById('fftClearForcedBtn');
+  const fftPlotDiv = document.getElementById('fftPlotDiv');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -379,7 +387,7 @@
   const SELECTION_FIT_FORMULA_STORAGE_KEY = 'selectionFitFormula';
   const DEFAULT_SELECTION_FIT_TYPE = 'linear';
   const DEFAULT_SELECTION_FIT_FORMULA = 'p0*sin(p1*t + p2) + p3';
-  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'exponential', 'ellipse', 'formula']);
+  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'sineExponential', 'exponential', 'ellipse', 'formula']);
   const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
     { displayName: 'Time', unit: 's' },
     { displayName: 'Distance', unit: 'm' },
@@ -490,6 +498,9 @@
   let selectionFitType = DEFAULT_SELECTION_FIT_TYPE;
   let selectionFitFormula = DEFAULT_SELECTION_FIT_FORMULA;
   let selectionFitLastPoints = [];
+  const SELECTION_FFT_ENABLED_STORAGE_KEY = 'selectionFftEnabled';
+  let selectionFftEnabled = false;
+  let selectionSinFitForcedFreqHz = null; // frequency (Hz), set by clicking a point in the FFT panel
   // Hover tooltips default off on mobile, where they mostly just get in the way of touch
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
@@ -964,7 +975,30 @@
     return { coeffs, sse, preds };
   }
 
-  function computeSinusoidalFit(xs, ys) {
+  // Angular-frequency search range for the sine fits: bounded only by what's physically
+  // resolvable from this selection -- longer than ~20 periods across the whole span at
+  // the low end, and the Nyquist limit of the median sample spacing at the high end.
+  // No cycle-count floor/ceiling beyond that; the least-squares search picks whatever
+  // frequency actually minimizes error.
+  function getSinusoidalOmegaRange(xs, span) {
+    const sorted = xs.slice().sort((a, b) => a - b);
+    const diffs = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const diff = sorted[i] - sorted[i - 1];
+      if (diff > 0) diffs.push(diff);
+    }
+    const medianDt = diffs.length ? diffs.sort((a, b) => a - b)[Math.floor(diffs.length / 2)] : span / Math.max(1, xs.length);
+    if (!(medianDt > 0)) return null;
+    const omegaMin = (2 * Math.PI) / (span * 20);
+    const omegaMax = Math.PI / medianDt;
+    if (!(omegaMax > omegaMin)) return null;
+    return { omegaMin, omegaMax };
+  }
+
+  // forcedOmega (rad/s), when provided, skips the frequency search entirely and just
+  // fits sin/cos/offset at that single frequency (used when the user clicks a
+  // point in the FFT panel to pin the sine fit to that frequency).
+  function computeSinusoidalFit(xs, ys, forcedOmega) {
     if (xs.length < 4) return null;
     const sampled = sampleFitSeries(xs, ys);
     const tx = sampled.xs;
@@ -972,20 +1006,48 @@
     const [xMin, xMax] = arrayMinMax(tx);
     const span = xMax - xMin;
     if (!(span > 0)) return null;
-    const minCycles = 0.25;
-    const maxCycles = Math.max(minCycles, Math.min(20, tx.length / 4));
-    let best = null;
-    const steps = 80;
-    for (let i = 0; i < steps; i++) {
-      const frac = steps === 1 ? 0 : i / (steps - 1);
-      const cycles = minCycles + (maxCycles - minCycles) * frac;
-      const omega = (2 * Math.PI * cycles) / span;
-      const sinCol = tx.map((x) => Math.sin(omega * x));
-      const cosCol = tx.map((x) => Math.cos(omega * x));
+    const xCenter = (xMin + xMax) / 2;
+    const fitAtOmega = (omega) => {
+      const sinCol = tx.map((x) => Math.sin(omega * (x - xCenter)));
+      const cosCol = tx.map((x) => Math.cos(omega * (x - xCenter)));
       const ones = new Array(tx.length).fill(1);
-      const reg = fitLinearCombination([sinCol, cosCol, ones], ty);
-      if (!reg) continue;
-      if (!best || reg.sse < best.sse) best = { omega, reg };
+      return fitLinearCombination([sinCol, cosCol, ones], ty);
+    };
+    let best = null;
+    if (Number.isFinite(forcedOmega) && forcedOmega > 0) {
+      const reg = fitAtOmega(forcedOmega);
+      if (reg) best = { omega: forcedOmega, reg };
+    } else {
+      const range = getSinusoidalOmegaRange(tx, span);
+      if (!range) return null;
+      const { omegaMin, omegaMax } = range;
+      // Coarse log-spaced scan across the whole range (pure least-squares SSE per omega,
+      // no other constraints) followed by a few narrowing linear passes to home in on the
+      // exact frequency -- important for a clean, low-noise sinusoid where the true minimum
+      // can sit between two coarse samples.
+      const scan = (lo, hi, steps, spacing) => {
+        let localBest = null;
+        for (let i = 0; i < steps; i++) {
+          const frac = steps === 1 ? 0 : i / (steps - 1);
+          const omega = spacing === 'log' ? lo * Math.pow(hi / lo, frac) : lo + (hi - lo) * frac;
+          const reg = fitAtOmega(omega);
+          if (!reg) continue;
+          if (!localBest || reg.sse < localBest.reg.sse) localBest = { omega, reg };
+        }
+        return localBest;
+      };
+      const coarseSteps = 600;
+      best = scan(omegaMin, omegaMax, coarseSteps, 'log');
+      if (best) {
+        let halfWidth = (best.omega * (Math.pow(omegaMax / omegaMin, 1 / (coarseSteps - 1)) - 1)) || (omegaMax - omegaMin) / coarseSteps;
+        for (let pass = 0; pass < 5; pass++) {
+          const lo = Math.max(omegaMin, best.omega - halfWidth);
+          const hi = Math.min(omegaMax, best.omega + halfWidth);
+          const refined = scan(lo, hi, 120, 'linear');
+          if (refined && refined.reg.sse < best.reg.sse) best = refined;
+          halfWidth = Math.max(halfWidth / 8, 1e-9);
+        }
+      }
     }
     if (!best) return null;
     const b = best.reg.coeffs[0];
@@ -993,10 +1055,143 @@
     const offset = best.reg.coeffs[2];
     const A = Math.hypot(b, c);
     const phi = Math.atan2(c, b);
-    const predict = (x) => A * Math.sin(best.omega * x + phi) + offset;
+    const predict = (x) => A * Math.sin(best.omega * (x - xCenter) + phi) + offset;
     const preds = tx.map((x) => predict(x));
     const r2 = computeR2(ty, preds);
     return { A, omega: best.omega, phi, offset, r2, predict };
+  }
+
+  // Damped/growing sine: y = A * exp(tau*(x - xCenter)) * sin(omega*x + phi) + offset.
+  // The model is nonlinear in omega and tau, but linear in (b, c, offset) once both are
+  // fixed -- same trick as the plain sinusoidal/exponential fits above -- so this grid-
+  // searches omega (outer) and tau (inner, reusing the sin/cos columns across tau steps)
+  // and solves a 3-feature linear regression at each combination.
+  function computeSineExpFit(xs, ys, forcedOmega) {
+    if (xs.length < 5) return null;
+    const sampled = sampleFitSeries(xs, ys);
+    const tx = sampled.xs;
+    const ty = sampled.ys;
+    const [xMin, xMax] = arrayMinMax(tx);
+    const span = xMax - xMin;
+    if (!(span > 0)) return null;
+    const xScale = span;
+    let sumX = 0;
+    for (let i = 0; i < tx.length; i++) sumX += tx[i];
+    const xCenter = sumX / tx.length;
+    const tNorm = tx.map((x) => (x - xCenter) / xScale);
+
+    const omegaCandidates = [];
+    if (Number.isFinite(forcedOmega) && forcedOmega > 0) {
+      omegaCandidates.push(forcedOmega);
+    } else {
+      const range = getSinusoidalOmegaRange(tx, span);
+      if (!range) return null;
+      const { omegaMin, omegaMax } = range;
+      const omegaSteps = 120;
+      for (let i = 0; i < omegaSteps; i++) {
+        const frac = omegaSteps === 1 ? 0 : i / (omegaSteps - 1);
+        omegaCandidates.push(omegaMin * Math.pow(omegaMax / omegaMin, frac));
+      }
+    }
+    const tauSteps = 25;
+    let best = null;
+    omegaCandidates.forEach((omega) => {
+      const sinBase = tx.map((x) => Math.sin(omega * (x - xCenter)));
+      const cosBase = tx.map((x) => Math.cos(omega * (x - xCenter)));
+      for (let j = 0; j < tauSteps; j++) {
+        const tauNorm = tauSteps === 1 ? 0 : -8 + (16 * j) / (tauSteps - 1);
+        const envelope = tNorm.map((t) => Math.exp(Math.max(-60, Math.min(60, tauNorm * t))));
+        const sinCol = sinBase.map((v, i) => v * envelope[i]);
+        const cosCol = cosBase.map((v, i) => v * envelope[i]);
+        const ones = new Array(tx.length).fill(1);
+        const reg = fitLinearCombination([sinCol, cosCol, ones], ty);
+        if (!reg) continue;
+        if (!best || reg.sse < best.sse) best = { omega, tauNorm, reg };
+      }
+    });
+    if (!best) return null;
+    const b = best.reg.coeffs[0];
+    const c = best.reg.coeffs[1];
+    const offset = best.reg.coeffs[2];
+    const A = Math.hypot(b, c);
+    const phi = Math.atan2(c, b);
+    const tau = best.tauNorm / xScale;
+    const predict = (x) => A * Math.exp(Math.max(-60, Math.min(60, tau * (x - xCenter)))) * Math.sin(best.omega * (x - xCenter) + phi) + offset;
+    const preds = tx.map((x) => predict(x));
+    const r2 = computeR2(ty, preds);
+    return { A, omega: best.omega, phi, tau, offset, r2, predict };
+  }
+
+  // Oscillating fits (sinusoidal, sine×exponential) are drawn with a fixed 80-point path
+  // by default, which looks choppy once the fitted frequency packs many cycles into the
+  // selection -- so the point count scales up to guarantee at least ~10 points per cycle.
+  function oscillatingFitPointCount(omega, xMin, xMax) {
+    const span = xMax - xMin;
+    const cycles = Math.abs(omega) * span / (2 * Math.PI);
+    return Math.max(80, Math.ceil(cycles * 10) + 1);
+  }
+
+
+  // onto a uniform grid (median spacing of the sorted x's), removes the mean/DC term,
+  // applies a Hann window to reduce spectral leakage, then runs a direct DFT. A plain
+  // O(n^2) DFT (rather than a radix-2 FFT) keeps the implementation simple and is fine
+  // at the point counts a plot selection realistically produces (capped at 2048 here).
+  function computeFft(xs, ys) {
+    const n = xs.length;
+    if (n < 8) return null;
+    const order = xs.map((_, i) => i).sort((a, b) => xs[a] - xs[b]);
+    const sx = order.map((i) => xs[i]);
+    const sy = order.map((i) => ys[i]);
+    const diffs = [];
+    for (let i = 1; i < sx.length; i++) {
+      const d = sx[i] - sx[i - 1];
+      if (d > 0) diffs.push(d);
+    }
+    if (diffs.length === 0) return null;
+    diffs.sort((a, b) => a - b);
+    const dt = diffs[Math.floor(diffs.length / 2)];
+    if (!(dt > 0)) return null;
+    const span = sx[sx.length - 1] - sx[0];
+    const maxN = 2048;
+    let count = Math.min(maxN, Math.max(8, Math.floor(span / dt) + 1));
+    // Uniform resample via linear interpolation over the sorted, possibly-irregular samples.
+    const rt = new Array(count);
+    const ry = new Array(count);
+    let srcIdx = 0;
+    for (let i = 0; i < count; i++) {
+      const t = sx[0] + (i * span) / (count - 1);
+      while (srcIdx < sx.length - 2 && sx[srcIdx + 1] < t) srcIdx++;
+      const x0 = sx[srcIdx], x1 = sx[srcIdx + 1];
+      const y0 = sy[srcIdx], y1 = sy[srcIdx + 1];
+      const frac = x1 > x0 ? (t - x0) / (x1 - x0) : 0;
+      rt[i] = t;
+      ry[i] = y0 + (y1 - y0) * frac;
+    }
+    const sampleDt = span / (count - 1);
+    let mean = 0;
+    for (let i = 0; i < count; i++) mean += ry[i];
+    mean /= count;
+    const windowed = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (count - 1));
+      windowed[i] = (ry[i] - mean) * hann;
+    }
+    const half = Math.floor(count / 2);
+    if (half < 1) return null;
+    const freqs = new Array(half);
+    const mags = new Array(half);
+    for (let k = 1; k <= half; k++) {
+      let re = 0, im = 0;
+      const w = (2 * Math.PI * k) / count;
+      for (let i = 0; i < count; i++) {
+        const angle = w * i;
+        re += windowed[i] * Math.cos(angle);
+        im -= windowed[i] * Math.sin(angle);
+      }
+      freqs[k - 1] = k / (count * sampleDt);
+      mags[k - 1] = (2 / count) * Math.hypot(re, im);
+    }
+    return { freqs, mags };
   }
 
   function computeExponentialFit(xs, ys) {
@@ -1238,6 +1433,7 @@
       selectionFitFormulaError.textContent = '';
     }
     if (selectionStatsPanel) selectionStatsPanel.hidden = true;
+    if (fftPanel) fftPanel.hidden = true;
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
@@ -1263,8 +1459,8 @@
     selectionFitFormulaError.textContent = message;
   }
 
-  function buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, predict, fitLineColor) {
-    const pointCount = 80;
+  function buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, predict, fitLineColor, pointCount = 80) {
+    pointCount = Math.max(2, Math.round(pointCount));
     const dx = (xMax - xMin) / (pointCount - 1);
     let path = '';
     let drewAny = false;
@@ -1313,17 +1509,34 @@
     const yaxis = g.trace.yaxis || 'y';
     const out = { detailLines, shape: null };
     if (fitType === 'sinusoidal') {
-      const fit = computeSinusoidalFit(g.xs, g.ys);
+      const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
+      const fit = computeSinusoidalFit(g.xs, g.ys, forcedOmega);
       if (!fit) {
         detailLines.push('sin fit: n/a');
         return out;
       }
       detailLines.push(`A: ${formatStatValue(fit.A)}`);
-      detailLines.push(`ω: ${formatStatValue(fit.omega)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
       detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
-      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, oscillatingFitPointCount(fit.omega, xMin, xMax));
+      return out;
+    }
+    if (fitType === 'sineExponential') {
+      const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
+      const fit = computeSineExpFit(g.xs, g.ys, forcedOmega);
+      if (!fit) {
+        detailLines.push('sin×exp fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, oscillatingFitPointCount(fit.omega, xMin, xMax));
       return out;
     }
     if (fitType === 'exponential') {
@@ -1418,28 +1631,30 @@
   }
 
   // Drag-to-reposition the selection stats panel via its header.
-  (() => {
-    if (!selectionStatsPanel || !selectionStatsHeader) return;
+  function bindDraggablePanel(panel, header) {
+    if (!panel || !header) return;
     let dragging = false, ox = 0, oy = 0;
-    selectionStatsHeader.addEventListener('mousedown', (e) => {
+    header.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       dragging = true;
-      const rect = selectionStatsPanel.getBoundingClientRect();
+      const rect = panel.getBoundingClientRect();
       // Switch to absolute (pixel) positioning anchored to current location.
-      selectionStatsPanel.style.right = '';
-      selectionStatsPanel.style.left = rect.left + 'px';
-      selectionStatsPanel.style.top = rect.top + 'px';
+      panel.style.right = '';
+      panel.style.left = rect.left + 'px';
+      panel.style.top = rect.top + 'px';
       ox = e.clientX - rect.left;
       oy = e.clientY - rect.top;
       e.preventDefault();
     });
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      selectionStatsPanel.style.left = (e.clientX - ox) + 'px';
-      selectionStatsPanel.style.top = (e.clientY - oy) + 'px';
+      panel.style.left = (e.clientX - ox) + 'px';
+      panel.style.top = (e.clientY - oy) + 'px';
     });
     document.addEventListener('mouseup', () => { dragging = false; });
-  })();
+  }
+  bindDraggablePanel(selectionStatsPanel, selectionStatsHeader);
+  bindDraggablePanel(fftPanel, fftPanelHeader);
 
   if (selectionStatsClose) {
     selectionStatsClose.addEventListener('click', () => {
@@ -1447,13 +1662,127 @@
     });
   }
 
+  // Renders one magnitude-vs-frequency trace per selected channel group into the
+  // floating FFT panel (a separate small Plotly chart below/alongside the main plot).
+  function updateFftPanel(groupFits) {
+    if (!fftPanel || !fftPlotDiv || !selectionFftEnabled) return;
+    const traces = [];
+    groupFits.forEach(({ g }) => {
+      const fft = computeFft(g.xs, g.ys);
+      if (!fft) return;
+      const label = getChannelLabel(g.trace.meta.channel);
+      const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#1f77b4';
+      traces.push({
+        x: fft.freqs, y: fft.mags, type: 'scatter', mode: 'lines',
+        name: label, line: { color, width: 1.5 }
+      });
+    });
+    if (traces.length === 0) {
+      fftPanel.hidden = true;
+      return;
+    }
+    const theme = getCurrentTheme();
+    const fontColor = theme === 'dark' ? '#dde6f2' : '#222';
+    const gridColor = theme === 'dark' ? '#3a4556' : '#e0e0e0';
+    // A vertical marker showing the frequency the sine fit is currently pinned to
+    // (set by clicking a point in this chart) -- only meaningful while fitting sinusoids.
+    const isOscillatingFit = selectionFitType === 'sinusoidal' || selectionFitType === 'sineExponential';
+    const shapes = (isOscillatingFit && Number.isFinite(selectionSinFitForcedFreqHz))
+      ? [{
+          type: 'line', xref: 'x', yref: 'paper',
+          x0: selectionSinFitForcedFreqHz, x1: selectionSinFitForcedFreqHz, y0: 0, y1: 1,
+          line: { color: 'black', width: 1.5, dash: 'dot' }
+        }]
+      : [];
+    fftPanel.hidden = false;
+    Plotly.react(fftPlotDiv, traces, {
+      margin: { l: 45, r: 10, t: 10, b: 35 },
+      showlegend: traces.length > 1,
+      legend: { font: { size: 10, color: fontColor }, orientation: 'h', y: -0.3 },
+      xaxis: { title: { text: 'Frequency (Hz)', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
+      yaxis: { title: { text: 'Amplitude', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
+      shapes,
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: fontColor }
+    }, { responsive: true, displayModeBar: false }).then(bindFftPlotClickHandler);
+    if (fftClearForcedBtn) {
+      fftClearForcedBtn.hidden = !(isOscillatingFit && Number.isFinite(selectionSinFitForcedFreqHz));
+    }
+  }
+
+  function clearFftPanel() {
+    if (fftPanel) fftPanel.hidden = true;
+  }
+
+  // Clicking a point in the FFT chart pins the sine fit to that exact frequency instead
+  // of letting it auto-search -- handy once you've spotted the real oscillation's peak.
+  // Bound lazily (after the first Plotly.react call) since Plotly only attaches `.on` to
+  // the div once it has actually rendered a plot into it.
+  function bindFftPlotClickHandler() {
+    if (!fftPlotDiv || fftPlotDiv.__fftClickBound || typeof fftPlotDiv.on !== 'function') return;
+    fftPlotDiv.__fftClickBound = true;
+    fftPlotDiv.on('plotly_click', (eventData) => {
+      if (!eventData || !Array.isArray(eventData.points) || eventData.points.length === 0) return;
+      const freq = Number(eventData.points[0].x);
+      if (!Number.isFinite(freq) || freq <= 0) return;
+      selectionSinFitForcedFreqHz = freq;
+      if (selectionFitType !== 'sinusoidal' && selectionFitType !== 'sineExponential') {
+        selectionFitType = 'sinusoidal';
+        syncSelectionFitControlsUi();
+        try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
+      }
+      if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+    });
+  }
+
+  if (fftClearForcedBtn) {
+    fftClearForcedBtn.addEventListener('click', () => {
+      selectionSinFitForcedFreqHz = null;
+      fftClearForcedBtn.hidden = true;
+      if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+    });
+  }
+
+  if (fftPanelClose) {
+    fftPanelClose.addEventListener('click', () => { if (fftPanel) fftPanel.hidden = true; });
+  }
+
+  if (selectionFftEnabledInput) {
+    try { selectionFftEnabled = localStorage.getItem(SELECTION_FFT_ENABLED_STORAGE_KEY) === '1'; } catch {}
+    selectionFftEnabledInput.checked = selectionFftEnabled;
+    if (selectionFftHint) selectionFftHint.hidden = !selectionFftEnabled;
+    selectionFftEnabledInput.addEventListener('change', () => {
+      selectionFftEnabled = !!selectionFftEnabledInput.checked;
+      try { localStorage.setItem(SELECTION_FFT_ENABLED_STORAGE_KEY, selectionFftEnabled ? '1' : '0'); } catch {}
+      if (selectionFftHint) selectionFftHint.hidden = !selectionFftEnabled;
+      if (!selectionFftEnabled) {
+        clearFftPanel();
+      } else if (selectionFitLastPoints.length > 0) {
+        applySelectionFit(selectionFitLastPoints);
+      }
+    });
+  }
+
   function normalizeSelectionFitType(value) {
     return SELECTION_FIT_TYPE_OPTIONS.has(value) ? value : DEFAULT_SELECTION_FIT_TYPE;
   }
 
+  // Static equation text shown below the Fit Type dropdown, using the same variable
+  // names as the per-channel stats lines below it (A, ω, φ, offset, etc.).
+  const SELECTION_FIT_EQUATIONS = {
+    linear: 'y = slope · x + intercept',
+    sinusoidal: 'y = A · sin(ω · x + φ) + offset',
+    sineExponential: 'y = A · e^(τ · x) · sin(ω · x + φ) + offset',
+    exponential: 'y = A · e^(τ · x) + offset',
+    ellipse: '(x,y) on ellipse: center (cx,cy), semi-axes a, b, rotation angle',
+    formula: '' // the typed formula itself is shown per-channel below
+  };
+
   function syncSelectionFitControlsUi() {
     const isFormula = selectionFitType === 'formula';
     if (selectionFitTypeSelect) selectionFitTypeSelect.value = selectionFitType;
+    if (selectionFitEquationRow) selectionFitEquationRow.textContent = SELECTION_FIT_EQUATIONS[selectionFitType] || '';
     if (selectionFitFormulaRow) selectionFitFormulaRow.hidden = !isFormula;
     if (selectionFitFormulaInput && !selectionFitFormulaInput.value) {
       selectionFitFormulaInput.value = selectionFitFormula || DEFAULT_SELECTION_FIT_FORMULA;
@@ -1475,6 +1804,7 @@
     if (selectionFitTypeSelect) {
       selectionFitTypeSelect.addEventListener('change', () => {
         selectionFitType = normalizeSelectionFitType(selectionFitTypeSelect.value);
+        if (selectionFitType !== 'sinusoidal' && selectionFitType !== 'sineExponential') selectionSinFitForcedFreqHz = null;
         syncSelectionFitControlsUi();
         try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
         if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
@@ -1566,6 +1896,7 @@
       ? (groupFits[0].detailLines[0] || '').slice('formula: '.length)
       : '');
     updateSelectionStatsPanel(groupFits);
+    updateFftPanel(groupFits);
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
     if (suppressSelectionReentry) return;
@@ -2998,6 +3329,18 @@
     populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
+    applySavedImporterConfigToLog(file.name, newLog.id);
+  }
+
+  // If this file has a custom importer config (channel mapping, filters, downsample rate)
+  // persisted alongside it in IndexedDB from a previous session, reapply it automatically
+  // so reloading a stored file doesn't require redoing the mapping every time.
+  function applySavedImporterConfigToLog(fileName, logId) {
+    getFileEntryByName(fileName).then((entry) => {
+      const saved = entry && entry.importerConfig;
+      if (!saved || !saved.decoder) return;
+      if (reprocessLogWithDecoder(logId, saved.decoder, saved)) renderFilesList();
+    }).catch(() => {});
   }
 
   function parseFile(file, skipStore = false) {
@@ -9703,6 +10046,11 @@
         return;
       }
 
+      // Persist to IndexedDB (keyed by file name) so it's reapplied automatically the
+      // next time this file is loaded from browser storage -- not just for this session.
+      const savedLog = logs.find((entry) => entry.id === importerEditorState.logId);
+      if (savedLog) saveImporterConfigForFile(savedLog.name, importerEditorState.decoderName, payload);
+
       closeImporterEditor();
       renderFilesList();
     });
@@ -10236,6 +10584,39 @@
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = (e) => reject(e.target.error);
     })).catch(() => []);
+  }
+
+  function getFileEntryByName(name) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readonly');
+      const req = tx.objectStore(FILE_STORE).get(name);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = (e) => reject(e.target.error);
+    })).catch(() => null);
+  }
+
+  // Persists (or, when config is null, clears) the custom importer config -- channel
+  // mapping, filters, downsample rate -- for a stored file, so it's reapplied
+  // automatically the next time that file is loaded (see applySavedImporterConfigToLog).
+  function saveImporterConfigForFile(name, decoderName, config) {
+    return openFileDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(FILE_STORE, 'readwrite');
+      const store = tx.objectStore(FILE_STORE);
+      const getReq = store.get(name);
+      getReq.onsuccess = () => {
+        const entry = getReq.result;
+        if (!entry) { resolve(); return; }
+        if (config) {
+          entry.importerConfig = { decoder: decoderName, channels: config.channels, filters: config.filters, downsampleHz: config.downsampleHz };
+        } else {
+          delete entry.importerConfig;
+        }
+        store.put(entry);
+      };
+      getReq.onerror = (e) => reject(e.target.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = (e) => reject(e.target.error);
+    })).catch(() => {});
   }
 
   function clearAllFilesFromDB() {
