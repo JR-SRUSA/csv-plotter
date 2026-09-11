@@ -147,6 +147,10 @@
   const selectionStatsBody = document.getElementById('selectionStatsBody');
   const selectionStatsClose = document.getElementById('selectionStatsClose');
   const selectionStatsHeader = document.getElementById('selectionStatsHeader');
+  const selectionFitTypeSelect = document.getElementById('selectionFitTypeSelect');
+  const selectionFitFormulaRow = document.getElementById('selectionFitFormulaRow');
+  const selectionFitFormulaInput = document.getElementById('selectionFitFormulaInput');
+  const selectionFitFormulaError = document.getElementById('selectionFitFormulaError');
   // Box/Lasso Select are custom buttons, not Plotly's built-in select2d/lasso2d, because
   // Plotly only auto-shows those when a trace already has markers -- which channel traces
   // don't, until the user asks to select (see setSelectableMarkersEnabled). The built-in
@@ -371,6 +375,11 @@
 
   const IMPORTER_FILTER_AXES = ['time', 'distance'];
   const IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY = 'importerCustomStandardChannels';
+  const SELECTION_FIT_TYPE_STORAGE_KEY = 'selectionFitType';
+  const SELECTION_FIT_FORMULA_STORAGE_KEY = 'selectionFitFormula';
+  const DEFAULT_SELECTION_FIT_TYPE = 'linear';
+  const DEFAULT_SELECTION_FIT_FORMULA = 'p0*sin(p1*t + p2) + p3';
+  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'exponential', 'ellipse', 'formula']);
   const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
     { displayName: 'Time', unit: 's' },
     { displayName: 'Distance', unit: 'm' },
@@ -478,6 +487,9 @@
   let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
   let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
+  let selectionFitType = DEFAULT_SELECTION_FIT_TYPE;
+  let selectionFitFormula = DEFAULT_SELECTION_FIT_FORMULA;
+  let selectionFitLastPoints = [];
   // Hover tooltips default off on mobile, where they mostly just get in the way of touch
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
@@ -856,7 +868,295 @@
     const slope = sxy / sxx;
     const intercept = meanY - slope * meanX;
     const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
-    return {slope, intercept, r2};
+    return { slope, intercept, r2 };
+  }
+
+  function computeR2(ys, preds) {
+    if (!Array.isArray(ys) || !Array.isArray(preds) || ys.length !== preds.length || ys.length === 0) return null;
+    let sumY = 0;
+    for (let i = 0; i < ys.length; i++) sumY += ys[i];
+    const meanY = sumY / ys.length;
+    let sse = 0, sst = 0;
+    for (let i = 0; i < ys.length; i++) {
+      const y = ys[i];
+      const p = preds[i];
+      if (!Number.isFinite(y) || !Number.isFinite(p)) return null;
+      const err = y - p;
+      const dy = y - meanY;
+      sse += err * err;
+      sst += dy * dy;
+    }
+    if (sst === 0) return 1;
+    return 1 - (sse / sst);
+  }
+
+  function sampleFitSeries(xs, ys, maxPoints = 4000) {
+    if (xs.length <= maxPoints) return { xs: xs.slice(), ys: ys.slice() };
+    const step = (xs.length - 1) / (maxPoints - 1);
+    const sx = [];
+    const sy = [];
+    for (let i = 0; i < maxPoints; i++) {
+      const idx = Math.round(i * step);
+      sx.push(xs[idx]);
+      sy.push(ys[idx]);
+    }
+    return { xs: sx, ys: sy };
+  }
+
+  function solveLinearSystem(matrix, vector) {
+    const n = vector.length;
+    const aug = matrix.map((row, i) => row.slice().concat([vector[i]]));
+    for (let col = 0; col < n; col++) {
+      let pivotRow = col;
+      let pivotAbs = Math.abs(aug[col][col]);
+      for (let r = col + 1; r < n; r++) {
+        const abs = Math.abs(aug[r][col]);
+        if (abs > pivotAbs) { pivotAbs = abs; pivotRow = r; }
+      }
+      if (pivotAbs < 1e-12) return null;
+      if (pivotRow !== col) {
+        const tmp = aug[col];
+        aug[col] = aug[pivotRow];
+        aug[pivotRow] = tmp;
+      }
+      const pivot = aug[col][col];
+      for (let c = col; c <= n; c++) aug[col][c] /= pivot;
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const f = aug[r][col];
+        if (f === 0) continue;
+        for (let c = col; c <= n; c++) aug[r][c] -= f * aug[col][c];
+      }
+    }
+    return aug.map((row) => row[n]);
+  }
+
+  function fitLinearCombination(features, ys) {
+    const n = ys.length;
+    const k = features.length;
+    if (n === 0 || k === 0) return null;
+    const ata = Array.from({ length: k }, () => new Array(k).fill(0));
+    const atb = new Array(k).fill(0);
+    for (let i = 0; i < n; i++) {
+      const y = ys[i];
+      if (!Number.isFinite(y)) return null;
+      for (let a = 0; a < k; a++) {
+        const va = features[a][i];
+        if (!Number.isFinite(va)) return null;
+        atb[a] += va * y;
+        for (let b = a; b < k; b++) {
+          ata[a][b] += va * features[b][i];
+        }
+      }
+    }
+    for (let a = 0; a < k; a++) for (let b = 0; b < a; b++) ata[a][b] = ata[b][a];
+    const coeffs = solveLinearSystem(ata, atb);
+    if (!coeffs) return null;
+    let sse = 0;
+    const preds = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let p = 0;
+      for (let a = 0; a < k; a++) p += coeffs[a] * features[a][i];
+      preds[i] = p;
+      const err = ys[i] - p;
+      sse += err * err;
+    }
+    return { coeffs, sse, preds };
+  }
+
+  function computeSinusoidalFit(xs, ys) {
+    if (xs.length < 4) return null;
+    const sampled = sampleFitSeries(xs, ys);
+    const tx = sampled.xs;
+    const ty = sampled.ys;
+    const [xMin, xMax] = arrayMinMax(tx);
+    const span = xMax - xMin;
+    if (!(span > 0)) return null;
+    const minCycles = 0.25;
+    const maxCycles = Math.max(minCycles, Math.min(20, tx.length / 4));
+    let best = null;
+    const steps = 80;
+    for (let i = 0; i < steps; i++) {
+      const frac = steps === 1 ? 0 : i / (steps - 1);
+      const cycles = minCycles + (maxCycles - minCycles) * frac;
+      const omega = (2 * Math.PI * cycles) / span;
+      const sinCol = tx.map((x) => Math.sin(omega * x));
+      const cosCol = tx.map((x) => Math.cos(omega * x));
+      const ones = new Array(tx.length).fill(1);
+      const reg = fitLinearCombination([sinCol, cosCol, ones], ty);
+      if (!reg) continue;
+      if (!best || reg.sse < best.sse) best = { omega, reg };
+    }
+    if (!best) return null;
+    const b = best.reg.coeffs[0];
+    const c = best.reg.coeffs[1];
+    const offset = best.reg.coeffs[2];
+    const A = Math.hypot(b, c);
+    const phi = Math.atan2(c, b);
+    const predict = (x) => A * Math.sin(best.omega * x + phi) + offset;
+    const preds = tx.map((x) => predict(x));
+    const r2 = computeR2(ty, preds);
+    return { A, omega: best.omega, phi, offset, r2, predict };
+  }
+
+  function computeExponentialFit(xs, ys) {
+    if (xs.length < 3) return null;
+    const sampled = sampleFitSeries(xs, ys);
+    const tx = sampled.xs;
+    const ty = sampled.ys;
+    const [xMin, xMax] = arrayMinMax(tx);
+    const xSpan = xMax - xMin;
+    const xScale = xSpan > 0 ? xSpan : 1;
+    let sumX = 0;
+    for (let i = 0; i < tx.length; i++) sumX += tx[i];
+    const xCenter = sumX / tx.length;
+    const tNorm = tx.map((x) => (x - xCenter) / xScale);
+    let best = null;
+    const steps = 120;
+    for (let i = 0; i < steps; i++) {
+      const tauNorm = -8 + (16 * i) / (steps - 1);
+      const uCol = tNorm.map((t) => Math.exp(Math.max(-60, Math.min(60, tauNorm * t))));
+      const ones = new Array(tx.length).fill(1);
+      const reg = fitLinearCombination([uCol, ones], ty);
+      if (!reg) continue;
+      if (!best || reg.sse < best.sse) best = { tauNorm, reg };
+    }
+    if (!best) return null;
+    const AScaled = best.reg.coeffs[0];
+    const offset = best.reg.coeffs[1];
+    const tau = best.tauNorm / xScale;
+    const predict = (x) => AScaled * Math.exp(Math.max(-60, Math.min(60, best.tauNorm * ((x - xCenter) / xScale)))) + offset;
+    const preds = tx.map((x) => predict(x));
+    const r2 = computeR2(ty, preds);
+    const amplitude = AScaled * Math.exp(Math.max(-60, Math.min(60, -tau * xCenter)));
+    return { A: amplitude, tau, offset, r2, predict };
+  }
+
+  function computeEllipseFit(xs, ys) {
+    if (xs.length < 5) return null;
+    const sampled = sampleFitSeries(xs, ys);
+    const tx = sampled.xs;
+    const ty = sampled.ys;
+    const n = tx.length;
+    let cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) { cx += tx[i]; cy += ty[i]; }
+    cx /= n; cy /= n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = tx[i] - cx;
+      const dy = ty[i] - cy;
+      sxx += dx * dx;
+      syy += dy * dy;
+      sxy += dx * dy;
+    }
+    sxx /= n; syy /= n; sxy /= n;
+    const angle = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    const ux = Math.cos(angle), uy = Math.sin(angle);
+    const vx = -uy, vy = ux;
+    let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const dx = tx[i] - cx;
+      const dy = ty[i] - cy;
+      const u = dx * ux + dy * uy;
+      const v = dx * vx + dy * vy;
+      if (u < uMin) uMin = u;
+      if (u > uMax) uMax = u;
+      if (v < vMin) vMin = v;
+      if (v > vMax) vMax = v;
+    }
+    const a = (uMax - uMin) / 2;
+    const b = (vMax - vMin) / 2;
+    if (!(a > 0) || !(b > 0)) return null;
+    const uMid = (uMin + uMax) / 2;
+    const vMid = (vMin + vMax) / 2;
+    const centerX = cx + uMid * ux + vMid * vx;
+    const centerY = cy + uMid * uy + vMid * vy;
+    return { centerX, centerY, a, b, angle };
+  }
+
+  function compileTypedFitFormula(expression) {
+    const source = String(expression || '').trim();
+    if (!source) return { error: 'Formula is required.', fn: null, paramNames: [] };
+    const paramIdx = [];
+    source.replace(/\bp(\d+)\b/g, (_, num) => { paramIdx.push(Number(num)); return _; });
+    const maxIdx = paramIdx.length ? Math.max(...paramIdx) : -1;
+    if (maxIdx > 11) return { error: 'Use parameters p0 through p11 only.', fn: null, paramNames: [] };
+    const paramNames = maxIdx >= 0 ? Array.from({ length: maxIdx + 1 }, (_, i) => `p${i}`) : [];
+    let fn;
+    try {
+      fn = new Function('t', 'x', ...paramNames, ...MATH_SCOPE_KEYS, `"use strict"; return (${source});`);
+    } catch (e) {
+      return { error: `Formula syntax error: ${e.message}`, fn: null, paramNames: [] };
+    }
+    return { error: null, fn, paramNames };
+  }
+
+  function computeTypedFormulaFit(xs, ys, expression) {
+    if (xs.length < 2) return { fit: null, error: null };
+    const compiled = compileTypedFitFormula(expression);
+    if (compiled.error) return { fit: null, error: compiled.error };
+    const sampled = sampleFitSeries(xs, ys, 2500);
+    const tx = sampled.xs;
+    const ty = sampled.ys;
+    const [xMin, xMax] = arrayMinMax(tx);
+    const span = Math.max(1e-9, xMax - xMin);
+    let meanY = 0, yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i < ty.length; i++) {
+      meanY += ty[i];
+      if (ty[i] < yMin) yMin = ty[i];
+      if (ty[i] > yMax) yMax = ty[i];
+    }
+    meanY /= ty.length;
+    const yScale = Math.max(1, Math.abs(yMax - yMin), Math.abs(meanY));
+    const evalPoint = (x, params) => {
+      const args = [x, x].concat(params).concat(MATH_SCOPE_VALS);
+      const v = compiled.fn(...args);
+      return Number.isFinite(v) ? v : NaN;
+    };
+    let params = compiled.paramNames.map((_, i) => (i === 0 ? meanY : 0));
+    let steps = compiled.paramNames.map((_, i) => (i === 0 ? yScale * 0.5 : Math.max(0.05, 1 / span)));
+    const calcSse = (candidate) => {
+      let sse = 0;
+      for (let i = 0; i < tx.length; i++) {
+        const p = evalPoint(tx[i], candidate);
+        if (!Number.isFinite(p)) return Infinity;
+        const err = ty[i] - p;
+        sse += err * err;
+      }
+      return sse;
+    };
+    if (compiled.paramNames.length > 0) {
+      let bestSse = calcSse(params);
+      for (let iter = 0; iter < 80; iter++) {
+        let improved = false;
+        for (let pIdx = 0; pIdx < params.length; pIdx++) {
+          const step = steps[pIdx];
+          if (!(step > 1e-6)) continue;
+          let trial = params.slice();
+          trial[pIdx] += step;
+          let ssePlus = calcSse(trial);
+          trial[pIdx] = params[pIdx] - step;
+          let sseMinus = calcSse(trial);
+          if (ssePlus < bestSse || sseMinus < bestSse) {
+            if (ssePlus <= sseMinus) {
+              params[pIdx] += step;
+              bestSse = ssePlus;
+            } else {
+              params[pIdx] -= step;
+              bestSse = sseMinus;
+            }
+            improved = true;
+          }
+        }
+        if (!improved) steps = steps.map((v) => v * 0.6);
+        if (steps.every((v) => v < 1e-6)) break;
+      }
+    }
+    const preds = tx.map((x) => evalPoint(x, params));
+    if (preds.some((v) => !Number.isFinite(v))) return { fit: null, error: 'Formula produced invalid values.' };
+    const predict = (x) => evalPoint(x, params);
+    const r2 = computeR2(ty, preds);
+    return { fit: { expression: String(expression || '').trim(), paramNames: compiled.paramNames, params, r2, predict }, error: null };
   }
 
   function formatStatValue(v) {
@@ -932,6 +1232,11 @@
     const hadShapes = selectionFitShapes.length > 0;
     selectionFitShapes = [];
     selectionFitAnnotations = [];
+    selectionFitLastPoints = [];
+    if (selectionFitFormulaError) {
+      selectionFitFormulaError.hidden = true;
+      selectionFitFormulaError.textContent = '';
+    }
     if (selectionStatsPanel) selectionStatsPanel.hidden = true;
     if (hadShapes && plotDiv && Array.isArray(plotDiv.data) && !suppressSelectionReentry) {
       suppressSelectionReentry = true;
@@ -947,11 +1252,148 @@
     return 'black';
   }
 
+  function setSelectionFitFormulaError(message) {
+    if (!selectionFitFormulaError) return;
+    if (!message) {
+      selectionFitFormulaError.hidden = true;
+      selectionFitFormulaError.textContent = '';
+      return;
+    }
+    selectionFitFormulaError.hidden = false;
+    selectionFitFormulaError.textContent = message;
+  }
+
+  function buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, predict, fitLineColor) {
+    const pointCount = 80;
+    const dx = (xMax - xMin) / (pointCount - 1);
+    let path = '';
+    let drewAny = false;
+    for (let i = 0; i < pointCount; i++) {
+      const x = xMin + dx * i;
+      const y = predict(x);
+      if (!Number.isFinite(y)) continue;
+      path += `${drewAny ? 'L' : 'M'} ${x},${y} `;
+      drewAny = true;
+    }
+    if (!drewAny) return null;
+    return {
+      type: 'path',
+      path: path.trim(),
+      xref: xaxis,
+      yref: yaxis,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+  }
+
+  function buildEllipseFitShape(fit, xaxis, yaxis, fitLineColor) {
+    const segments = 96;
+    let path = '';
+    for (let i = 0; i <= segments; i++) {
+      const theta = (2 * Math.PI * i) / segments;
+      const cu = fit.a * Math.cos(theta);
+      const cv = fit.b * Math.sin(theta);
+      const x = fit.centerX + cu * Math.cos(fit.angle) - cv * Math.sin(fit.angle);
+      const y = fit.centerY + cu * Math.sin(fit.angle) + cv * Math.cos(fit.angle);
+      path += `${i === 0 ? 'M' : 'L'} ${x},${y} `;
+    }
+    return {
+      type: 'path',
+      path: `${path.trim()} Z`,
+      xref: xaxis,
+      yref: yaxis,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+  }
+
+  function buildSelectionFitDetails(fitType, g, xMin, xMax, yMin, yMax, fitLineColor, typedFormulaResult) {
+    const detailLines = [];
+    const xaxis = g.trace.xaxis || 'x';
+    const yaxis = g.trace.yaxis || 'y';
+    const out = { detailLines, shape: null };
+    if (fitType === 'sinusoidal') {
+      const fit = computeSinusoidalFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('sin fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    if (fitType === 'exponential') {
+      const fit = computeExponentialFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('exp fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    if (fitType === 'ellipse') {
+      const fit = computeEllipseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('ellipse fit: n/a');
+        return out;
+      }
+      detailLines.push(`center: (${formatStatValue(fit.centerX)}, ${formatStatValue(fit.centerY)})`);
+      detailLines.push(`a: ${formatStatValue(fit.a)}`);
+      detailLines.push(`b: ${formatStatValue(fit.b)}`);
+      detailLines.push(`angle(rad): ${formatStatValue(fit.angle)}`);
+      out.shape = buildEllipseFitShape(fit, xaxis, yaxis, fitLineColor);
+      return out;
+    }
+    if (fitType === 'formula') {
+      if (typedFormulaResult.error) {
+        detailLines.push(`formula: ${typedFormulaResult.error}`);
+        return out;
+      }
+      const fit = typedFormulaResult.fit;
+      if (!fit) {
+        detailLines.push('formula fit: n/a');
+        return out;
+      }
+      detailLines.push(`f(t) = ${fit.expression}`);
+      if (fit.paramNames.length === 0) {
+        detailLines.push('params: none');
+      } else {
+        fit.paramNames.forEach((name, i) => detailLines.push(`${name}: ${formatStatValue(fit.params[i])}`));
+      }
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    const fit = computeLinearFit(g.xs, g.ys);
+    detailLines.push(fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a');
+    detailLines.push(fit ? `R²: ${fit.r2.toFixed(3)}` : 'R²: n/a');
+    if (!fit) return out;
+    out.shape = {
+      type: 'line',
+      xref: xaxis,
+      yref: yaxis,
+      x0: xMin, x1: xMax,
+      y0: fit.slope * xMin + fit.intercept,
+      y1: fit.slope * xMax + fit.intercept,
+      line: { color: fitLineColor, width: 2, dash: 'dot' },
+      layer: 'above'
+    };
+    return out;
+  }
+
   // Populates the floating HTML selection stats panel with one group block per channel.
   function updateSelectionStatsPanel(groupFits) {
     if (!selectionStatsPanel || !selectionStatsBody) return;
     selectionStatsBody.innerHTML = '';
-    groupFits.forEach(({g, fit, xMin, xMax, yMin, yMax}) => {
+    groupFits.forEach(({g, xMin, xMax, yMin, yMax, detailLines}) => {
       const label = getChannelLabel(g.trace.meta.channel);
       const block = document.createElement('div');
       block.className = 'selection-stats-group';
@@ -962,10 +1404,8 @@
       const lines = [
         `n = ${g.xs.length} pts`,
         `${mainPlotXAxisTitle || 'X'}: ${formatStatValue(xMin)} \u2013 ${formatStatValue(xMax)}`,
-        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`,
-        fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a',
-        fit ? `R\u00b2: ${fit.r2.toFixed(3)}` : 'R\u00b2: n/a'
-      ];
+        `${label}: ${formatStatValue(yMin)} \u2013 ${formatStatValue(yMax)}`
+      ].concat(detailLines || []);
       lines.forEach((text) => {
         const row = document.createElement('div');
         row.className = 'selection-stats-group-line';
@@ -1007,12 +1447,60 @@
     });
   }
 
+  function normalizeSelectionFitType(value) {
+    return SELECTION_FIT_TYPE_OPTIONS.has(value) ? value : DEFAULT_SELECTION_FIT_TYPE;
+  }
+
+  function syncSelectionFitControlsUi() {
+    const isFormula = selectionFitType === 'formula';
+    if (selectionFitTypeSelect) selectionFitTypeSelect.value = selectionFitType;
+    if (selectionFitFormulaRow) selectionFitFormulaRow.hidden = !isFormula;
+    if (selectionFitFormulaInput && !selectionFitFormulaInput.value) {
+      selectionFitFormulaInput.value = selectionFitFormula || DEFAULT_SELECTION_FIT_FORMULA;
+    }
+    if (!isFormula) setSelectionFitFormulaError('');
+  }
+
+  (() => {
+    try {
+      const savedType = localStorage.getItem(SELECTION_FIT_TYPE_STORAGE_KEY);
+      selectionFitType = normalizeSelectionFitType(savedType);
+    } catch {}
+    try {
+      const savedFormula = localStorage.getItem(SELECTION_FIT_FORMULA_STORAGE_KEY);
+      if (typeof savedFormula === 'string' && savedFormula.trim()) selectionFitFormula = savedFormula;
+    } catch {}
+    if (selectionFitFormulaInput) selectionFitFormulaInput.value = selectionFitFormula;
+    syncSelectionFitControlsUi();
+    if (selectionFitTypeSelect) {
+      selectionFitTypeSelect.addEventListener('change', () => {
+        selectionFitType = normalizeSelectionFitType(selectionFitTypeSelect.value);
+        syncSelectionFitControlsUi();
+        try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
+        if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+      });
+    }
+    if (selectionFitFormulaInput) {
+      let pendingApply = null;
+      const onFormulaChange = () => {
+        selectionFitFormula = selectionFitFormulaInput.value || '';
+        try { localStorage.setItem(SELECTION_FIT_FORMULA_STORAGE_KEY, selectionFitFormula); } catch {}
+        if (selectionFitType === 'formula' && selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+      };
+      selectionFitFormulaInput.addEventListener('change', onFormulaChange);
+      selectionFitFormulaInput.addEventListener('input', () => {
+        if (pendingApply) clearTimeout(pendingApply);
+        pendingApply = setTimeout(onFormulaChange, 250);
+      });
+    }
+  })();
+
   // Builds the on-plot stats box for one fit -- a real Plotly annotation (not HTML) so it
   // survives into a PNG export via Plotly.downloadImage. stackIndex offsets each
   // simultaneous fit (multiple Y channels selected at once) further from the selection
   // box's corner, so they start out legible instead of stacked directly on each other;
   // the user can still drag any of them further (config.edits.annotationTail).
-  function buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
+  function buildSelectionFitAnnotation(g, detailLines, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex) {
     const theme = getCurrentTheme();
     const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#000';
     const label = getChannelLabel(g.trace.meta.channel);
@@ -1021,17 +1509,16 @@
       `<b>${escapeHtml(name)}</b>`,
       `n = ${g.xs.length} pts`,
       `${escapeHtml(mainPlotXAxisTitle || 'X')}: ${formatStatValue(xMin)} – ${formatStatValue(xMax)}`,
-      `${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}`,
-      `slope: ${formatStatValue(fit.slope)}`,
-      `R²: ${fit.r2.toFixed(3)}`
-    ].join('<br>');
+      `${escapeHtml(label)}: ${formatStatValue(yMin)} – ${formatStatValue(yMax)}`
+    ];
+    (detailLines || []).forEach((line) => text.push(escapeHtml(line)));
     // Anchored to the selection box's top-right corner (not a point on the fit line
     // itself), then pushed further up-and-right in pixel space -- so the label sits
     // outside the selected data instead of covering it.
     return {
       x: xMax, y: yMax,
       xref: xaxis, yref: yaxis,
-      text,
+      text: text.join('<br>'),
       showarrow: true,
       arrowhead: 2, arrowsize: 1, arrowwidth: 1, arrowcolor: color,
       ax: 50, ay: -50 - stackIndex * 95,
@@ -1046,39 +1533,38 @@
 
   function applySelectionFit(points) {
     const groups = groupSelectedPointsByTrace(points);
+    selectionFitLastPoints = Array.isArray(points) ? points.slice() : [];
     const shapes = [];
     const annotations = [];
     const validGroups = [];
     const groupFits = [];
     const fitLineColor = getSelectionFitLineColor();
+    const activeFitType = normalizeSelectionFitType(selectionFitType);
+    const typedFormulaResultByGroup = (activeFitType === 'formula')
+      ? (g) => computeTypedFormulaFit(g.xs, g.ys, selectionFitFormula)
+      : () => ({ fit: null, error: null });
     let stackIndex = 0;
     groups.forEach((g) => {
       if (g.xs.length < 2) return;
       validGroups.push(g);
-      const fit = computeLinearFit(g.xs, g.ys);
       const [xMin, xMax] = arrayMinMax(g.xs);
       const [yMin, yMax] = arrayMinMax(g.ys);
-      groupFits.push({g, fit, xMin, xMax, yMin, yMax});
-      if (!fit) return;
+      const fitDetails = buildSelectionFitDetails(activeFitType, g, xMin, xMax, yMin, yMax, fitLineColor, typedFormulaResultByGroup(g));
+      groupFits.push({ g, xMin, xMax, yMin, yMax, detailLines: fitDetails.detailLines });
+      if (!fitDetails.shape) return;
       const xaxis = g.trace.xaxis || 'x';
       const yaxis = g.trace.yaxis || 'y';
-      shapes.push({
-        type: 'line',
-        xref: xaxis,
-        yref: yaxis,
-        x0: xMin, x1: xMax,
-        y0: fit.slope * xMin + fit.intercept,
-        y1: fit.slope * xMax + fit.intercept,
-        line: {color: fitLineColor, width: 2, dash: 'dot'},
-        layer: 'above'
-      });
-      annotations.push(buildSelectionFitAnnotation(g, fit, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
+      shapes.push(fitDetails.shape);
+      annotations.push(buildSelectionFitAnnotation(g, fitDetails.detailLines, xMin, xMax, yMin, yMax, xaxis, yaxis, stackIndex));
       stackIndex += 1;
     });
     if (validGroups.length === 0) {
       clearSelectionFit();
       return;
     }
+    setSelectionFitFormulaError(activeFitType === 'formula' && groupFits.length > 0 && /^formula: /.test(groupFits[0].detailLines[0] || '')
+      ? (groupFits[0].detailLines[0] || '').slice('formula: '.length)
+      : '');
     updateSelectionStatsPanel(groupFits);
     selectionFitShapes = shapes;
     selectionFitAnnotations = annotations;
@@ -9383,6 +9869,8 @@
     IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY,
     'mathChannels',
     'dataFiltersState',
+    SELECTION_FIT_TYPE_STORAGE_KEY,
+    SELECTION_FIT_FORMULA_STORAGE_KEY,
     'trackCornerMetadata',
     'trackCornerOverrides',
     'startFinishLineOverrides'

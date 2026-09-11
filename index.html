@@ -417,6 +417,21 @@
           <span>Selection Stats</span>
           <button id="selectionStatsClose" class="selection-stats-close" aria-label="Close selection stats">✕</button>
         </div>
+        <div class="selection-stats-controls">
+          <label class="selection-stats-fit-type-label">Fit Type
+            <select id="selectionFitTypeSelect">
+              <option value="linear">Linear</option>
+              <option value="sinusoidal">Sinusoidal</option>
+              <option value="exponential">Exponential</option>
+              <option value="ellipse">Ellipse</option>
+              <option value="formula">Typed Formula</option>
+            </select>
+          </label>
+          <label id="selectionFitFormulaRow" class="selection-stats-fit-formula-row" hidden>f(t)=
+            <input id="selectionFitFormulaInput" type="text" autocomplete="off" spellcheck="false" value="p0*sin(p1*t + p2) + p3" />
+          </label>
+          <div id="selectionFitFormulaError" class="selection-stats-fit-formula-error" hidden></div>
+        </div>
         <div id="selectionStatsBody" class="selection-stats-body"></div>
       </div>
       <div class="maps-container">
