@@ -404,7 +404,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-08-18b</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-11b</div>
     </section>
 
     <section class="plot">
@@ -424,6 +424,8 @@
               <option value="sinusoidal">Sinusoidal</option>
               <option value="sineExponential">Sine with Exponential Envelope</option>
               <option value="exponential">Exponential</option>
+              <option value="firstOrderResponse">1st-Order Step Response</option>
+              <option value="secondOrderResponse">2nd-Order Step Response</option>
               <option value="ellipse">Ellipse</option>
               <option value="formula">Typed Formula</option>
             </select>
@@ -432,6 +434,7 @@
           <label id="selectionFitFormulaRow" class="selection-stats-fit-formula-row" hidden>f(t)=
             <input id="selectionFitFormulaInput" type="text" autocomplete="off" spellcheck="false" value="p0*sin(p1*t + p2) + p3" />
           </label>
+          <div id="selectionFitFormulaHint" class="selection-stats-fit-formula-hint" hidden>Use <code>t</code> for the x-value, <code>p0</code>–<code>p11</code> for fitted parameters (any subset, any order), and math names like <code>sin cos exp sqrt abs pow PI</code>. Example: a decaying cosine -- <code>p0*exp(-p1*t)*cos(p2*t+p3) + p4</code></div>
           <div id="selectionFitFormulaError" class="selection-stats-fit-formula-error" hidden></div>
           <label class="selection-stats-fft-toggle-label">
             <input type="checkbox" id="selectionFftEnabled" /> Show FFT
@@ -507,6 +510,7 @@
   <script src="file-processors.js"></script>
   <script src="map-coordinate-utils.js"></script>
   <script src="racing-line-calculations.js"></script>
+  <script src="fit-functions.js"></script>
   <script src="app.js"></script>
   <script src="resize-panels.js"></script>
 </body>

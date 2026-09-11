@@ -151,6 +151,7 @@
   const selectionFitEquationRow = document.getElementById('selectionFitEquationRow');
   const selectionFitFormulaRow = document.getElementById('selectionFitFormulaRow');
   const selectionFitFormulaInput = document.getElementById('selectionFitFormulaInput');
+  const selectionFitFormulaHint = document.getElementById('selectionFitFormulaHint');
   const selectionFitFormulaError = document.getElementById('selectionFitFormulaError');
   const selectionFftEnabledInput = document.getElementById('selectionFftEnabled');
   const selectionFftHint = document.getElementById('selectionFftHint');
@@ -387,7 +388,7 @@
   const SELECTION_FIT_FORMULA_STORAGE_KEY = 'selectionFitFormula';
   const DEFAULT_SELECTION_FIT_TYPE = 'linear';
   const DEFAULT_SELECTION_FIT_FORMULA = 'p0*sin(p1*t + p2) + p3';
-  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'sineExponential', 'exponential', 'ellipse', 'formula']);
+  const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'sineExponential', 'exponential', 'firstOrderResponse', 'secondOrderResponse', 'ellipse', 'formula']);
   const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
     { displayName: 'Time', unit: 's' },
     { displayName: 'Distance', unit: 'm' },
@@ -862,497 +863,11 @@
     });
   }
 
-  // Least-squares fit of y = slope*x + intercept, plus R^2 (squared Pearson correlation).
-  // Returns null when the selection has no x spread (a vertical slice), since slope is undefined.
-  function computeLinearFit(xs, ys) {
-    const n = xs.length;
-    if (n < 2) return null;
-    let sumX = 0, sumY = 0;
-    for (let i = 0; i < n; i++) { sumX += xs[i]; sumY += ys[i]; }
-    const meanX = sumX / n, meanY = sumY / n;
-    let sxx = 0, syy = 0, sxy = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = xs[i] - meanX, dy = ys[i] - meanY;
-      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
-    }
-    if (sxx === 0) return null;
-    const slope = sxy / sxx;
-    const intercept = meanY - slope * meanX;
-    const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
-    return { slope, intercept, r2 };
-  }
+  // Curve-fitting math (linear/sinusoidal/sine×exponential/exponential/step-response/
+  // ellipse/typed-formula/FFT) lives in fit-functions.js as window.FitFunctions -- see
+  // buildSelectionFitDetails and updateFftPanel below for its call sites. arrayMinMax
+  // stays here since it's also used outside the fitting code (selection ranges, etc.).
 
-  function computeR2(ys, preds) {
-    if (!Array.isArray(ys) || !Array.isArray(preds) || ys.length !== preds.length || ys.length === 0) return null;
-    let sumY = 0;
-    for (let i = 0; i < ys.length; i++) sumY += ys[i];
-    const meanY = sumY / ys.length;
-    let sse = 0, sst = 0;
-    for (let i = 0; i < ys.length; i++) {
-      const y = ys[i];
-      const p = preds[i];
-      if (!Number.isFinite(y) || !Number.isFinite(p)) return null;
-      const err = y - p;
-      const dy = y - meanY;
-      sse += err * err;
-      sst += dy * dy;
-    }
-    if (sst === 0) return 1;
-    return 1 - (sse / sst);
-  }
-
-  function sampleFitSeries(xs, ys, maxPoints = 4000) {
-    if (xs.length <= maxPoints) return { xs: xs.slice(), ys: ys.slice() };
-    const step = (xs.length - 1) / (maxPoints - 1);
-    const sx = [];
-    const sy = [];
-    for (let i = 0; i < maxPoints; i++) {
-      const idx = Math.round(i * step);
-      sx.push(xs[idx]);
-      sy.push(ys[idx]);
-    }
-    return { xs: sx, ys: sy };
-  }
-
-  function solveLinearSystem(matrix, vector) {
-    const n = vector.length;
-    const aug = matrix.map((row, i) => row.slice().concat([vector[i]]));
-    for (let col = 0; col < n; col++) {
-      let pivotRow = col;
-      let pivotAbs = Math.abs(aug[col][col]);
-      for (let r = col + 1; r < n; r++) {
-        const abs = Math.abs(aug[r][col]);
-        if (abs > pivotAbs) { pivotAbs = abs; pivotRow = r; }
-      }
-      if (pivotAbs < 1e-12) return null;
-      if (pivotRow !== col) {
-        const tmp = aug[col];
-        aug[col] = aug[pivotRow];
-        aug[pivotRow] = tmp;
-      }
-      const pivot = aug[col][col];
-      for (let c = col; c <= n; c++) aug[col][c] /= pivot;
-      for (let r = 0; r < n; r++) {
-        if (r === col) continue;
-        const f = aug[r][col];
-        if (f === 0) continue;
-        for (let c = col; c <= n; c++) aug[r][c] -= f * aug[col][c];
-      }
-    }
-    return aug.map((row) => row[n]);
-  }
-
-  function fitLinearCombination(features, ys) {
-    const n = ys.length;
-    const k = features.length;
-    if (n === 0 || k === 0) return null;
-    const ata = Array.from({ length: k }, () => new Array(k).fill(0));
-    const atb = new Array(k).fill(0);
-    for (let i = 0; i < n; i++) {
-      const y = ys[i];
-      if (!Number.isFinite(y)) return null;
-      for (let a = 0; a < k; a++) {
-        const va = features[a][i];
-        if (!Number.isFinite(va)) return null;
-        atb[a] += va * y;
-        for (let b = a; b < k; b++) {
-          ata[a][b] += va * features[b][i];
-        }
-      }
-    }
-    for (let a = 0; a < k; a++) for (let b = 0; b < a; b++) ata[a][b] = ata[b][a];
-    const coeffs = solveLinearSystem(ata, atb);
-    if (!coeffs) return null;
-    let sse = 0;
-    const preds = new Array(n);
-    for (let i = 0; i < n; i++) {
-      let p = 0;
-      for (let a = 0; a < k; a++) p += coeffs[a] * features[a][i];
-      preds[i] = p;
-      const err = ys[i] - p;
-      sse += err * err;
-    }
-    return { coeffs, sse, preds };
-  }
-
-  // Angular-frequency search range for the sine fits: bounded only by what's physically
-  // resolvable from this selection -- longer than ~20 periods across the whole span at
-  // the low end, and the Nyquist limit of the median sample spacing at the high end.
-  // No cycle-count floor/ceiling beyond that; the least-squares search picks whatever
-  // frequency actually minimizes error.
-  function getSinusoidalOmegaRange(xs, span) {
-    const sorted = xs.slice().sort((a, b) => a - b);
-    const diffs = [];
-    for (let i = 1; i < sorted.length; i++) {
-      const diff = sorted[i] - sorted[i - 1];
-      if (diff > 0) diffs.push(diff);
-    }
-    const medianDt = diffs.length ? diffs.sort((a, b) => a - b)[Math.floor(diffs.length / 2)] : span / Math.max(1, xs.length);
-    if (!(medianDt > 0)) return null;
-    const omegaMin = (2 * Math.PI) / (span * 20);
-    const omegaMax = Math.PI / medianDt;
-    if (!(omegaMax > omegaMin)) return null;
-    return { omegaMin, omegaMax };
-  }
-
-  // forcedOmega (rad/s), when provided, skips the frequency search entirely and just
-  // fits sin/cos/offset at that single frequency (used when the user clicks a
-  // point in the FFT panel to pin the sine fit to that frequency).
-  function computeSinusoidalFit(xs, ys, forcedOmega) {
-    if (xs.length < 4) return null;
-    const sampled = sampleFitSeries(xs, ys);
-    const tx = sampled.xs;
-    const ty = sampled.ys;
-    const [xMin, xMax] = arrayMinMax(tx);
-    const span = xMax - xMin;
-    if (!(span > 0)) return null;
-    const xCenter = (xMin + xMax) / 2;
-    const fitAtOmega = (omega) => {
-      const sinCol = tx.map((x) => Math.sin(omega * (x - xCenter)));
-      const cosCol = tx.map((x) => Math.cos(omega * (x - xCenter)));
-      const ones = new Array(tx.length).fill(1);
-      return fitLinearCombination([sinCol, cosCol, ones], ty);
-    };
-    let best = null;
-    if (Number.isFinite(forcedOmega) && forcedOmega > 0) {
-      const reg = fitAtOmega(forcedOmega);
-      if (reg) best = { omega: forcedOmega, reg };
-    } else {
-      const range = getSinusoidalOmegaRange(tx, span);
-      if (!range) return null;
-      const { omegaMin, omegaMax } = range;
-      // Coarse log-spaced scan across the whole range (pure least-squares SSE per omega,
-      // no other constraints) followed by a few narrowing linear passes to home in on the
-      // exact frequency -- important for a clean, low-noise sinusoid where the true minimum
-      // can sit between two coarse samples.
-      const scan = (lo, hi, steps, spacing) => {
-        let localBest = null;
-        for (let i = 0; i < steps; i++) {
-          const frac = steps === 1 ? 0 : i / (steps - 1);
-          const omega = spacing === 'log' ? lo * Math.pow(hi / lo, frac) : lo + (hi - lo) * frac;
-          const reg = fitAtOmega(omega);
-          if (!reg) continue;
-          if (!localBest || reg.sse < localBest.reg.sse) localBest = { omega, reg };
-        }
-        return localBest;
-      };
-      const coarseSteps = 600;
-      best = scan(omegaMin, omegaMax, coarseSteps, 'log');
-      if (best) {
-        let halfWidth = (best.omega * (Math.pow(omegaMax / omegaMin, 1 / (coarseSteps - 1)) - 1)) || (omegaMax - omegaMin) / coarseSteps;
-        for (let pass = 0; pass < 5; pass++) {
-          const lo = Math.max(omegaMin, best.omega - halfWidth);
-          const hi = Math.min(omegaMax, best.omega + halfWidth);
-          const refined = scan(lo, hi, 120, 'linear');
-          if (refined && refined.reg.sse < best.reg.sse) best = refined;
-          halfWidth = Math.max(halfWidth / 8, 1e-9);
-        }
-      }
-    }
-    if (!best) return null;
-    const b = best.reg.coeffs[0];
-    const c = best.reg.coeffs[1];
-    const offset = best.reg.coeffs[2];
-    const A = Math.hypot(b, c);
-    const phi = Math.atan2(c, b);
-    const predict = (x) => A * Math.sin(best.omega * (x - xCenter) + phi) + offset;
-    const preds = tx.map((x) => predict(x));
-    const r2 = computeR2(ty, preds);
-    return { A, omega: best.omega, phi, offset, r2, predict };
-  }
-
-  // Damped/growing sine: y = A * exp(tau*(x - xCenter)) * sin(omega*x + phi) + offset.
-  // The model is nonlinear in omega and tau, but linear in (b, c, offset) once both are
-  // fixed -- same trick as the plain sinusoidal/exponential fits above -- so this grid-
-  // searches omega (outer) and tau (inner, reusing the sin/cos columns across tau steps)
-  // and solves a 3-feature linear regression at each combination.
-  function computeSineExpFit(xs, ys, forcedOmega) {
-    if (xs.length < 5) return null;
-    const sampled = sampleFitSeries(xs, ys);
-    const tx = sampled.xs;
-    const ty = sampled.ys;
-    const [xMin, xMax] = arrayMinMax(tx);
-    const span = xMax - xMin;
-    if (!(span > 0)) return null;
-    const xScale = span;
-    let sumX = 0;
-    for (let i = 0; i < tx.length; i++) sumX += tx[i];
-    const xCenter = sumX / tx.length;
-    const tNorm = tx.map((x) => (x - xCenter) / xScale);
-
-    const omegaCandidates = [];
-    if (Number.isFinite(forcedOmega) && forcedOmega > 0) {
-      omegaCandidates.push(forcedOmega);
-    } else {
-      const range = getSinusoidalOmegaRange(tx, span);
-      if (!range) return null;
-      const { omegaMin, omegaMax } = range;
-      const omegaSteps = 120;
-      for (let i = 0; i < omegaSteps; i++) {
-        const frac = omegaSteps === 1 ? 0 : i / (omegaSteps - 1);
-        omegaCandidates.push(omegaMin * Math.pow(omegaMax / omegaMin, frac));
-      }
-    }
-    const tauSteps = 25;
-    let best = null;
-    omegaCandidates.forEach((omega) => {
-      const sinBase = tx.map((x) => Math.sin(omega * (x - xCenter)));
-      const cosBase = tx.map((x) => Math.cos(omega * (x - xCenter)));
-      for (let j = 0; j < tauSteps; j++) {
-        const tauNorm = tauSteps === 1 ? 0 : -8 + (16 * j) / (tauSteps - 1);
-        const envelope = tNorm.map((t) => Math.exp(Math.max(-60, Math.min(60, tauNorm * t))));
-        const sinCol = sinBase.map((v, i) => v * envelope[i]);
-        const cosCol = cosBase.map((v, i) => v * envelope[i]);
-        const ones = new Array(tx.length).fill(1);
-        const reg = fitLinearCombination([sinCol, cosCol, ones], ty);
-        if (!reg) continue;
-        if (!best || reg.sse < best.sse) best = { omega, tauNorm, reg };
-      }
-    });
-    if (!best) return null;
-    const b = best.reg.coeffs[0];
-    const c = best.reg.coeffs[1];
-    const offset = best.reg.coeffs[2];
-    const A = Math.hypot(b, c);
-    const phi = Math.atan2(c, b);
-    const tau = best.tauNorm / xScale;
-    const predict = (x) => A * Math.exp(Math.max(-60, Math.min(60, tau * (x - xCenter)))) * Math.sin(best.omega * (x - xCenter) + phi) + offset;
-    const preds = tx.map((x) => predict(x));
-    const r2 = computeR2(ty, preds);
-    return { A, omega: best.omega, phi, tau, offset, r2, predict };
-  }
-
-  // Oscillating fits (sinusoidal, sine×exponential) are drawn with a fixed 80-point path
-  // by default, which looks choppy once the fitted frequency packs many cycles into the
-  // selection -- so the point count scales up to guarantee at least ~10 points per cycle.
-  function oscillatingFitPointCount(omega, xMin, xMax) {
-    const span = xMax - xMin;
-    const cycles = Math.abs(omega) * span / (2 * Math.PI);
-    return Math.max(80, Math.ceil(cycles * 10) + 1);
-  }
-
-
-  // onto a uniform grid (median spacing of the sorted x's), removes the mean/DC term,
-  // applies a Hann window to reduce spectral leakage, then runs a direct DFT. A plain
-  // O(n^2) DFT (rather than a radix-2 FFT) keeps the implementation simple and is fine
-  // at the point counts a plot selection realistically produces (capped at 2048 here).
-  function computeFft(xs, ys) {
-    const n = xs.length;
-    if (n < 8) return null;
-    const order = xs.map((_, i) => i).sort((a, b) => xs[a] - xs[b]);
-    const sx = order.map((i) => xs[i]);
-    const sy = order.map((i) => ys[i]);
-    const diffs = [];
-    for (let i = 1; i < sx.length; i++) {
-      const d = sx[i] - sx[i - 1];
-      if (d > 0) diffs.push(d);
-    }
-    if (diffs.length === 0) return null;
-    diffs.sort((a, b) => a - b);
-    const dt = diffs[Math.floor(diffs.length / 2)];
-    if (!(dt > 0)) return null;
-    const span = sx[sx.length - 1] - sx[0];
-    const maxN = 2048;
-    let count = Math.min(maxN, Math.max(8, Math.floor(span / dt) + 1));
-    // Uniform resample via linear interpolation over the sorted, possibly-irregular samples.
-    const rt = new Array(count);
-    const ry = new Array(count);
-    let srcIdx = 0;
-    for (let i = 0; i < count; i++) {
-      const t = sx[0] + (i * span) / (count - 1);
-      while (srcIdx < sx.length - 2 && sx[srcIdx + 1] < t) srcIdx++;
-      const x0 = sx[srcIdx], x1 = sx[srcIdx + 1];
-      const y0 = sy[srcIdx], y1 = sy[srcIdx + 1];
-      const frac = x1 > x0 ? (t - x0) / (x1 - x0) : 0;
-      rt[i] = t;
-      ry[i] = y0 + (y1 - y0) * frac;
-    }
-    const sampleDt = span / (count - 1);
-    let mean = 0;
-    for (let i = 0; i < count; i++) mean += ry[i];
-    mean /= count;
-    const windowed = new Array(count);
-    for (let i = 0; i < count; i++) {
-      const hann = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (count - 1));
-      windowed[i] = (ry[i] - mean) * hann;
-    }
-    const half = Math.floor(count / 2);
-    if (half < 1) return null;
-    const freqs = new Array(half);
-    const mags = new Array(half);
-    for (let k = 1; k <= half; k++) {
-      let re = 0, im = 0;
-      const w = (2 * Math.PI * k) / count;
-      for (let i = 0; i < count; i++) {
-        const angle = w * i;
-        re += windowed[i] * Math.cos(angle);
-        im -= windowed[i] * Math.sin(angle);
-      }
-      freqs[k - 1] = k / (count * sampleDt);
-      mags[k - 1] = (2 / count) * Math.hypot(re, im);
-    }
-    return { freqs, mags };
-  }
-
-  function computeExponentialFit(xs, ys) {
-    if (xs.length < 3) return null;
-    const sampled = sampleFitSeries(xs, ys);
-    const tx = sampled.xs;
-    const ty = sampled.ys;
-    const [xMin, xMax] = arrayMinMax(tx);
-    const xSpan = xMax - xMin;
-    const xScale = xSpan > 0 ? xSpan : 1;
-    let sumX = 0;
-    for (let i = 0; i < tx.length; i++) sumX += tx[i];
-    const xCenter = sumX / tx.length;
-    const tNorm = tx.map((x) => (x - xCenter) / xScale);
-    let best = null;
-    const steps = 120;
-    for (let i = 0; i < steps; i++) {
-      const tauNorm = -8 + (16 * i) / (steps - 1);
-      const uCol = tNorm.map((t) => Math.exp(Math.max(-60, Math.min(60, tauNorm * t))));
-      const ones = new Array(tx.length).fill(1);
-      const reg = fitLinearCombination([uCol, ones], ty);
-      if (!reg) continue;
-      if (!best || reg.sse < best.sse) best = { tauNorm, reg };
-    }
-    if (!best) return null;
-    const AScaled = best.reg.coeffs[0];
-    const offset = best.reg.coeffs[1];
-    const tau = best.tauNorm / xScale;
-    const predict = (x) => AScaled * Math.exp(Math.max(-60, Math.min(60, best.tauNorm * ((x - xCenter) / xScale)))) + offset;
-    const preds = tx.map((x) => predict(x));
-    const r2 = computeR2(ty, preds);
-    const amplitude = AScaled * Math.exp(Math.max(-60, Math.min(60, -tau * xCenter)));
-    return { A: amplitude, tau, offset, r2, predict };
-  }
-
-  function computeEllipseFit(xs, ys) {
-    if (xs.length < 5) return null;
-    const sampled = sampleFitSeries(xs, ys);
-    const tx = sampled.xs;
-    const ty = sampled.ys;
-    const n = tx.length;
-    let cx = 0, cy = 0;
-    for (let i = 0; i < n; i++) { cx += tx[i]; cy += ty[i]; }
-    cx /= n; cy /= n;
-    let sxx = 0, syy = 0, sxy = 0;
-    for (let i = 0; i < n; i++) {
-      const dx = tx[i] - cx;
-      const dy = ty[i] - cy;
-      sxx += dx * dx;
-      syy += dy * dy;
-      sxy += dx * dy;
-    }
-    sxx /= n; syy /= n; sxy /= n;
-    const angle = 0.5 * Math.atan2(2 * sxy, sxx - syy);
-    const ux = Math.cos(angle), uy = Math.sin(angle);
-    const vx = -uy, vy = ux;
-    let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-    for (let i = 0; i < n; i++) {
-      const dx = tx[i] - cx;
-      const dy = ty[i] - cy;
-      const u = dx * ux + dy * uy;
-      const v = dx * vx + dy * vy;
-      if (u < uMin) uMin = u;
-      if (u > uMax) uMax = u;
-      if (v < vMin) vMin = v;
-      if (v > vMax) vMax = v;
-    }
-    const a = (uMax - uMin) / 2;
-    const b = (vMax - vMin) / 2;
-    if (!(a > 0) || !(b > 0)) return null;
-    const uMid = (uMin + uMax) / 2;
-    const vMid = (vMin + vMax) / 2;
-    const centerX = cx + uMid * ux + vMid * vx;
-    const centerY = cy + uMid * uy + vMid * vy;
-    return { centerX, centerY, a, b, angle };
-  }
-
-  function compileTypedFitFormula(expression) {
-    const source = String(expression || '').trim();
-    if (!source) return { error: 'Formula is required.', fn: null, paramNames: [] };
-    const paramIdx = [];
-    source.replace(/\bp(\d+)\b/g, (_, num) => { paramIdx.push(Number(num)); return _; });
-    const maxIdx = paramIdx.length ? Math.max(...paramIdx) : -1;
-    if (maxIdx > 11) return { error: 'Use parameters p0 through p11 only.', fn: null, paramNames: [] };
-    const paramNames = maxIdx >= 0 ? Array.from({ length: maxIdx + 1 }, (_, i) => `p${i}`) : [];
-    let fn;
-    try {
-      fn = new Function('t', 'x', ...paramNames, ...MATH_SCOPE_KEYS, `"use strict"; return (${source});`);
-    } catch (e) {
-      return { error: `Formula syntax error: ${e.message}`, fn: null, paramNames: [] };
-    }
-    return { error: null, fn, paramNames };
-  }
-
-  function computeTypedFormulaFit(xs, ys, expression) {
-    if (xs.length < 2) return { fit: null, error: null };
-    const compiled = compileTypedFitFormula(expression);
-    if (compiled.error) return { fit: null, error: compiled.error };
-    const sampled = sampleFitSeries(xs, ys, 2500);
-    const tx = sampled.xs;
-    const ty = sampled.ys;
-    const [xMin, xMax] = arrayMinMax(tx);
-    const span = Math.max(1e-9, xMax - xMin);
-    let meanY = 0, yMin = Infinity, yMax = -Infinity;
-    for (let i = 0; i < ty.length; i++) {
-      meanY += ty[i];
-      if (ty[i] < yMin) yMin = ty[i];
-      if (ty[i] > yMax) yMax = ty[i];
-    }
-    meanY /= ty.length;
-    const yScale = Math.max(1, Math.abs(yMax - yMin), Math.abs(meanY));
-    const evalPoint = (x, params) => {
-      const args = [x, x].concat(params).concat(MATH_SCOPE_VALS);
-      const v = compiled.fn(...args);
-      return Number.isFinite(v) ? v : NaN;
-    };
-    let params = compiled.paramNames.map((_, i) => (i === 0 ? meanY : 0));
-    let steps = compiled.paramNames.map((_, i) => (i === 0 ? yScale * 0.5 : Math.max(0.05, 1 / span)));
-    const calcSse = (candidate) => {
-      let sse = 0;
-      for (let i = 0; i < tx.length; i++) {
-        const p = evalPoint(tx[i], candidate);
-        if (!Number.isFinite(p)) return Infinity;
-        const err = ty[i] - p;
-        sse += err * err;
-      }
-      return sse;
-    };
-    if (compiled.paramNames.length > 0) {
-      let bestSse = calcSse(params);
-      for (let iter = 0; iter < 80; iter++) {
-        let improved = false;
-        for (let pIdx = 0; pIdx < params.length; pIdx++) {
-          const step = steps[pIdx];
-          if (!(step > 1e-6)) continue;
-          let trial = params.slice();
-          trial[pIdx] += step;
-          let ssePlus = calcSse(trial);
-          trial[pIdx] = params[pIdx] - step;
-          let sseMinus = calcSse(trial);
-          if (ssePlus < bestSse || sseMinus < bestSse) {
-            if (ssePlus <= sseMinus) {
-              params[pIdx] += step;
-              bestSse = ssePlus;
-            } else {
-              params[pIdx] -= step;
-              bestSse = sseMinus;
-            }
-            improved = true;
-          }
-        }
-        if (!improved) steps = steps.map((v) => v * 0.6);
-        if (steps.every((v) => v < 1e-6)) break;
-      }
-    }
-    const preds = tx.map((x) => evalPoint(x, params));
-    if (preds.some((v) => !Number.isFinite(v))) return { fit: null, error: 'Formula produced invalid values.' };
-    const predict = (x) => evalPoint(x, params);
-    const r2 = computeR2(ty, preds);
-    return { fit: { expression: String(expression || '').trim(), paramNames: compiled.paramNames, params, r2, predict }, error: null };
-  }
 
   function formatStatValue(v) {
     if (!Number.isFinite(v)) return 'n/a';
@@ -1510,7 +1025,7 @@
     const out = { detailLines, shape: null };
     if (fitType === 'sinusoidal') {
       const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
-      const fit = computeSinusoidalFit(g.xs, g.ys, forcedOmega);
+      const fit = window.FitFunctions.computeSinusoidalFit(g.xs, g.ys, forcedOmega);
       if (!fit) {
         detailLines.push('sin fit: n/a');
         return out;
@@ -1520,12 +1035,12 @@
       detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
-      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, oscillatingFitPointCount(fit.omega, xMin, xMax));
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.omega, xMin, xMax));
       return out;
     }
     if (fitType === 'sineExponential') {
       const forcedOmega = Number.isFinite(selectionSinFitForcedFreqHz) ? 2 * Math.PI * selectionSinFitForcedFreqHz : null;
-      const fit = computeSineExpFit(g.xs, g.ys, forcedOmega);
+      const fit = window.FitFunctions.computeSineExpFit(g.xs, g.ys, forcedOmega);
       if (!fit) {
         detailLines.push('sin×exp fit: n/a');
         return out;
@@ -1536,11 +1051,11 @@
       detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
-      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, oscillatingFitPointCount(fit.omega, xMin, xMax));
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.omega, xMin, xMax));
       return out;
     }
     if (fitType === 'exponential') {
-      const fit = computeExponentialFit(g.xs, g.ys);
+      const fit = window.FitFunctions.computeExponentialFit(g.xs, g.ys);
       if (!fit) {
         detailLines.push('exp fit: n/a');
         return out;
@@ -1552,8 +1067,38 @@
       out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
       return out;
     }
+    if (fitType === 'firstOrderResponse') {
+      const fit = window.FitFunctions.computeFirstOrderResponseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('1st-order fit: n/a');
+        return out;
+      }
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`x0: ${formatStatValue(fit.x0)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
+      return out;
+    }
+    if (fitType === 'secondOrderResponse') {
+      const fit = window.FitFunctions.computeSecondOrderResponseFit(g.xs, g.ys);
+      if (!fit) {
+        detailLines.push('2nd-order fit: n/a');
+        return out;
+      }
+      const dampingLabel = fit.zeta < 1 ? 'underdamped' : (fit.zeta > 1 ? 'overdamped' : 'critically damped');
+      detailLines.push(`A: ${formatStatValue(fit.A)}`);
+      detailLines.push(`ζ: ${formatStatValue(fit.zeta)} (${dampingLabel})`);
+      detailLines.push(`ωn: ${formatStatValue(fit.wn)} (${formatStatValue(fit.wn / (2 * Math.PI))} Hz)`);
+      detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
+      detailLines.push(`x0: ${formatStatValue(fit.x0)}`);
+      detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
+      out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.wd, xMin, xMax));
+      return out;
+    }
     if (fitType === 'ellipse') {
-      const fit = computeEllipseFit(g.xs, g.ys);
+      const fit = window.FitFunctions.computeEllipseFit(g.xs, g.ys);
       if (!fit) {
         detailLines.push('ellipse fit: n/a');
         return out;
@@ -1585,7 +1130,7 @@
       out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor);
       return out;
     }
-    const fit = computeLinearFit(g.xs, g.ys);
+    const fit = window.FitFunctions.computeLinearFit(g.xs, g.ys);
     detailLines.push(fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a');
     detailLines.push(fit ? `R²: ${fit.r2.toFixed(3)}` : 'R²: n/a');
     if (!fit) return out;
@@ -1668,7 +1213,7 @@
     if (!fftPanel || !fftPlotDiv || !selectionFftEnabled) return;
     const traces = [];
     groupFits.forEach(({ g }) => {
-      const fft = computeFft(g.xs, g.ys);
+      const fft = window.FitFunctions.computeFft(g.xs, g.ys);
       if (!fft) return;
       const label = getChannelLabel(g.trace.meta.channel);
       const color = (g.trace.meta && g.trace.meta.color) || (g.trace.line && g.trace.line.color) || '#1f77b4';
@@ -1775,6 +1320,8 @@
     sinusoidal: 'y = A · sin(ω · x + φ) + offset',
     sineExponential: 'y = A · e^(τ · x) · sin(ω · x + φ) + offset',
     exponential: 'y = A · e^(τ · x) + offset',
+    firstOrderResponse: 'y = A · (1 − e^(−(x − x0) / τ)) + offset   [x0 = selection start]',
+    secondOrderResponse: 'y = A · (1 − e^(−ζωn(x−x0))·(cos(ωd(x−x0)) + (ζωn/ωd)·sin(ωd(x−x0)))) + offset   [x0 = selection start, ωd = ωn·√|1−ζ²|]',
     ellipse: '(x,y) on ellipse: center (cx,cy), semi-axes a, b, rotation angle',
     formula: '' // the typed formula itself is shown per-channel below
   };
@@ -1784,6 +1331,7 @@
     if (selectionFitTypeSelect) selectionFitTypeSelect.value = selectionFitType;
     if (selectionFitEquationRow) selectionFitEquationRow.textContent = SELECTION_FIT_EQUATIONS[selectionFitType] || '';
     if (selectionFitFormulaRow) selectionFitFormulaRow.hidden = !isFormula;
+    if (selectionFitFormulaHint) selectionFitFormulaHint.hidden = !isFormula;
     if (selectionFitFormulaInput && !selectionFitFormulaInput.value) {
       selectionFitFormulaInput.value = selectionFitFormula || DEFAULT_SELECTION_FIT_FORMULA;
     }
@@ -1871,7 +1419,7 @@
     const fitLineColor = getSelectionFitLineColor();
     const activeFitType = normalizeSelectionFitType(selectionFitType);
     const typedFormulaResultByGroup = (activeFitType === 'formula')
-      ? (g) => computeTypedFormulaFit(g.xs, g.ys, selectionFitFormula)
+      ? (g) => window.FitFunctions.computeTypedFormulaFit(g.xs, g.ys, selectionFitFormula, MATH_SCOPE_KEYS, MATH_SCOPE_VALS)
       : () => ({ fit: null, error: null });
     let stackIndex = 0;
     groups.forEach((g) => {

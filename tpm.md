@@ -1,0 +1,3 @@
+ - [] Download displayed as csv not working.
+ - [] Some colors for lite/ dark mode (button hover) hide themselves
+ - [] Search for all variable selects (x-axis selection, plot color, map color, source column in data import) 

@@ -550,6 +550,27 @@ body.sidebar-collapsed .controls{display:none}
 [data-theme=dark] .selection-stats-header span{color:#c8d6e8}
 .selection-stats-close{background:none;border:none;cursor:pointer;font-size:14px;line-height:1;padding:0 2px;color:var(--text-color,#555);opacity:.7}
 .selection-stats-close:hover{opacity:1}
+.selection-stats-controls{padding:6px 8px 0}
+.selection-stats-fit-type-label,
+.selection-stats-fit-formula-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#555);margin-bottom:6px}
+.selection-stats-fit-type-label select,
+.selection-stats-fit-formula-row input{flex:1;min-width:0;font-size:12px;padding:2px 4px;border:1px solid var(--border-color,#ccc);border-radius:4px;background:var(--panel-bg,#fff);color:var(--text-color,#222)}
+[data-theme=dark] .selection-stats-fit-type-label,
+[data-theme=dark] .selection-stats-fit-formula-row{color:#a8b8cc}
+[data-theme=dark] .selection-stats-fit-type-label select,
+[data-theme=dark] .selection-stats-fit-formula-row input{background:#0f1520;border-color:#3a4556;color:#dde6f2}
+.selection-stats-fit-equation{font-size:11px;font-family:ui-monospace,"SF Mono",Consolas,monospace;color:var(--text-muted,#555);margin:-3px 0 6px;word-break:break-word}
+[data-theme=dark] .selection-stats-fit-equation{color:#a8b8cc}
+.selection-stats-fit-formula-hint{font-size:11px;color:var(--text-muted,#777);margin:-3px 0 6px;line-height:1.4}
+.selection-stats-fit-formula-hint code{font-family:ui-monospace,"SF Mono",Consolas,monospace;background:var(--bg-surface-alt,rgba(0,0,0,.06));border-radius:3px;padding:0 3px}
+[data-theme=dark] .selection-stats-fit-formula-hint{color:#8393a8}
+[data-theme=dark] .selection-stats-fit-formula-hint code{background:rgba(255,255,255,.08)}
+.selection-stats-fit-formula-error{margin:-3px 0 6px;font-size:11px;color:#b00020}
+[data-theme=dark] .selection-stats-fit-formula-error{color:#ff8c8c}
+.selection-stats-fft-toggle-label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#555);margin-bottom:6px}
+[data-theme=dark] .selection-stats-fft-toggle-label{color:#a8b8cc}
+.selection-stats-fft-hint{font-size:11px;color:var(--text-muted,#777);margin:-3px 0 6px;line-height:1.3}
+[data-theme=dark] .selection-stats-fft-hint{color:#8393a8}
 .selection-stats-body{padding:6px 8px 8px}
 .selection-stats-group{margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border-color,#e0e0e0)}
 .selection-stats-group:last-child{margin-bottom:0;padding-bottom:0;border-bottom:none}
@@ -557,6 +578,16 @@ body.sidebar-collapsed .controls{display:none}
 [data-theme=dark] .selection-stats-group-name{color:#dde6f2}
 .selection-stats-group-line{color:var(--text-muted,#555)}
 [data-theme=dark] .selection-stats-group-line{color:#a8b8cc}
+
+/* FFT panel -- a small floating, draggable Plotly chart (same pattern as the selection
+   stats panel) so it doesn't require reworking the main plot/maps grid layout. */
+.fft-panel{position:absolute;z-index:200;top:340px;right:16px;width:360px;background:var(--panel-bg,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.18);font-size:13px;user-select:none}
+[data-theme=dark] .fft-panel{background:#1a222c;border-color:#3a4556}
+.fft-plot-div{width:100%;height:220px;padding:4px}
+.fft-clear-forced-btn{background:none;border:1px solid var(--border-color,#ccc);border-radius:4px;cursor:pointer;font-size:11px;line-height:1;padding:3px 6px;color:var(--text-color,#555);margin-left:auto}
+.fft-clear-forced-btn:hover{background:rgba(99,143,232,.15)}
+[data-theme=dark] .fft-clear-forced-btn{border-color:#3a4556;color:#c8d6e8}
+
 
 /* Pick Uploaded Data button and modal */
 .pick-uploaded-btn{flex-shrink:0;padding:4px 10px;font-size:12px;border-radius:4px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
