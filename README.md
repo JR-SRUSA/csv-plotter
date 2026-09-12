@@ -44,6 +44,15 @@ Use either:
 
 That test server serves files from `dist/` and maps requests like `/index.html` to `index.html.gz` with the correct headers.
 
+Testing
+
+Tests are segmented by what they exercise:
+
+1. `test/` — pure calculation/logic unit tests (`npm run test:calculations`, or `npm test`). These run under Node's built-in test runner, either loading a standalone module (`file-processors.js`, `fit-functions.js`) in a `vm` sandbox, or re-implementing an `app.js`-internal function to test in isolation (e.g. `quick-modify.test.js`), since `app.js` itself is a browser-only script full of DOM lookups.
+2. `e2e/` — real browser UI tests (`npm run test:ui`, or the older alias `npm run test:e2e`) using Playwright. These load the actual `index.html`/`app.js` in a real browser and drive it like a user would (clicking buttons, loading sample files, checking rendered output and downloads).
+
+When adding a test, prefer `test/` for anything that's pure data transformation, and `e2e/` for anything that depends on the DOM, events, or browser APIs (downloads, localStorage, Plotly's rendered output).
+
 Usage
 
 1. Open `index.html` in a modern browser (or serve the workspace root using a static server).

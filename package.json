@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "test": "node --test",
+    "test:calculations": "node --test",
+    "test:ui": "playwright test",
     "test:e2e": "playwright test",
     "build": "node scripts/bump-build-version.js && npm run build-plotly-custom:inner",
-    "build:prod": "node scripts/bump-build-version.js && npm install --no-audit --no-fund && node scripts/build-production.js && cp -r ./dist/. ./docs",
+    "build:prod": "node scripts/bump-build-version.js && npm install --no-audit --no-fund && node scripts/build-production.js && node scripts/copy-dist-to-docs.js",
     "build:esp32": "node scripts/bump-build-version.js && npm install --no-audit --no-fund && node scripts/build-production.js --gzip-only",
     "build-plotly-custom": "node scripts/bump-build-version.js && npm run build-plotly-custom:inner",
     "build-plotly-custom:inner": "npm install --no-audit --no-fund && node scripts/build-plotly-custom.js",

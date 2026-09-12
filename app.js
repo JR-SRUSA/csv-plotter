@@ -7804,6 +7804,18 @@
     return lines.join('\r\n');
   }
 
+  function triggerCsvDownload(csv, filenamePrefix) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filenamePrefix}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   function downloadDisplayedDataCsv() {
     triggerCsvDownload(buildDisplayedDataCsv(), 'displayed-data');
   }
