@@ -190,7 +190,12 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .file-startfinish-apply-btn,.file-startfinish-cancel-btn{padding:3px 10px;font-size:0.82em;border-radius:4px;cursor:pointer}
 .file-startfinish-apply-btn:disabled{opacity:0.5;cursor:not-allowed}
 .plots-body select{width:100%}
-.plots-body #xCustomSelect{margin-top:6px}
+/* Was `.plots-body #xCustomSelect` sizing the native select directly -- it's now hidden by
+   enhanceSelectWithSearch, so target its wrapper instead. block display puts it on its own
+   line (its default inline-block would otherwise let "Log Scale" share the line with it, since
+   its visible trigger is only as wide as the current channel name, not the old select's
+   full-list-based intrinsic width), and lets the trigger's own width:100% fill that line. */
+.plots-body [data-wrap-for="xCustomSelect"]{display:block;margin-top:6px}
 .plot-type-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:0.9em}
 .plot-type-controls strong{font-size:0.95em}
 .color-axis-controls{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border-dashed)}
@@ -251,6 +256,28 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .math-ch-suggestions{position:absolute;z-index:200;left:0;top:100%;width:100%;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;box-shadow:0 2px 8px var(--shadow-md);max-height:160px;overflow-y:auto}
 .math-ch-suggestion{padding:5px 10px;cursor:pointer;font-size:0.88em;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .math-ch-suggestion:hover,.math-ch-suggestion.active{background:var(--bg-hover)}
+
+/* Searchable-select enhancement (see enhanceSelectWithSearch in app.js): the real <select> is
+   hidden and a lookalike button takes its place as the visible/clickable control, since modern
+   browsers no longer let script suppress a <select>'s own native popup. The floating list panel
+   is positioned via JS in fixed (viewport) coordinates since it can be opened from inside a
+   scrolling container like the importer table. */
+.searchable-select-wrap{position:relative;display:inline-block;max-width:100%;vertical-align:middle}
+.searchable-select-native{display:none}
+.searchable-select-trigger{display:block;width:100%;min-width:110px;max-width:100%;box-sizing:border-box;text-align:left;background:var(--bg-surface);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:4px 22px 4px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;position:relative;cursor:pointer}
+.searchable-select-trigger:hover{background:var(--bg-hover)}
+.searchable-select-trigger:disabled{opacity:0.6;cursor:default;background:var(--bg-surface)}
+.searchable-select-trigger::after{content:"";position:absolute;right:8px;top:50%;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--text-muted);transform:translateY(-50%)}
+.color-axis-controls .searchable-select-wrap,
+.map-color-controls .searchable-select-wrap{width:100%}
+.searchable-select-panel{position:fixed;z-index:3000;display:flex;flex-direction:column;background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;box-shadow:0 4px 16px var(--shadow-md)}
+.searchable-select-input{box-sizing:border-box;width:100%;border:none;border-bottom:1px solid var(--border-dashed);border-radius:0;padding:6px 8px;background:var(--bg-surface);color:var(--text-primary)}
+.searchable-select-input:focus{outline:none}
+.searchable-select-list{max-height:220px;overflow-y:auto}
+.searchable-select-item{padding:5px 8px;cursor:pointer;font-size:0.9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.searchable-select-item:hover,.searchable-select-item.active{background:var(--bg-hover)}
+.searchable-select-item.is-current{font-weight:600}
+.searchable-select-empty{padding:6px 8px;color:var(--text-muted);font-size:0.85em}
 .data-filters-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
 .file-upsampled-indicator{display:inline-flex;align-items:center;gap:4px;font-size:0.78em;color:var(--warning-text);background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:3px;padding:1px 6px;white-space:nowrap;flex:0 0 auto}
 .data-filters-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
@@ -349,7 +376,7 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .stored-file-row{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px}
 .stored-file-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary)}
 .stored-file-load-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
-.stored-file-load-btn:hover{background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)}
+.stored-file-load-btn:hover{background:var(--bg-hover)}
 .stored-file-remove-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .stored-file-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 .stored-files-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -541,7 +568,11 @@ body.sidebar-collapsed .controls{display:none}
 }
 
 /* Selection stats panel */
-.selection-stats-panel{position:absolute;z-index:200;top:60px;right:16px;min-width:200px;max-width:320px;background:var(--panel-bg,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.18);font-size:13px;user-select:none}
+/* z-index 1100: Leaflet's own CSS goes up to 1000 (its zoom/attribution controls), and since
+   the map sits in the same stacking context as this panel (neither has an intervening ancestor
+   that isolates them), anything at or below 1000 can end up painted -- and hit-tested, hence
+   "not moveable" too -- underneath the map's tiles/controls instead of above them. */
+.selection-stats-panel{position:absolute;z-index:1100;top:60px;right:16px;min-width:200px;max-width:320px;background:var(--panel-bg,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.18);font-size:13px;user-select:none}
 [data-theme=dark] .selection-stats-panel{background:#1a222c;border-color:#3a4556}
 .selection-stats-header{display:flex;align-items:center;justify-content:space-between;padding:6px 8px;background:var(--header-bg,#f0f2f5);border-radius:6px 6px 0 0;cursor:grab}
 [data-theme=dark] .selection-stats-header{background:#232d3b}
@@ -581,7 +612,7 @@ body.sidebar-collapsed .controls{display:none}
 
 /* FFT panel -- a small floating, draggable Plotly chart (same pattern as the selection
    stats panel) so it doesn't require reworking the main plot/maps grid layout. */
-.fft-panel{position:absolute;z-index:200;top:340px;right:16px;width:360px;background:var(--panel-bg,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.18);font-size:13px;user-select:none}
+.fft-panel{position:absolute;z-index:1100;top:340px;right:16px;width:360px;background:var(--panel-bg,#fff);border:1px solid var(--border-color,#ccc);border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.18);font-size:13px;user-select:none}
 [data-theme=dark] .fft-panel{background:#1a222c;border-color:#3a4556}
 .fft-plot-div{width:100%;height:220px;padding:4px}
 .fft-clear-forced-btn{background:none;border:1px solid var(--border-color,#ccc);border-radius:4px;cursor:pointer;font-size:11px;line-height:1;padding:3px 6px;color:var(--text-color,#555);margin-left:auto}
@@ -591,7 +622,7 @@ body.sidebar-collapsed .controls{display:none}
 
 /* Pick Uploaded Data button and modal */
 .pick-uploaded-btn{flex-shrink:0;padding:4px 10px;font-size:12px;border-radius:4px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
-.pick-uploaded-btn:hover{background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)}
+.pick-uploaded-btn:hover{background:var(--bg-hover)}
 .pick-uploaded-modal{position:fixed;inset:0;z-index:1600;display:flex;align-items:center;justify-content:center;padding:18px}
 .pick-uploaded-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.45)}
 .pick-uploaded-dialog{position:relative;z-index:1;width:min(640px,100%);max-height:min(80vh,680px);display:flex;flex-direction:column;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 16px 42px var(--shadow-xl);overflow:hidden}
@@ -612,6 +643,6 @@ body.sidebar-collapsed .controls{display:none}
 .pick-uploaded-item-tags{font-size:11px;color:var(--text-secondary);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pick-uploaded-item-actions{display:flex;gap:4px;flex-shrink:0;align-items:center}
 .pick-uploaded-item-load-btn{padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
-.pick-uploaded-item-load-btn:hover{background:var(--accent-primary);color:#fff;border-color:var(--accent-primary)}
+.pick-uploaded-item-load-btn:hover{background:var(--bg-hover)}
 .pick-uploaded-item-remove-btn{padding:2px 6px;font-size:11px;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .pick-uploaded-item-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}

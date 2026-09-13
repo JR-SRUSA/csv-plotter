@@ -2470,12 +2470,14 @@
         + '</tr>';
     }).join('');
 
+    importerEditorRows.querySelectorAll('select[data-importer-channel]').forEach(detachSearchablePanel);
     importerEditorRows.innerHTML = rowsHtml;
     const channelSelects = importerEditorRows.querySelectorAll('select[data-importer-channel]');
     channelSelects.forEach((select) => {
       const standard = select.getAttribute('data-importer-channel');
       if (!standard) return;
       select.value = importerEditorState.channels[standard] || '';
+      enhanceSelectWithSearch(select);
     });
   }
 
@@ -3949,6 +3951,200 @@
     } else if (columns.length > 0) {
       selectEl.value = columns[0];
     }
+  }
+
+  // Turns a plain single-select <select> into a searchable combobox: clicking it (or typing while
+  // it has focus) opens a small floating panel with a text filter, matching any part of the option
+  // label rather than the browser's built-in type-ahead (which only matches from the start of the
+  // text). The native <select> stays the source of truth for value/disabled/options, so all the
+  // existing `select.value = x`, `select.innerHTML = ...`, `select.disabled = true` and `change`
+  // listener code elsewhere keeps working unchanged -- this only replaces how the dropdown opens.
+  // Safe to call more than once on the same element (e.g. on a row rebuilt from scratch).
+  // Companion to enhanceSelectWithSearch: removes a select's floating search panel from
+  // <body> before the select itself is thrown away (e.g. an innerHTML re-render), so repeated
+  // re-renders of the same row don't leak one orphaned panel div per render.
+  function detachSearchablePanel(selectEl) {
+    if (selectEl && selectEl._searchablePanel) {
+      selectEl._searchablePanel.remove();
+      selectEl._searchablePanel = null;
+    }
+  }
+
+  function enhanceSelectWithSearch(selectEl) {
+    if (!selectEl || selectEl.dataset.searchEnhanced) return;
+    selectEl.dataset.searchEnhanced = '1';
+
+    // Modern browsers don't let script cancel a <select>'s own native popup (mousedown
+    // preventDefault used to work for this years ago but no longer does in Chromium/Firefox),
+    // so the select can't stay the visible/clickable control. Instead we hide it -- it stays
+    // the source of truth for value/disabled/options, so `select.value = x`, `select.innerHTML
+    // = ...`, `select.disabled = true` and `change` listeners elsewhere keep working unchanged
+    // -- and put a lookalike <button> in its place that opens our own filtered panel.
+    const wrap = document.createElement('span');
+    wrap.className = 'searchable-select-wrap';
+    if (selectEl.id) wrap.setAttribute('data-wrap-for', selectEl.id);
+    selectEl.parentNode.insertBefore(wrap, selectEl);
+    wrap.appendChild(selectEl);
+    selectEl.classList.add('searchable-select-native');
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'searchable-select-trigger';
+    if (selectEl.id) trigger.setAttribute('data-for-select', selectEl.id);
+    wrap.appendChild(trigger);
+
+    const panel = document.createElement('div');
+    panel.className = 'searchable-select-panel';
+    panel.hidden = true;
+    panel.innerHTML = '<input type="text" class="searchable-select-input" placeholder="Search..." autocomplete="off" />'
+      + '<div class="searchable-select-list"></div>';
+    document.body.appendChild(panel);
+    // Tracked so callers that rebuild a <select> from scratch (e.g. the importer table's
+    // innerHTML re-render) can remove the orphaned panel via detachSearchablePanel() below --
+    // otherwise it's left behind in <body> forever since it isn't a child of the select.
+    selectEl._searchablePanel = panel;
+    const searchInput = panel.querySelector('.searchable-select-input');
+    const list = panel.querySelector('.searchable-select-list');
+
+    let filtered = [];
+    let activeIdx = -1;
+
+    function syncTrigger() {
+      const opt = selectEl.options[selectEl.selectedIndex];
+      trigger.textContent = opt ? opt.textContent : '';
+      trigger.disabled = selectEl.disabled;
+    }
+    // The trigger's label needs to track the real select's value however it changes: our own
+    // commit() below dispatches 'change', and other code re-populating the select's <option>s
+    // (which is how the app applies a restored/default value after rebuilding the list) is
+    // caught by observing childList; a 'disabled' toggle elsewhere is caught via attributes.
+    selectEl.addEventListener('change', syncTrigger);
+    new MutationObserver(syncTrigger).observe(selectEl, { childList: true, attributes: true, attributeFilter: ['disabled'] });
+    syncTrigger();
+
+    function reposition() {
+      const r = trigger.getBoundingClientRect();
+      const width = Math.round(Math.max(r.width, 160));
+      let left = Math.round(r.left);
+      if (left + width > window.innerWidth - 4) left = Math.max(4, window.innerWidth - width - 4);
+      panel.style.width = `${width}px`;
+      panel.style.left = `${left}px`;
+      const spaceBelow = window.innerHeight - r.bottom;
+      if (spaceBelow < 160 && r.top > spaceBelow) {
+        panel.style.top = '';
+        panel.style.bottom = `${Math.round(window.innerHeight - r.top + 2)}px`;
+      } else {
+        panel.style.bottom = '';
+        panel.style.top = `${Math.round(r.bottom + 2)}px`;
+      }
+    }
+
+    function updateActive() {
+      const items = list.querySelectorAll('.searchable-select-item');
+      items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+      if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
+    }
+
+    function renderList(term) {
+      const t = term.trim().toLowerCase();
+      const all = Array.from(selectEl.options).map((o, i) => ({ index: i, value: o.value, label: o.textContent }));
+      filtered = t ? all.filter(o => o.label.toLowerCase().includes(t)) : all;
+      list.innerHTML = filtered.length
+        ? filtered.map((o, i) => `<div class="searchable-select-item${o.value === selectEl.value ? ' is-current' : ''}" data-i="${i}">${escapeHtml(o.label)}</div>`).join('')
+        : '<div class="searchable-select-empty">No matches</div>';
+      activeIdx = filtered.findIndex(o => o.value === selectEl.value);
+      if (activeIdx < 0 && filtered.length) activeIdx = 0;
+      updateActive();
+    }
+
+    function onDocMouseDown(ev) {
+      if (panel.contains(ev.target) || trigger.contains(ev.target)) return;
+      closePanel();
+    }
+
+    function openPanel(seed) {
+      if (selectEl.disabled) return;
+      reposition();
+      panel.hidden = false;
+      searchInput.value = seed || '';
+      renderList(searchInput.value);
+      searchInput.focus();
+      searchInput.select();
+      document.addEventListener('mousedown', onDocMouseDown, true);
+      window.addEventListener('scroll', reposition, true);
+      window.addEventListener('resize', reposition);
+    }
+
+    function closePanel() {
+      panel.hidden = true;
+      document.removeEventListener('mousedown', onDocMouseDown, true);
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+    }
+
+    function commit(i) {
+      const item = filtered[i];
+      if (!item) return;
+      selectEl.value = item.value;
+      selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+      closePanel();
+      trigger.focus();
+    }
+
+    trigger.addEventListener('click', () => {
+      if (panel.hidden) openPanel(''); else closePanel();
+    });
+
+    // Lets typing while the trigger has focus (e.g. tabbed to via keyboard) jump straight into
+    // a substring search, the same way typing on a native closed select jumps to a prefix match.
+    trigger.addEventListener('keydown', (ev) => {
+      if (selectEl.disabled || !panel.hidden) return;
+      if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        ev.preventDefault();
+        openPanel(ev.key);
+      } else if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        openPanel('');
+      }
+    });
+
+    searchInput.addEventListener('input', () => renderList(searchInput.value));
+
+    searchInput.addEventListener('keydown', (ev) => {
+      // Stopped from bubbling for every key this panel itself handles -- otherwise e.g. Escape
+      // (meant to just close this search dropdown) would also reach the global document-level
+      // keydown handler and close a containing modal like the importer editor, or ArrowUp/Down
+      // would reach whatever else is listening for those on the page.
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        activeIdx = Math.min(activeIdx + 1, filtered.length - 1);
+        updateActive();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        activeIdx = Math.max(activeIdx - 1, 0);
+        updateActive();
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        commit(activeIdx);
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closePanel();
+        trigger.focus();
+      } else if (ev.key === 'Tab') {
+        closePanel();
+      }
+    });
+
+    list.addEventListener('mousedown', (ev) => {
+      const item = ev.target.closest('.searchable-select-item');
+      if (!item) return;
+      ev.preventDefault();
+      commit(Number(item.dataset.i));
+    });
   }
 
   function populateMapColorSelect() {
@@ -9270,6 +9466,9 @@
     });
   }
   if (xCustomSelect) xCustomSelect.addEventListener('change', ()=> updatePlot());
+  enhanceSelectWithSearch(xCustomSelect);
+  enhanceSelectWithSearch(mapColorSelect);
+  enhanceSelectWithSearch(colorAxisSelect);
   if (mapColorEnabledInput) {
     mapColorEnabledInput.addEventListener('change', () => {
       if (mapColorSelect) mapColorSelect.disabled = !mapColorEnabledInput.checked;
