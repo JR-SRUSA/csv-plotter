@@ -81,13 +81,13 @@ try {
   const sourceHtml = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
   const productionHtml = sourceHtml
     .replace(
-      '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css" />',
+      '<link rel="stylesheet" href="lib/leaflet.min.css" />',
       '<link rel="stylesheet" href="leaflet.css" />'
     )
     .replace(/\s*<!-- <script src="https:\/\/cdn\.plot\.ly\/plotly-2\.20\.0\.min\.js"><\/script> -->\n?/g, '\n')
     .replace(/\s*<script src="lib\/plotly-custom\.min\.js"><\/script>\n?/g, '\n')
-    .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/papaparse@5\.4\.1\/papaparse\.min\.js"><\/script>\n?/g, '\n')
-    .replace(/\s*<script src="https:\/\/cdn\.jsdelivr\.net\/npm\/leaflet@1\.9\.4\/dist\/leaflet\.min\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="lib\/papaparse\.min\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="lib\/leaflet\.min\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="file-processors\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="map-coordinate-utils\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="fit-functions\.js"><\/script>\n?/g, '\n')
