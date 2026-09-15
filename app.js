@@ -210,6 +210,17 @@
           hoverEnabled = !hoverEnabled;
           Plotly.relayout(gd, {hovermode: hoverEnabled ? 'x' : false});
         }
+      },
+      {
+        name: 'toggleSelectionFitBoxes',
+        title: 'Toggle Fit Boxes',
+        icon: Plotly.Icons.drawrect,
+        click: (gd) => {
+          selectionFitBoxesVisible = !selectionFitBoxesVisible;
+          Plotly.relayout(gd, {
+            annotations: baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+          });
+        }
       }
     ]
   };
@@ -346,6 +357,11 @@
   let channelMap = DEFAULT_CHANNEL_MAP.slice();
   let gpbikesTrackMapDefaults = DEFAULT_GPBIKES_TRACK_MAP_DEFAULTS.slice();
   const channelColorOverrides = new Map();
+  // channel -> { type: 'own' } | { type: 'peer', channel }. Manual y-axis assignment set
+  // via the axis picker in the selected-channels list; absent = auto-group by unit (see
+  // resolveAxisGroupKey/groupChannelsByAxis). Session-only, same lifetime as
+  // channelColorOverrides above.
+  const manualAxisOverrides = new Map();
   // "fileId::lap" -> hex color. Per-file (not just per-lap-number) so two files that
   // happen to share a lap number can still be colored independently; falls back to
   // colorForLap()'s deterministic default wherever no override has been set.
@@ -494,14 +510,21 @@
   let baseCornerAnnotationsForOverlay = []; // corner labels, kept separate so selection fit annotations can be layered on top
   let selectionFitShapes = []; // temporary best-fit line(s) drawn for the current box/lasso selection
   let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
+  // Hides the on-plot colored annotation boxes above (declutters the graph while
+  // inspecting a fit) without discarding the fit itself -- selectionFitAnnotations still
+  // holds the real content so switching this back on doesn't need a new selection.
+  let selectionFitBoxesVisible = true;
   let mainPlotXAxisTitle = ''; // x-axis label of the trace currently rendered, reused by the selection stats panel
+  let mainPlotXAxisUnit = ''; // bare unit ('s', 'm', a custom channel's unit, or '') of the same axis -- see getXAxisUnit/getFrequencyUnitLabel
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
   let selectionFitType = DEFAULT_SELECTION_FIT_TYPE;
   let selectionFitFormula = DEFAULT_SELECTION_FIT_FORMULA;
   let selectionFitLastPoints = [];
   const SELECTION_FFT_ENABLED_STORAGE_KEY = 'selectionFftEnabled';
   let selectionFftEnabled = false;
-  let selectionSinFitForcedFreqHz = null; // frequency (Hz), set by clicking a point in the FFT panel
+  // Frequency in cycles per x-axis-unit (only really "Hz" when the x-axis is time -- see
+  // getFrequencyUnitLabel), set by clicking a point in the FFT panel.
+  let selectionSinFitForcedFreqHz = null;
   // Hover tooltips default off on mobile, where they mostly just get in the way of touch
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
@@ -1031,8 +1054,8 @@
         return out;
       }
       detailLines.push(`A: ${formatStatValue(fit.A)}`);
-      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
-      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} ${getFrequencyUnitLabel()})${forcedOmega ? ' (forced)' : ''}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)} (${formatStatValue(-fit.phi / fit.omega)} ${mainPlotXAxisUnit || 'x'})`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
       out.shape = buildFunctionFitPathShape(xMin, xMax, xaxis, yaxis, fit.predict, fitLineColor, window.FitFunctions.oscillatingFitPointCount(fit.omega, xMin, xMax));
@@ -1046,8 +1069,8 @@
         return out;
       }
       detailLines.push(`A: ${formatStatValue(fit.A)}`);
-      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} Hz)${forcedOmega ? ' (forced)' : ''}`);
-      detailLines.push(`φ: ${formatStatValue(fit.phi)}`);
+      detailLines.push(`ω: ${formatStatValue(fit.omega)} (${formatStatValue(fit.omega / (2 * Math.PI))} ${getFrequencyUnitLabel()})${forcedOmega ? ' (forced)' : ''}`);
+      detailLines.push(`φ: ${formatStatValue(fit.phi)} (${formatStatValue(-fit.phi / fit.omega)} ${mainPlotXAxisUnit || 'x'})`);
       detailLines.push(`τ: ${formatStatValue(fit.tau)}`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
@@ -1090,7 +1113,7 @@
       const dampingLabel = fit.zeta < 1 ? 'underdamped' : (fit.zeta > 1 ? 'overdamped' : 'critically damped');
       detailLines.push(`A: ${formatStatValue(fit.A)}`);
       detailLines.push(`ζ: ${formatStatValue(fit.zeta)} (${dampingLabel})`);
-      detailLines.push(`ωn: ${formatStatValue(fit.wn)} (${formatStatValue(fit.wn / (2 * Math.PI))} Hz)`);
+      detailLines.push(`ωn: ${formatStatValue(fit.wn)} (${formatStatValue(fit.wn / (2 * Math.PI))} ${getFrequencyUnitLabel()})`);
       detailLines.push(`offset: ${formatStatValue(fit.offset)}`);
       detailLines.push(`x0: ${formatStatValue(fit.x0)}`);
       detailLines.push(`R²: ${fit.r2 == null ? 'n/a' : fit.r2.toFixed(3)}`);
@@ -1244,7 +1267,7 @@
       margin: { l: 45, r: 10, t: 10, b: 35 },
       showlegend: traces.length > 1,
       legend: { font: { size: 10, color: fontColor }, orientation: 'h', y: -0.3 },
-      xaxis: { title: { text: 'Frequency (Hz)', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
+      xaxis: { title: { text: `Frequency (${getFrequencyUnitLabel()})`, font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
       yaxis: { title: { text: 'Amplitude', font: { size: 11, color: fontColor } }, tickfont: { size: 10, color: fontColor }, gridcolor: gridColor, zerolinecolor: gridColor },
       shapes,
       paper_bgcolor: 'transparent',
@@ -1409,6 +1432,56 @@
     };
   }
 
+  // Captures which point indices are currently selected in each channel trace, keyed by
+  // channel name (not curveNumber -- trace order can shift when the Y-channel list
+  // changes). updatePlot() rebuilds every trace from scratch on *any* change (a new
+  // x-axis mode, a Y channel added/removed, etc.), which drops Plotly's own selection
+  // state and would otherwise silently clear the selection-fit stats/overlay; pairing
+  // this with reapplyCapturedSelection lets the selection (and its fit) survive a replot
+  // instead, recomputed against whatever the new plot actually shows.
+  function captureCurrentTraceSelection() {
+    if (!plotDiv || !Array.isArray(plotDiv.data)) return null;
+    const byChannel = new Map();
+    plotDiv.data.forEach((t) => {
+      if (!t || !t.meta || !t.meta.channel) return;
+      if (!Array.isArray(t.selectedpoints) || t.selectedpoints.length === 0) return;
+      byChannel.set(t.meta.channel, t.selectedpoints.slice());
+    });
+    return byChannel.size > 0 ? byChannel : null;
+  }
+
+  // Re-applies a selection captured by captureCurrentTraceSelection() to the freshly
+  // rebuilt plotDiv.data: restyles each matching trace's selectedpoints (so its markers
+  // stay highlighted) and recomputes the selection-fit stats/overlay from the new x/y
+  // values at those same indices -- the whole point being that the fit numbers (and the
+  // FFT/frequency units, which follow whatever's on the x-axis) come out matching the new
+  // x-axis, not the stale one the selection was originally made on.
+  function reapplyCapturedSelection(byChannel) {
+    if (!byChannel || !plotDiv || !Array.isArray(plotDiv.data)) return;
+    const restyleIdx = [];
+    const restyleVals = [];
+    const points = [];
+    plotDiv.data.forEach((t, curveNumber) => {
+      if (!t || !t.meta || !t.meta.channel) return;
+      const idxs = byChannel.get(t.meta.channel);
+      if (!idxs || idxs.length === 0) return;
+      const validIdxs = idxs.filter((i) => Number.isInteger(i) && i >= 0 && i < t.x.length && i < t.y.length);
+      if (validIdxs.length === 0) return;
+      restyleIdx.push(curveNumber);
+      restyleVals.push(validIdxs);
+      validIdxs.forEach((i) => points.push({ curveNumber, pointIndex: i, x: t.x[i], y: t.y[i] }));
+    });
+    if (points.length === 0) {
+      // Every previously-selected channel is gone from the plot now (e.g. it was
+      // deselected from the Y list) -- nothing to carry forward, so drop the stale
+      // stats/overlay instead of leaving them showing a channel that's no longer plotted.
+      clearSelectionFit();
+      return;
+    }
+    if (restyleIdx.length > 0) Plotly.restyle(plotDiv, { selectedpoints: restyleVals }, restyleIdx);
+    applySelectionFit(points);
+  }
+
   function applySelectionFit(points) {
     const groups = groupSelectedPointsByTrace(points);
     selectionFitLastPoints = Array.isArray(points) ? points.slice() : [];
@@ -1451,7 +1524,7 @@
     suppressSelectionReentry = true;
     Plotly.relayout(plotDiv, {
       shapes: baseCornerShapesForOverlay.concat(selectionFitShapes),
-      annotations: baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations)
+      annotations: baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
     }).then(() => { suppressSelectionReentry = false; });
   }
 
@@ -4540,12 +4613,61 @@
     return (unit != null && unit !== '') ? `${channel} [${unit}]` : channel;
   }
 
+  // Builds the "Axis:" radio row for one channel's entry in the selected-channels list,
+  // letting the user pin it to an existing y-axis (or its own new one) instead of the
+  // default of auto-grouping by unit. Only meaningful with 2+ channels selected -- with
+  // just one there's nothing to line it up against, so the caller skips this entirely.
+  function buildAxisPickerRow(channel, groups, channelToRef) {
+    const row = document.createElement('div');
+    row.className = 'selected-y-axis-row';
+    const rowLabel = document.createElement('span');
+    rowLabel.className = 'selected-y-axis-label';
+    rowLabel.textContent = 'Axis:';
+    row.appendChild(rowLabel);
+
+    const override = manualAxisOverrides.get(channel);
+    const myAxisRef = channelToRef.get(channel);
+    const myGroup = groups.find((g) => g.axisRef === myAxisRef);
+    let selectedValue = 'auto';
+    if (override && override.type === 'own' && myGroup && myGroup.channels.length === 1 && myGroup.channels[0] === channel) {
+      selectedValue = 'own';
+    } else if (override && override.type === 'peer' && myGroup) {
+      selectedValue = `peer:${myGroup.channels[0]}`;
+    }
+
+    const addOption = (value, text, title) => {
+      const optLabel = document.createElement('label');
+      if (title) optLabel.title = title;
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = `selected-y-axis-${channel}`;
+      radio.value = value;
+      radio.checked = value === selectedValue;
+      radio.setAttribute('data-axis-picker', channel);
+      const optText = document.createElement('span');
+      optText.textContent = text;
+      optLabel.appendChild(radio);
+      optLabel.appendChild(optText);
+      row.appendChild(optLabel);
+    };
+
+    addOption('auto', 'Auto', 'Group onto an axis automatically, by unit');
+    groups.forEach((group, idx) => {
+      const repChannel = group.channels[0];
+      const titleText = group.unit ? `${group.channels.join(' / ')} [${group.unit}]` : group.channels.join(' / ');
+      addOption(`peer:${repChannel}`, `Y${idx + 1}`, `Plot on the same axis as ${titleText}`);
+    });
+    addOption('own', '+', 'Give this channel its own new axis');
+    return row;
+  }
+
   function renderSelectedChannelColorControls() {
     if (!selectedYColors) return;
     renderQuickModSection();
     const selectedChannels = getSelectedY();
     syncSelectedChannelColors(selectedChannels);
     selectedYColors.innerHTML = '';
+    const { groups: axisGroups, channelToRef: axisChannelToRef } = groupChannelsByAxis(selectedChannels);
     selectedChannels.forEach((channel) => {
       const color = getChannelColor(channel);
       const item = document.createElement('div');
@@ -4588,6 +4710,9 @@
       actions.appendChild(editBtn);
       actions.appendChild(visibilityBtn);
       item.appendChild(actions);
+      if (selectedChannels.length > 1) {
+        item.appendChild(buildAxisPickerRow(channel, axisGroups, axisChannelToRef));
+      }
       selectedYColors.appendChild(item);
     });
   }
@@ -5967,26 +6092,59 @@
     return null;
   }
 
-  function buildChannelAxisConfig(ycols, mainDomain, logY) {
+  // Resolves the axis-grouping key for a channel: a manual override (set via the axis
+  // picker in the selected-channels list) wins over the default of grouping by unit.
+  // 'peer' overrides chain to whatever axis the target channel currently resolves to, so
+  // picking "same as X" keeps working even if X later gets its own override changed; the
+  // visited-set guards against a user creating a mutual peer cycle (A -> B -> A), which
+  // falls back to giving the channel its own axis rather than looping forever.
+  function resolveAxisGroupKey(channel, visited) {
+    visited = visited || new Set();
+    if (visited.has(channel)) return `own:${channel}`;
+    visited.add(channel);
+    const override = manualAxisOverrides.get(channel);
+    if (override && override.type === 'own') return `own:${channel}`;
+    if (override && override.type === 'peer' && override.channel && override.channel !== channel) {
+      return resolveAxisGroupKey(override.channel, visited);
+    }
+    const unit = getUnitForChannel(channel);
+    return (unit != null && unit !== '') ? `unit:${unit}` : `own:${channel}`;
+  }
+
+  // Groups the given Y channels into the y-axes they'll be plotted on, in plot order.
+  // The first channel always anchors the primary axis ('y'); every later channel either
+  // joins an existing group (same resolved axis key -- by default same unit, or a manual
+  // "plot on the same axis as X" override) or gets a new axis (y3, y4, ... -- y2 is
+  // reserved for the time-slip subplot). Shared by the plot's layout builder and by the
+  // per-channel axis-picker UI, so both always agree on what "Y1", "Y2", ... mean.
+  function groupChannelsByAxis(ycols) {
+    const groups = [];
+    const keyToGroup = new Map();
     const channelToRef = new Map();
-    const axisLayout = {};
-    const axisChannels = new Map();
-    const axisUnits = new Map();
+    let extraAxisCount = 0;
+    (ycols || []).forEach((channel, i) => {
+      const groupKey = resolveAxisGroupKey(channel);
+      const unit = getUnitForChannel(channel);
+      const existing = keyToGroup.get(groupKey);
+      if (existing) {
+        existing.channels.push(channel);
+        if (unit != null && unit !== '') existing.unit = unit;
+        channelToRef.set(channel, existing.axisRef);
+        return;
+      }
+      const axisRef = i === 0 ? 'y' : `y${(++extraAxisCount) + 2}`;
+      const group = { axisRef, groupKey, channels: [channel], unit: (unit != null && unit !== '') ? unit : null };
+      groups.push(group);
+      keyToGroup.set(groupKey, group);
+      channelToRef.set(channel, axisRef);
+    });
+    return { groups, channelToRef };
+  }
+
+  function buildChannelAxisConfig(ycols, mainDomain, logY) {
     const mobile = window.innerWidth <= 980;
-
-    const addAxisChannel = (axisRef, channel) => {
-      if (!axisChannels.has(axisRef)) axisChannels.set(axisRef, new Set());
-      axisChannels.get(axisRef).add(channel);
-    };
-
-    const setAxisUnit = (axisRef, unit) => {
-      if (unit == null || unit === '') return;
-      axisUnits.set(axisRef, unit);
-    };
-
-    const formatAxisTitle = (axisRef) => {
-      const channels = axisChannels.has(axisRef) ? Array.from(axisChannels.get(axisRef)) : [];
-      const unit = axisUnits.get(axisRef);
+    const titleObject = (text) => ({ text, standoff: 8 });
+    const formatAxisTitle = (channels, unit) => {
       const channelTitle = channels.join(' / ');
       if (channelTitle && unit) return `${channelTitle} [${unit}]`;
       if (channelTitle) return channelTitle;
@@ -5994,55 +6152,29 @@
       return 'Value';
     };
 
-    const titleObject = (text) => ({ text, standoff: 8 });
-
     const baseMarginLeft = mobile ? 48 : 80;
     const baseMarginRight = mobile ? 22 : 80;
 
     if (!ycols || ycols.length === 0) {
-      axisLayout.yaxis = {title:titleObject('Value'), domain: mainDomain, automargin:true};
+      const axisLayout = {yaxis: {title:titleObject('Value'), domain: mainDomain, automargin:true}};
       if (logY) axisLayout.yaxis.type = 'log';
-      return {channelToRef, axisLayout, marginLeft: baseMarginLeft, marginRight: baseMarginRight};
+      return {channelToRef: new Map(), axisLayout, marginLeft: baseMarginLeft, marginRight: baseMarginRight};
     }
 
-    // Group channels by unit; channels with same unit share an axis.
-    // unitToAxis: unit string -> existing axisRef (or null-keyed for channels with no unit - each gets its own)
-    const unitToAxis = new Map();
-    // axisCounter tracks how many distinct axes we've allocated (beyond primary y)
-    // y2 is reserved for time slip, so we start extra axes at y3
-    let extraAxisCount = 0; // number of extra axes created so far
-
-    // Primary Y axis gets the first channel
-    const firstUnit = getUnitForChannel(ycols[0]);
-    channelToRef.set(ycols[0], 'y');
-    addAxisChannel('y', ycols[0]);
-    setAxisUnit('y', firstUnit);
-    axisLayout.yaxis = {title: titleObject(formatAxisTitle('y')), domain: mainDomain, automargin:true};
-    if (firstUnit != null && firstUnit !== '') unitToAxis.set(firstUnit, 'y');
+    const { groups, channelToRef } = groupChannelsByAxis(ycols);
+    const axisLayout = {
+      yaxis: {title: titleObject(formatAxisTitle(groups[0].channels, groups[0].unit)), domain: mainDomain, automargin:true}
+    };
+    if (logY) axisLayout.yaxis.type = 'log';
 
     // Additional overlaid Y axes (skip y2, reserved for time slip subplot)
     let leftExtraCount = 0;
     let rightExtraCount = 0;
 
-    for (let i = 1; i < ycols.length; i++) {
-      const channel = ycols[i];
-      const unit = getUnitForChannel(channel);
-      const hasUnit = unit != null && unit !== '';
-
-      // Check if an existing axis covers this unit
-      if (hasUnit && unitToAxis.has(unit)) {
-        const existingAxisRef = unitToAxis.get(unit);
-        channelToRef.set(channel, existingAxisRef);
-        addAxisChannel(existingAxisRef, channel);
-        continue; // reuse existing axis, no new axis needed
-      }
-
-      // Need a new axis
-      extraAxisCount += 1;
-      const axisNumber = extraAxisCount + 2; // extraAxisCount=1 -> y3
-      const axisRef = `y${axisNumber}`;
-      const axisKey = `yaxis${axisNumber}`;
-      const side = (extraAxisCount % 2 === 1) ? 'right' : 'left';
+    for (let gi = 1; gi < groups.length; gi++) {
+      const group = groups[gi];
+      const axisKey = `yaxis${group.axisRef.slice(1)}`;
+      const side = (gi % 2 === 1) ? 'right' : 'left';
 
       let position;
       if (side === 'right') {
@@ -6053,12 +6185,8 @@
         position = Math.min(0.38, leftExtraCount * 0.06);
       }
 
-      channelToRef.set(channel, axisRef);
-      addAxisChannel(axisRef, channel);
-      setAxisUnit(axisRef, unit);
-      if (hasUnit) unitToAxis.set(unit, axisRef);
       axisLayout[axisKey] = {
-        title: titleObject(formatAxisTitle(axisRef)),
+        title: titleObject(formatAxisTitle(group.channels, group.unit)),
         domain: mainDomain,
         overlaying: 'y',
         anchor: 'free',
@@ -6066,12 +6194,6 @@
         position,
         automargin: true
       };
-    }
-
-    for (const axisRef of axisChannels.keys()) {
-      const axisKey = axisRef === 'y' ? 'yaxis' : `yaxis${axisRef.slice(1)}`;
-      if (!axisLayout[axisKey]) continue;
-      axisLayout[axisKey].title = titleObject(formatAxisTitle(axisRef));
       if (logY) axisLayout[axisKey].type = 'log';
     }
 
@@ -7934,6 +8056,28 @@
     return (unit != null && unit !== '') ? `${customXCol} [${unit}]` : customXCol;
   }
 
+  // Bare unit of whatever's currently on the x-axis -- 's' for time, 'm' for distance, or a
+  // custom channel's own unit (possibly none). Selection-fit frequency/rate values (FFT,
+  // sinusoidal omega, phi-as-offset) are always computed against this axis, not against
+  // time specifically, so their display units (see getFrequencyUnitLabel below) have to
+  // track it too instead of assuming "Hz"/"s".
+  function getXAxisUnit(xMode, customXCol) {
+    if (xMode === 'distance') return 'm';
+    if (xMode === 'time') return 's';
+    if (!customXCol) return '';
+    const unit = getUnitForChannel(customXCol);
+    return (unit != null && unit !== '') ? unit : '';
+  }
+
+  // Display label for a rate/frequency measured in cycles per x-axis-unit: the familiar
+  // "Hz" when the x-axis is time (seconds), "1/<unit>" (e.g. "1/m") otherwise, or "cycles"
+  // when the x-axis has no known unit at all (e.g. a dimensionless custom channel).
+  function getFrequencyUnitLabel() {
+    if (mainPlotXAxisUnit === 's') return 'Hz';
+    if (mainPlotXAxisUnit) return `1/${mainPlotXAxisUnit}`;
+    return 'cycles';
+  }
+
   function csvEscapeValue(value) {
     const s = value === null || value === undefined ? '' : String(value);
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -9006,6 +9150,13 @@
   }
 
   function updatePlot() {
+    // Captured before anything below rebuilds plotDiv.data, so a box/lasso selection (and
+    // its fit) survives the replot -- see captureCurrentTraceSelection for why this is
+    // needed at all. Suppressing reentrant selection handling for the duration keeps the
+    // replot's own automatic "deselect" (Plotly clears selectedpoints on any data change)
+    // from wiping the stats panel out from under the reapply below.
+    const preservedSelection = captureCurrentTraceSelection();
+    if (preservedSelection) suppressSelectionReentry = true;
     const selFiles = getSelectedFiles();
     const selectedYChannels = getSelectedY();
     let ycols = selectedYChannels.filter(channel => !shouldHideOriginalQuickModChannel(channel, selectedYChannels));
@@ -9101,8 +9252,9 @@
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
     }
     layout.shapes = baseCornerShapesForOverlay.concat(selectionFitShapes);
-    layout.annotations = baseCornerAnnotationsForOverlay.concat(selectionFitAnnotations);
+    layout.annotations = baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : []);
     mainPlotXAxisTitle = mainXTitle;
+    mainPlotXAxisUnit = getXAxisUnit(xMode, customXCol);
     // Plotly.react takes a fresh layout object each call; without this, any re-render
     // while the select tool is active (e.g. toggling a lap) would silently drop back to
     // the default 'zoom' dragmode.
@@ -9268,7 +9420,7 @@
       String(includeTimeSlip)
     ].join('|');
     layout.template = getPlotlyThemeTemplate();
-    Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
+    const plotReactDone = Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
     bindMainPlotSelectionSync();
@@ -9276,6 +9428,16 @@
     // Plotly.react rebuilds trace objects from scratch (mode:'lines'), so re-apply the
     // invisible selection markers if the select/lasso tool was already active.
     if (selectModeActive) setSelectableMarkersEnabled(true);
+    // Carries a box/lasso selection across this replot (see captureCurrentTraceSelection
+    // above) -- deferred until the redraw has actually settled, since Plotly's own
+    // "deselect" (fired by the data change react() just did) needs suppressSelectionReentry
+    // held through that window or it'll race this and clear right back out.
+    if (preservedSelection) {
+      plotReactDone.then(() => {
+        suppressSelectionReentry = false;
+        reapplyCapturedSelection(preservedSelection);
+      });
+    }
 
     const hasLeafletData = hasRenderableLeafletMapData(selFiles, selectedLaps);
     const hasXYData = hasRenderableXYMapData(selFiles, selectedLaps);
@@ -9587,6 +9749,25 @@
       channelColorOverrides.set(channel, color);
       const label = target.parentElement && target.parentElement.querySelector('span');
       if (label) label.style.color = color;
+      updatePlot();
+    });
+
+    selectedYColors.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLInputElement) || target.type !== 'radio') return;
+      const channel = target.getAttribute('data-axis-picker');
+      if (!channel) return;
+      const value = target.value;
+      if (value === 'auto') {
+        manualAxisOverrides.delete(channel);
+      } else if (value === 'own') {
+        manualAxisOverrides.set(channel, { type: 'own' });
+      } else if (value.startsWith('peer:')) {
+        manualAxisOverrides.set(channel, { type: 'peer', channel: value.slice('peer:'.length) });
+      } else {
+        return;
+      }
+      renderSelectedChannelColorControls();
       updatePlot();
     });
   }
