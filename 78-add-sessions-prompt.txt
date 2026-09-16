@@ -1,0 +1,664 @@
+Goal Implement a client‑side data model, storage, services, and UI hooks for a motorsports webapp. The system must support Sessions, Vehicles, Riders, Users, Notes, Files, Setups, KPIs, and Media. Use IndexedDB as the canonical local store (with a minimal localStorage fallback only if IndexedDB is unavailable). Data must be exportable/importable as a single JSON bundle compatible with the existing website export and reimport workflow. The existing quick‑plot CSV behavior must remain unchanged: opening a CSV plots immediately; users can continue adding CSVs and later attach them to sessions via an Add to Session button in the file view.
+
+Storage
+
+Use IndexedDB as the standard storage backend. Implement a small fallback shim to localStorage only if indexedDB is not available.
+
+Database name: motorsports_app_v1. Object stores: users, riders, vehicles, setups, sessions, notes, files, mediaIndex, appMetadata.
+
+Include schemaVersion in appMetadata and run migrations on startup/import.
+
+Provide a StorageService interface with methods:
+
+initDB(): Promise<void>
+
+get(store: string, id: string): Promise<any>
+
+list(store: string, query?: Query): Promise<any[]>
+
+create(store: string, obj: any): Promise<any>
+
+update(store: string, id: string, patch: any): Promise<any>
+
+delete(store: string, id: string): Promise<void>
+
+exportAll(includeMediaBlobs?: boolean): Promise<ExportBundle>
+
+importAll(bundle: ExportBundle, options?: { replaceExisting?: boolean, dryRun?: boolean, migrateLocalUsers?: Record<string,string> }): Promise<ImportResult>
+
+Data model and rules
+
+General rules
+
+All objects have id, created_at, updated_at.
+
+Use ID references for relationships; avoid deep nesting.
+
+IDs should be UUIDv4 or prefixed IDs (e.g., session_..., user_local_...) for readability.
+
+Timestamps stored as ISO 8601 UTC strings.
+
+User
+
+ts
+interface User {
+  id: string; // "user_local_xxx" or "user_123"
+  name: string;
+  role?: string; // "local", "engineer", "rider", etc.
+  auth_provider?: string;
+  created_at: string;
+  updated_at: string;
+}
+Rider
+
+ts
+interface Rider {
+  id: string;
+  name: string;
+  license?: string;
+  weight_kg?: number;
+  experience?: string;
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+Vehicle
+
+ts
+interface Vehicle {
+  id: string;
+  type: string; // motorcycle, car, kart
+  make?: string;
+  model?: string;
+  year?: number;
+  tags?: string[];
+  metadata?: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+Setup (separate table; each change creates a new Setup record)
+
+ts
+interface Setup {
+  id: string;
+  vehicle_id: string;
+  session_id?: string; // optional if setup recorded during a session
+  author_id?: string; // optional User.id
+  timestamp: string; // when the setup was recorded
+  values: Record<string, any>; // e.g., tire pressures, suspension settings
+  notes?: string;
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+Rule: Updating a vehicle’s setup must create a new Setup record and not mutate previous Setup records or the Vehicle object. The Vehicle object remains the canonical vehicle identity; setups are time/versioned records linked to vehicle.
+
+Session
+
+ts
+interface KPI { type: string; kpi: number | string; }
+interface Session {
+  id: string;
+  name: string;
+  location?: string;
+  start_time?: string;
+  end_time?: string;
+  vehicle_ids: string[];
+  rider_ids: string[];
+  file_ids: string[];
+  note_ids: string[];
+  kpis?: KPI[];
+  tags?: string[];
+  metadata?: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+Note
+
+ts
+interface MediaRef { type: "photo" | "video"; url: string; filename?: string; mimeType?: string; }
+interface Note {
+  id: string;
+  session_id?: string;
+  vehicle_id?: string;
+  rider_id?: string;
+  author_id?: string; // optional User.id (user_local_* or user_*)
+  type: "pre" | "during" | "post";
+  timestamp: string;
+  content: string;
+  media?: MediaRef[];
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+File
+
+ts
+interface File {
+  id: string;
+  session_id?: string;
+  vehicle_id?: string;
+  rider_id?: string;
+  filename: string;
+  filetype: string; // csv, gpx, json, canlog
+  uploaded_at: string;
+  metadata?: Record<string, any>; // lap_count, columns, duration
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+MediaIndex
+
+ts
+interface MediaIndex {
+  id: string;
+  filename: string;
+  url?: string; // local blob URL or external URL
+  mimeType?: string;
+  size?: number;
+  created_at: string;
+  updated_at: string;
+}
+Behavioral rules and UX
+
+Setup versioning: when user edits setup for a vehicle, create a new Setup record with vehicle_id and timestamp. Do not modify historical Setup records. Provide getLatestSetup(vehicle_id, session_id?) helper to fetch the most relevant setup.
+
+CSV quick plot: opening a CSV continues to plot immediately. Do not force session creation. In the file viewer (where parsed CSV and plot are shown), add an Add to Session button. The button opens a compact modal to select an existing session or create a new session and optionally tag the file, pick vehicle, pick rider, or add a quick note.
+
+Add multiple CSVs: allow users to add more CSVs after the first; files are independent objects and can be attached to sessions at any time.
+
+Notes author: author_id is optional. On first run create user_local_<id> and use as default author. If user logs in, provide migration UI to map user_local_* to user_*.
+
+Camera permission: request navigator.mediaDevices.getUserMedia({ video: true }) only on explicit user action (Take Photo / Record Video). If denied, fallback to file picker. Store media as blobs in IndexedDB mediaIndex or as references to external URLs. Default export includes references only; includeMediaBlobs flag can embed base64 blobs.
+
+KPIs: sessions include kpis array of { type, kpi }. Provide SessionService.addKPI(sessionId, {type, kpi}) and SessionService.getKPIs(sessionId).
+
+APIs and services to implement
+
+StorageService (IndexedDB adapter + localStorage fallback)
+
+UserService:
+
+ensureLocalUser(): Promise<User>
+
+createLocalUser(name, role)
+
+migrateLocalUserToCloud(localUserId, cloudUserId, options)
+
+VehicleService:
+
+createVehicle(data), updateVehicle(id, patch), getVehicle(id), listVehicles(filter)
+
+SetupService:
+
+createSetup({ vehicle_id, session_id?, author_id?, values, notes?, tags? })
+
+getSetupsByVehicle(vehicle_id), getLatestSetup(vehicle_id, session_id?)
+
+SessionService:
+
+createSession(data), updateSession(id, patch), deleteSession(id)
+
+addFileToSession(sessionId, fileId), addVehicleToSession(sessionId, vehicleId), addRiderToSession(sessionId, riderId)
+
+addKPI(sessionId, {type, kpi}), getKPIs(sessionId)
+
+NoteService:
+
+createNote(noteData), updateNote(noteId, patch), listNotes(filter)
+
+FileService:
+
+ingestCSV(fileBlob, options?) // parse columns, compute metadata, create File object
+
+attachFileToSession(fileId, sessionId)
+
+MediaService:
+
+saveMediaBlob(blob, filename, mimeType), getMediaUrl(mediaId), exportMedia(mediaId, includeBlob)
+
+ExportService:
+
+exportAll(includeMediaBlobs?: boolean): ExportBundle
+
+importAll(bundle, options?: { replaceExisting?: boolean, dryRun?: boolean, migrateLocalUsers?: Record<string,string> })
+
+Indexes and search
+
+IndexedDB indexes:
+
+sessions by start_time, location, tags
+
+notes by timestamp, type, author_id, session_id, tags
+
+files by uploaded_at, filetype, session_id, vehicle_id
+
+setups by vehicle_id, timestamp
+
+Provide searchNotes({ text?, author_id?, tags?, dateRange?, session_id? }) with simple client‑side tokenization and optional inverted index for note.content.
+
+Export / Import format
+
+Top level JSON keys: schemaVersion, exportedAt, users, riders, vehicles, setups, sessions, notes, files, mediaIndex, appMetadata.
+
+Default export: media references only. Optional includeMediaBlobs to embed base64 blobs.
+
+Import behavior:
+
+Validate schemaVersion.
+
+If replaceExisting true, wipe local DB and import.
+
+If ID collisions occur and replaceExisting false, generate new IDs and return mapping { oldId: newId }.
+
+Support dryRun to validate without writing.
+
+Support migrateLocalUsers mapping to reassign user_local_* to user_*.
+
+UI hooks and UX
+
+File list row: Filename | Uploaded At | [Plot] [Add to Session] [Add Note]
+
+Add to Session button behavior:
+
+If no session active, open compact modal: Select session or Create new session.
+
+If session selected, attach file and optionally prompt to tag, choose vehicle, choose rider, or add quick note.
+
+Session panel: collapsible dock showing session name, KPIs, vehicles, riders, files, notes, and quick actions (Add KPI, Add Note, Add File).
+
+Note composer: inline in file view and session panel. Fields: author (default current), type, content, attach media, tags.
+
+Camera flow: on Take Photo click, request camera permission; capture blob; save to mediaIndex; attach to note.
+
+Migration prompt: when user logs in, prompt to claim local data with options: Claim all, Keep local, Merge manually.
+
+Testing and deliverables
+
+Provide TypeScript interfaces for all objects.
+
+Provide IndexedDB initialization code and StorageService implementation.
+
+Implement UserService, VehicleService, SetupService, SessionService, NoteService, FileService, MediaService, ExportService.
+
+Provide UI component skeletons or hooks for: file view (Add to Session), session panel, note composer, camera capture.
+
+Unit tests for CRUD, setup versioning, export/import roundtrip, camera permission flow (mocked), add-to-session flow, KPI CRUD.
+
+Integration test: export bundle import on fresh browser instance with ID mapping and media handling.
+
+Nonfunctional constraints
+
+Do not change the existing quick‑plot CSV ingestion behavior.
+
+Avoid deep nesting; use ID references everywhere.
+
+All operations must work offline; queue sync/migration tasks for later if network is available.
+
+Keep media as references by default in exports.
+
+Use this prompt to generate code, tests, and UI components. If helpful, include example seed data and a sample export JSON.
+
+Next steps I can do for you
+Generate the IndexedDB schema and TypeScript interfaces now.
+
+Produce the StorageService + SetupService + SessionService skeletons with example CRUD functions and export/import logic.
+
+Sketch the UI components for the file view Add to Session button, session panel, and note composer including camera permission flow.
+
+Which of those would you like first?
+
+Summary
+Provide a single, copy‑pasteable prompt for a code generation agent to implement Sessions, Vehicles, Riders, Users, Notes, Files, Setups, KPIs, media, and export/import for a motorsports webapp. Use IndexedDB as the canonical local store. Notes must be linkable to multiple sessions. Vehicles and Setups are separate entities so historical setups are preserved. Keep the existing quick‑plot CSV workflow; add an Add to Session button in the file view. Support device local users and logged‑in users, camera permission flow, and export/import with stable IDs and optional media blobs.
+
+Storage Choice and Constraints
+Use IndexedDB as the single standard storage backend.
+
+Why: large capacity, structured queries, indexes, blob support, offline reliability, broad modern browser support.
+
+Fallback: implement a tiny shim to localStorage only for extremely old browsers; do not design features around it.
+
+Timestamps: store ISO 8601 UTC strings.
+
+IDs: use UUID v4 or prefixed IDs (session_..., user_local_...) for readability.
+
+Data Model and Relationships
+Design principle: normalized, ID‑linked stores. Notes can reference many sessions. Setups are separate objects linked to vehicles and to files/sessions as needed.
+
+Object stores and example schemas
+User
+
+ts
+interface User {
+  id: string; // "user_local_xxx" or "user_123"
+  name: string;
+  role?: string; // "local","rider","engineer"
+  auth_provider?: string;
+  created_at: string;
+  updated_at: string;
+}
+Rider
+
+ts
+interface Rider {
+  id: string;
+  name: string;
+  license?: string;
+  weight_kg?: number;
+  experience?: string;
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+Vehicle
+
+ts
+interface Vehicle {
+  id: string;
+  type: string;
+  make?: string;
+  model?: string;
+  year?: number;
+  tags?: string[];
+  metadata?: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+Setup
+
+ts
+interface Setup {
+  id: string;
+  vehicle_id: string; // reference to Vehicle.id
+  name?: string; // "Baseline", "Soft Rear"
+  created_by?: string; // User.id
+  created_at: string;
+  updated_at: string;
+  values: Record<string, any>; // flexible key/value: tire pressures, suspension, etc.
+  tags?: string[];
+  notes?: string;
+}
+File
+
+ts
+interface File {
+  id: string;
+  filename: string;
+  filetype: string; // csv,gpx,json,can
+  uploaded_at: string;
+  session_ids: string[]; // can belong to multiple sessions
+  vehicle_id?: string;
+  rider_id?: string;
+  setup_id?: string; // optional link to a Setup used for that file/run
+  metadata?: Record<string, any>; // lap_count, columns, duration
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+Note
+
+ts
+interface Note {
+  id: string;
+  session_ids: string[]; // NOTE: can link to multiple sessions
+  file_ids?: string[];   // optional links to files
+  vehicle_id?: string;
+  rider_id?: string;
+  author_id?: string; // User.id (local or cloud)
+  type: "pre" | "during" | "post" | string;
+  timestamp: string;
+  content: string;
+  media?: { id: string; type: "photo" | "video"; url: string; filename?: string }[];
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+Session
+
+ts
+interface Session {
+  id: string;
+  name: string;
+  location?: string;
+  start_time?: string;
+  end_time?: string;
+  vehicle_ids?: string[];
+  rider_ids?: string[];
+  file_ids?: string[]; // convenience list; files also have session_ids
+  note_ids?: string[]; // convenience list; notes also have session_ids
+  kpis?: { type: string; kpi: number | string }[];
+  tags?: string[];
+  metadata?: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+MediaIndex
+
+ts
+interface MediaEntry {
+  id: string;
+  filename: string;
+  mimeType: string;
+  url?: string; // local blob URL or external URL
+  size?: number;
+  created_at: string;
+}
+AppMetadata
+
+ts
+interface AppMetadata {
+  schemaVersion: string;
+  created_at: string;
+  updated_at: string;
+  exportSettings?: Record<string, any>;
+}
+Relationship rules
+No deep nesting: all relations by ID arrays.
+
+Setups separate: updating a Setup creates a new Setup object or version; do not mutate historical Setup objects referenced by past Files or Sessions unless explicitly requested.
+
+Notes link to multiple sessions: note.session_ids is an array. When a note is added to multiple sessions, update both the note and each session’s note_ids list.
+
+Files can belong to multiple sessions: file.session_ids array.
+
+Deletion: deleting an object removes its ID from referencing objects; provide soft delete option.
+
+APIs Services and IndexedDB schema
+IndexedDB stores: users, riders, vehicles, setups, sessions, files, notes, mediaIndex, appMetadata.
+
+Indexes to create
+
+sessions by start_time, location, tags
+
+notes by timestamp, type, author_id, tags, session_ids
+
+files by uploaded_at, filetype, session_ids, vehicle_id
+
+setups by vehicle_id, created_at
+
+users by id, name
+
+Core service functions to implement
+
+StorageService
+
+initDB()
+
+get(store, id)
+
+list(store, query)
+
+create(store, obj)
+
+update(store, id, patch)
+
+delete(store, id, options = { soft: true })
+
+exportAll(includeMediaBlobs = false)
+
+importAll(bundle, options = { replaceExisting: false, dryRun: false })
+
+UserService
+
+ensureLocalUser()
+
+createLocalUser(name, role)
+
+migrateLocalUserToCloud(localUserId, cloudUserId, options)
+
+VehicleService
+
+createVehicle, updateVehicle, deleteVehicle, listVehicles
+
+SetupService
+
+createSetup(vehicleId, values, meta), updateSetup, listSetupsByVehicle
+
+applySetupToFile(fileId, setupId) // links setup to file
+
+SessionService
+
+createSession, updateSession, deleteSession
+
+addFileToSession(sessionId, fileId) // updates both file.session_ids and session.file_ids
+
+addVehicleToSession(sessionId, vehicleId)
+
+addRiderToSession(sessionId, riderId)
+
+addKPI(sessionId, { type, kpi })
+
+listSessions(filter)
+
+FileService
+
+ingestCSV(fileBlob) // parse columns, compute metadata, create File object
+
+attachFileToSession(fileId, sessionId)
+
+listFiles(filter)
+
+NoteService
+
+createNote(noteData) // auto-fill timestamp and author_id
+
+updateNote(noteId, patch)
+
+linkNoteToSessions(noteId, sessionIds[]) // supports multi-session linking
+
+listNotes(filter) // supports session_ids, file_ids, vehicle_id, rider_id, author_id, type, tags, dateRange, full-text
+
+MediaService
+
+saveMediaBlob(blob, filename, mimeType) // store blob in IndexedDB or create object URL
+
+getMediaUrl(mediaId)
+
+includeMediaBlobsForExport(flag)
+
+Full text search
+
+Implement a simple tokenizer and inverted index for note.content stored in IndexedDB, or integrate a lightweight client library. Provide searchNotesFullText(query).
+
+UI Flows and UX details
+CSV quick-plot
+
+Behavior unchanged: opening a CSV plots immediately and users can continue adding CSVs.
+
+File list UI: each parsed file row shows Filename | Uploaded At | [Plot] [Add to Session] [Attach Note]. The Add to Session button opens a compact modal to select or create a session and optionally pick vehicle, rider, setup, tags, or add a quick note. Multi-select and bulk Add to Session supported.
+
+Session panel
+
+Docked, collapsible panel showing session KPIs, vehicles, riders, files, notes, and quick actions. KPIs editable inline. Session-level note composer available.
+
+Notes
+
+Composer available inline in file view and in session panel.
+
+Author selection: default to currentUser (device local or logged-in). Provide dropdown to choose another local author.
+
+Multi-session linking: when creating or editing a note, allow selecting multiple sessions to link. UI shows linked sessions and allows unlinking.
+
+Media attach: Attach Photo opens file picker; Take Photo triggers camera permission flow.
+
+Camera permission
+
+Request navigator.mediaDevices.getUserMedia({ video: true }) only on explicit user action.
+
+If granted, show camera capture UI and save blob via MediaService.saveMediaBlob.
+
+If denied, show fallback to file picker and a short explanation.
+
+Respect privacy: do not persist camera permission prompts beyond user action.
+
+Setups
+
+Provide a Setup editor for vehicles. Creating a new Setup does not mutate historical Setup objects. When user edits a Setup and wants to apply it retroactively, offer an explicit action: Apply setup to selected files/sessions which creates new Setup objects or updates file.setup_id links.
+
+KPIs
+
+Session kpis array of { type, kpi }. Provide UI to add, edit, remove KPIs and to compute derived KPIs from files (e.g., best lap, avg speed) via SessionService.updateKPI.
+
+Export, Import, Migration and Edge Cases
+Export format
+
+json
+{
+  "schemaVersion":"1.0",
+  "exportedAt":"2026-09-16T11:00:00Z",
+  "users":[...],
+  "riders":[...],
+  "vehicles":[...],
+  "setups":[...],
+  "sessions":[...],
+  "files":[...],
+  "notes":[...],
+  "mediaIndex":[...],
+  "appMetadata":{...}
+}
+Default: include media references only. Optional includeMediaBlobs: true to embed base64 blobs.
+
+Import behavior
+
+Validate schemaVersion.
+
+options.replaceExisting true wipes local DB and imports bundle.
+
+If ID collisions occur and replaceExisting is false, generate new IDs and return a mapping { oldId: newId }.
+
+options.migrateLocalUsers allows mapping user_local_* to user_* when a user claims local data. Provide UI to review mappings before applying.
+
+Support dryRun to validate and preview changes.
+
+Migrations
+
+Store schemaVersion in appMetadata. Run migration scripts on startup or import when schemaVersion differs.
+
+Edge cases
+
+Large media: prefer references; warn user about export size when including blobs.
+
+Offline: all operations must work offline; queue cloud sync tasks if implemented later.
+
+Timezones: store UTC ISO strings; display in local timezone in UI.
+
+Permissions: camera permission requested only on explicit action.
+
+Deliverables for the code generation agent
+TypeScript interfaces for all objects above.
+
+IndexedDB initialization code with object stores and indexes.
+
+StorageService implementation and adapter pattern.
+
+Services: UserService, VehicleService, SetupService, SessionService, FileService, NoteService, MediaService.
+
+CRUD functions and relationship helpers including multi-session note linking and setup application.
+
+Export/import functions with collision handling, dryRun, and includeMediaBlobs option.
+
+UI hooks and component skeletons: File row with Add to Session button, Session panel, Note composer with multi-session linking and author selection, Setup editor, KPI editor, camera capture flow.
+
+Tests: unit tests for storage and services, integration tests for export/import roundtrip, camera permission mock tests, and UI behavior tests for Add to Session and multi-session note linking.
+
+Sample seed data and a sample export JSON for manual testing.
