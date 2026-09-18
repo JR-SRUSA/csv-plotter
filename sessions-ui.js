@@ -931,7 +931,7 @@
           class: 'session-note-photo-btn', title: 'Take Photo', 'aria-label': 'Take Photo',
           onclick: () => {
             mediaStatus.textContent = 'Requesting camera…';
-            MediaService.requestCamera({ video: true }).then((result) => {
+            MediaService.requestCamera().then((result) => {
               if (!result.ok) {
                 mediaStatus.textContent = result.reason === 'denied'
                   ? 'Camera blocked — pick a file instead.'
@@ -1634,7 +1634,7 @@
         class: 'session-note-photo-btn', title: 'Take Photo', 'aria-label': 'Take Photo',
         onclick: () => {
           mediaStatus.textContent = 'Requesting camera…';
-          MediaService.requestCamera({ video: true }).then((result) => {
+          MediaService.requestCamera().then((result) => {
             if (!result.ok) {
               mediaStatus.textContent = result.reason === 'denied'
                 ? 'Camera blocked — pick a file instead.'
@@ -1762,16 +1762,49 @@
         const video = el('video', { class: 'session-capture-video', autoplay: true, playsInline: true, muted: true });
         video.srcObject = stream;
 
+        // Streams opened here by the Switch button (the caller only knows about the one it
+        // passed in, and stops that itself) -- stopped on close so no camera stays lit.
+        let currentStream = stream;
+        // Start from what the browser actually gave us (the rear camera was only requested
+        // as a preference), so the first Switch press really does change camera.
+        const firstTrack = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+        const startFacing = firstTrack && firstTrack.getSettings ? firstTrack.getSettings().facingMode : null;
+        let usingRear = startFacing !== 'user';
         let settled = false;
         function finish(value) {
           if (settled) return;
           settled = true;
+          if (currentStream !== stream) MediaService.stopCamera(currentStream);
           overlay.remove();
           resolve(value);
         }
 
-        const captureBtn = el('button', {
-          type: 'button', class: 'session-capture-btn', text: 'Capture',
+        // Only offered when the device actually reports more than one camera (device
+        // labels/lists are only populated once permission has been granted, which it
+        // has by the time this preview exists).
+        const switchBtn = buildIconButton({
+          class: 'session-capture-switch', title: 'Switch camera', 'aria-label': 'Switch camera', hidden: true,
+          onclick: () => {
+            usingRear = !usingRear;
+            MediaService.requestCamera({
+              video: { facingMode: { exact: usingRear ? 'environment' : 'user' } }
+            }).then((result) => {
+              if (!result.ok) { usingRear = !usingRear; return; }
+              if (currentStream !== stream) MediaService.stopCamera(currentStream);
+              else MediaService.stopCamera(stream);
+              currentStream = result.stream;
+              video.srcObject = result.stream;
+            });
+          }
+        }, Model && Model.SWITCH_CAMERA_ICON_SVG);
+        if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+          navigator.mediaDevices.enumerateDevices().then((devices) => {
+            if (devices.filter((d) => d.kind === 'videoinput').length > 1) switchBtn.hidden = false;
+          }).catch(() => {});
+        }
+
+        const captureBtn = buildIconButton({
+          class: 'session-capture-btn', title: 'Take photo', 'aria-label': 'Take photo',
           onclick: () => {
             const canvas = document.createElement('canvas');
             canvas.width = video.videoWidth || 640;
@@ -1781,18 +1814,19 @@
             if (canvas.toBlob) canvas.toBlob((blob) => finish(blob), 'image/png');
             else finish(null);
           }
-        });
+        }, Model && Model.SHUTTER_ICON_SVG);
 
+        const cancelBtn = buildIconButton({
+          class: 'session-capture-cancel', title: 'Cancel', 'aria-label': 'Cancel',
+          onclick: () => finish(null)
+        }, Model && Model.CLOSE_ICON_SVG);
+
+        // Switch on the left, shutter centred, cancel on the right -- the familiar camera
+        // layout, all icon-only so nothing wraps on a narrow phone screen.
         const overlay = el('div', { class: 'session-capture-overlay' }, [
           el('div', { class: 'session-capture-dialog' }, [
             video,
-            el('div', { class: 'session-capture-actions' }, [
-              captureBtn,
-              el('button', {
-                type: 'button', class: 'session-capture-cancel', text: 'Cancel',
-                onclick: () => finish(null)
-              })
-            ])
+            el('div', { class: 'session-capture-actions' }, [switchBtn, captureBtn, cancelBtn])
           ])
         ]);
         const target = container || document.body;

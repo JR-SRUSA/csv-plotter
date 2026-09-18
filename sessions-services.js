@@ -821,7 +821,10 @@
         if (!nav || !nav.mediaDevices || typeof nav.mediaDevices.getUserMedia !== 'function') {
           return Promise.resolve({ ok: false, reason: 'unavailable' });
         }
-        return nav.mediaDevices.getUserMedia(constraints || { video: true })
+        // Default to the rear camera: a bare { video: true } leaves the choice to the
+        // browser, which picks the front camera on many phones with no way to reach the
+        // other one. "ideal" (not "exact") so a single-camera device still works.
+        return nav.mediaDevices.getUserMedia(constraints || { video: { facingMode: { ideal: 'environment' } } })
           .then((stream) => ({ ok: true, stream }))
           .catch((err) => {
             const name = err && err.name ? err.name : '';

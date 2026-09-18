@@ -376,6 +376,8 @@ test.describe('sessions', () => {
     await loadSampleFile(page);
     await openPanel(page, 'User');
     await expect(page.locator('.stored-file-name')).toHaveCount(1);
+    // Removal now asks for confirmation first.
+    page.once('dialog', (dialog) => dialog.accept());
     await page.locator('.stored-file-remove-btn').first().click();
     await expect(page.locator('#storedFilesStatus')).toContainText('Removed');
     await expect(page.locator('.stored-file-name')).toHaveCount(0);

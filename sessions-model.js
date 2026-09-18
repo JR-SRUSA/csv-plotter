@@ -55,6 +55,21 @@
     + 'stroke-linecap="round" stroke-linejoin="round">'
     + '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'
     + '</svg>';
+  // Camera-preview controls: a shutter ring for Capture, two chasing arrows for Switch
+  // Camera, and an X for Cancel -- icon-only, with the meaning carried by title/aria-label.
+  const SHUTTER_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round" stroke-linejoin="round">'
+    + '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5" fill="currentColor"/>'
+    + '</svg>';
+  const SWITCH_CAMERA_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round" stroke-linejoin="round">'
+    + '<path d="M20 7h-9a5 5 0 0 0-5 5"/><path d="M17 4l3 3-3 3"/>'
+    + '<path d="M4 17h9a5 5 0 0 0 5-5"/><path d="M7 20l-3-3 3-3"/>'
+    + '</svg>';
+  const CLOSE_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    + 'stroke-linecap="round" stroke-linejoin="round">'
+    + '<line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>'
+    + '</svg>';
 
   /**
    * @typedef {Object} User
@@ -777,6 +792,9 @@
     NOTE_ICON_SVG,
     CAMERA_ICON_SVG,
     PAPERCLIP_ICON_SVG,
+    SHUTTER_ICON_SVG,
+    SWITCH_CAMERA_ICON_SVG,
+    CLOSE_ICON_SVG,
     REQUIRED_FIELDS,
     nowIso,
     randomUuid,
