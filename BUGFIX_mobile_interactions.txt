@@ -1,0 +1,10 @@
+BUGFIX_mobile_interactions
+==========================
+
+When something is deleted (like a datafile), have a toast appear stating that it has been deleted, and give the user a chance to "undo" the deletion. Maybe we save the deleted data for 30 days? Maybe we remove the delete button from the "load" area, and just have it in the data storage area.
+
+On mobile, the left side menu bar cannot scroll down all the way (cutoff half-way through user, and version number doesn't appear at all)
+
+On mobile when entering a note from map full-screen, the note preview appears behind the keyboard, making it invisible.
+
+When there is more than one camera on device, only the front one appears as available (can't switch to rear camera)

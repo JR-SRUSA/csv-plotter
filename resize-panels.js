@@ -86,7 +86,13 @@
   window.__csvPlotterSetMapVisible = setMapVisible;
 
   function init() {
-    if (ready) return;
+    if (ready) {
+      // Re-entering desktop width after teardown() cleared it: the sidebar's drag handle
+      // is positioned against this, and the rest of init() has already run once.
+      var again = document.querySelector('.controls');
+      if (again) again.style.position = 'relative';
+      return;
+    }
 
     var controls = document.querySelector('.controls');
     var plotDiv  = document.getElementById('plotDiv');
@@ -175,7 +181,11 @@
     // The inserted DOM nodes and grid-area styles are harmless on mobile
     // because the media query switches .plot to display:flex there.
     var controls = document.querySelector('.controls');
-    if (controls) controls.style.width = '';
+    // position too: init() sets it inline to 'relative' (for the resize handle), which
+    // beats the mobile stylesheet's position:fixed -- left behind, the drawer stays in the
+    // page flow after a desktop -> mobile resize and pushes the map/graph down by its
+    // full height even while closed.
+    if (controls) { controls.style.width = ''; controls.style.position = ''; }
     var plotDiv = document.getElementById('plotDiv');
     if (plotDiv) plotDiv.style.height = '';
   }

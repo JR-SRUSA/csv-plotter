@@ -376,8 +376,6 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .stored-files-list{margin-bottom:8px}
 .stored-file-row{display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px}
 .stored-file-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary)}
-.stored-file-load-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
-.stored-file-load-btn:hover{background:var(--bg-hover)}
 .stored-file-remove-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .stored-file-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 .stored-files-actions{display:flex;gap:8px;flex-wrap:wrap}
@@ -496,7 +494,7 @@ body.map-fullscreen-open{overflow:hidden}
 .map-fullscreen-fab:hover{background:var(--accent-active-bg)}
 .map-fullscreen-fab.is-armed{background:var(--accent-active-bg);box-shadow:0 0 0 4px var(--accent-active-bg),0 4px 14px rgba(0,0,0,.35)}
 
-.map-fullscreen-note-card{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);width:min(360px,calc(100vw - 32px));display:flex;flex-direction:column;gap:8px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.4);padding:10px;z-index:1450}
+.map-fullscreen-note-card{overflow-y:auto;position:fixed;left:50%;bottom:92px;transform:translateX(-50%);width:min(360px,calc(100vw - 32px));display:flex;flex-direction:column;gap:8px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.4);padding:10px;z-index:1450}
 .map-fullscreen-note-input{width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg-subtle);color:var(--text-primary);resize:vertical}
 .map-fullscreen-note-actions{display:flex;justify-content:flex-end;gap:8px}
 .map-fullscreen-note-cancel,.map-fullscreen-note-save{font-size:12px;padding:5px 12px;border-radius:5px;cursor:pointer}
@@ -556,8 +554,14 @@ body.map-fullscreen-open{overflow:hidden}
 		left:0;
 		width:min(86dvw, 380px);
 		max-width:100dvw;
+		/* 100vh on mobile browsers is the height with the URL bar hidden, so the bottom of
+		   this drawer sat behind the browser chrome and couldn't be scrolled to (cutting off
+		   the User section and the version label). dvh tracks the actually visible height;
+		   vh stays as the fallback for browsers without dvh. */
 		height:100vh;
+		height:100dvh;
 		overflow:auto;
+		padding-bottom:max(12px, env(safe-area-inset-bottom));
 		margin:0;
 		border-radius:0;
 		z-index:2100;
@@ -685,8 +689,6 @@ body.map-fullscreen-open{overflow:hidden}
 .pick-uploaded-item-actions{display:flex;gap:4px;flex-shrink:0;align-items:center}
 .pick-uploaded-item-load-btn{padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--text-primary)}
 .pick-uploaded-item-load-btn:hover{background:var(--bg-hover)}
-.pick-uploaded-item-remove-btn{padding:2px 6px;font-size:11px;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
-.pick-uploaded-item-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 
 /* ── Sessions: file row actions, session panel, add-to-session modal ───────── */
 /* All colours come from the existing custom properties, so light/dark follow the
@@ -813,9 +815,15 @@ body.map-fullscreen-open{overflow:hidden}
 .session-capture-overlay{position:fixed;inset:0;z-index:1800;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}
 .session-capture-dialog{display:flex;flex-direction:column;gap:8px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 16px 42px var(--shadow-xl);padding:12px}
 .session-capture-video{width:min(460px,80vw);max-height:60vh;background:#000;border-radius:4px}
-.session-capture-actions{display:flex;justify-content:flex-end;gap:7px}
-.session-capture-btn,.session-capture-cancel{padding:4px 11px;font-size:12px;border-radius:3px;cursor:pointer;border:1px solid var(--border-dashed);background:var(--bg-surface);color:var(--text-primary)}
-.session-capture-btn{background:var(--accent-active-bg);border-color:var(--accent-active-border);color:var(--accent-active-text);font-weight:600}
+.session-capture-actions{display:flex;justify-content:center;align-items:center;gap:18px}
+.session-capture-btn,.session-capture-cancel,.session-capture-switch{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;border-radius:50%;cursor:pointer;border:1px solid var(--border);background:var(--bg-surface);color:var(--text-primary)}
+.session-capture-switch[hidden]{display:none}
+.session-capture-btn:hover,.session-capture-cancel:hover,.session-capture-switch:hover{background:var(--bg-hover)}
+.session-capture-btn{width:56px;height:56px;background:var(--accent-active-bg);border-color:var(--accent-active-border);color:var(--accent-active-text)}
+.session-capture-btn .icon-btn-glyph{width:34px;height:34px}
+.session-capture-btn .icon-btn-glyph svg{width:34px;height:34px}
+.session-capture-cancel .icon-btn-glyph,.session-capture-switch .icon-btn-glyph{width:22px;height:22px}
+.session-capture-cancel .icon-btn-glyph svg,.session-capture-switch .icon-btn-glyph svg{width:22px;height:22px}
 
 /* ── Note viewer overlay (reached from a map marker click) ─────────────────── */
 .session-note-view-overlay{position:fixed;inset:0;z-index:1750;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}

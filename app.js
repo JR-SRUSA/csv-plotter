@@ -6998,6 +6998,29 @@
   // isn't persisted to mediaIndex until the note itself is saved. Revoked whenever the
   // card closes (Save, Cancel, or picking a new location) so they don't leak.
   let fullscreenNoteCardObjectUrls = [];
+  let fullscreenNoteCardViewportCleanup = null;
+
+  // On mobile, the on-screen keyboard shrinks only the *visual* viewport; position:fixed
+  // elements stay anchored to the (unchanged) layout viewport, so a card sitting near the
+  // bottom ends up behind the keyboard. This lifts the card by however much of the bottom
+  // edge the keyboard is covering, and keeps it in sync as the keyboard opens/closes.
+  function keepCardAboveKeyboard(card, baseBottomPx) {
+    const vv = window.visualViewport;
+    if (!vv) return null;
+    const update = () => {
+      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      card.style.bottom = `${covered > 0 ? covered + 12 : baseBottomPx}px`;
+      // Never let a tall card (photos + textarea) extend above the visible area.
+      card.style.maxHeight = `${Math.max(120, vv.height - 24)}px`;
+    };
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    update();
+    return () => {
+      vv.removeEventListener('resize', update);
+      vv.removeEventListener('scroll', update);
+    };
+  }
 
   function openFullscreenNoteCard(location) {
     closeFullscreenNoteCard();
@@ -7068,7 +7091,7 @@
     const takePhotoBtn = buildFullscreenPhotoIconButton('session-note-photo-btn', 'Take Photo', photoModel && photoModel.CAMERA_ICON_SVG, () => {
       if (!sessionsApi || !sessionsApi.MediaService || !window.SessionsUI) return;
       mediaStatus.textContent = 'Requesting camera…';
-      sessionsApi.MediaService.requestCamera({ video: true }).then((result) => {
+      sessionsApi.MediaService.requestCamera().then((result) => {
         if (!result.ok) {
           mediaStatus.textContent = result.reason === 'denied'
             ? 'Camera blocked — pick a file instead.'
@@ -7138,10 +7161,15 @@
     L.DomEvent.disableScrollPropagation(card);
     leafletMapDiv.appendChild(card);
     mapFullscreenNoteCard = card;
+    fullscreenNoteCardViewportCleanup = keepCardAboveKeyboard(card, 92);
     textarea.focus();
   }
 
   function closeFullscreenNoteCard() {
+    if (fullscreenNoteCardViewportCleanup) {
+      fullscreenNoteCardViewportCleanup();
+      fullscreenNoteCardViewportCleanup = null;
+    }
     fullscreenNoteCardObjectUrls.forEach((url) => { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } });
     fullscreenNoteCardObjectUrls = [];
     if (mapFullscreenNoteCard) { mapFullscreenNoteCard.remove(); mapFullscreenNoteCard = null; }
@@ -10906,28 +10934,25 @@
         nameSpan.className = 'stored-file-name';
         nameSpan.textContent = entry.name;
         nameSpan.title = `Stored: ${entry.storedAt || ''}`;
-        const loadBtn = document.createElement('button');
-        loadBtn.type = 'button';
-        loadBtn.className = 'stored-file-load-btn';
-        loadBtn.textContent = 'Load';
-        loadBtn.title = 'Load this file into the plotter';
-        loadBtn.addEventListener('click', () => {
-          const blob = new Blob([entry.text], { type: 'text/plain' });
-          const file = new File([blob], entry.name, { type: 'text/plain' });
-          parseFile(file, /* skipStore */ true);
-          setStoredFilesStatus(`Loaded "${entry.name}".`);
-        });
+        // No Load button here: loading a stored file lives in "Pick Uploaded Data". This
+        // list is only for managing (deleting) what's stored.
         const removeBtn = document.createElement('button');
         removeBtn.type = 'button';
         removeBtn.className = 'stored-file-remove-btn';
         removeBtn.textContent = '✕';
         removeBtn.title = 'Remove from browser storage';
         removeBtn.addEventListener('click', () => {
+          // Permanent, and it also detaches the file from any session that lists it, so
+          // ask first rather than deleting on a single (possibly accidental) tap.
+          const ok = window.confirm(
+            `Delete "${entry.name}" from browser storage?\n\n`
+            + 'It will also be removed from any sessions it is attached to. This cannot be undone.'
+          );
+          if (!ok) return;
           removeFileFromDB(entry.id);
           setStoredFilesStatus(`Removed "${entry.name}" from storage.`);
         });
         row.appendChild(nameSpan);
-        row.appendChild(loadBtn);
         row.appendChild(removeBtn);
         storedFilesList.appendChild(row);
       });
@@ -11085,17 +11110,9 @@
           closePickerModal();
         });
 
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'pick-uploaded-item-remove-btn';
-        removeBtn.textContent = '✕';
-        removeBtn.title = 'Remove from browser storage';
-        removeBtn.addEventListener('click', () => {
-          removeFileFromDB(entry.id).then(() => renderPickerList());
-        });
-
+        // Deliberately no delete button here: it sat right next to Load and was too easy
+        // to hit by accident. Removing a stored file lives under User data instead.
         actions.appendChild(loadBtn);
-        actions.appendChild(removeBtn);
         item.appendChild(metaDiv);
         item.appendChild(actions);
         pickUploadedList.appendChild(item);
