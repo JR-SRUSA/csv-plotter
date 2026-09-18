@@ -80,7 +80,12 @@
             <span id="pickUploadedTitle" class="pick-uploaded-title">Pick Uploaded Data</span>
             <button id="pickUploadedCloseBtn" type="button" class="pick-uploaded-close" aria-label="Close">&times;</button>
           </div>
-          <div class="pick-uploaded-controls">
+          <div class="pick-uploaded-tabs" role="tablist">
+            <button type="button" class="pick-uploaded-tab is-active" data-pick-tab="files" role="tab" aria-selected="true">Files</button>
+            <button type="button" class="pick-uploaded-tab" data-pick-tab="sessions" role="tab" aria-selected="false">Sessions</button>
+            <button type="button" class="pick-uploaded-tab" data-pick-tab="events" role="tab" aria-selected="false">Events</button>
+          </div>
+          <div id="pickUploadedFileControls" class="pick-uploaded-controls">
             <label class="pick-uploaded-sort-label">Sort by:
               <select id="pickUploadedSortSelect" class="pick-uploaded-sort-select">
                 <option value="name">Name</option>
@@ -306,12 +311,31 @@
         </div>
       </details>
 
+      <details id="sessionsPanel" class="collapsible-action">
+        <summary class="collapsible-action-summary">
+          <span class="collapsible-action-label">Sessions</span>
+          <span class="collapsible-caret" aria-hidden="true"></span>
+        </summary>
+        <div class="collapsible-action-body">
+          <!-- Rendered by sessions-ui.js: session picker, KPIs, vehicles, riders, files,
+               notes and the note composer. -->
+          <div id="sessionsPanelBody" class="sessions-panel-body"></div>
+        </div>
+      </details>
+
       <details class="collapsible-action">
         <summary class="collapsible-action-summary">
           <span class="collapsible-action-label">User</span>
           <span class="collapsible-caret" aria-hidden="true"></span>
         </summary>
         <div class="collapsible-action-body">
+          <p class="settings-io-hint">Your name, used as the author on notes you write (no login yet -- kept only in this browser).</p>
+          <div class="author-name-row">
+            <input type="text" id="authorNameInput" class="settings-text-input" placeholder="Your name" autocomplete="off" />
+          </div>
+          <div id="authorNameStatus" class="settings-io-status" aria-live="polite"></div>
+
+          <hr class="settings-divider" />
           <p class="settings-io-hint">Uploaded data files are saved in your browser. Use the buttons below to load them into the plotter.</p>
           <div id="storedFilesList" class="stored-files-list"></div>
           <div class="stored-files-actions">
@@ -335,44 +359,6 @@
       </details>
 
       <div id="uiPanel7" class="racing-line-controls" hidden>
-        <details id="racingLineDetails" class="collapsible-action">
-          <summary class="collapsible-action-summary">
-            <button id="fitRacingLineBtn" type="button" class="collapsible-action-btn">Fit Racing Line</button>
-            <span class="collapsible-caret" aria-hidden="true"></span>
-          </summary>
-          <div id="racingLineWholeCircuitPanel" class="racing-line-whole-circuit-panel collapsible-action-body">
-            <div class="racing-line-weight-controls">
-              <label>Data Fidelity (β)
-                <input id="racingLineBetaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-                <span id="racingLineBetaWeightValue">1.0</span>
-                <input id="racingLineBetaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
-              </label>
-              <label>Curvature Smoothness (α)
-                <input id="racingLineAlphaWeight" type="range" min="0" max="10" step="0.1" value="1.0" />
-                <span id="racingLineAlphaWeightValue">1.0</span>
-                <input id="racingLineAlphaWeightNumber" type="number" min="0" max="10" step="0.1" value="1.0" />
-              </label>
-            </div>
-            <div id="racingLineWholeCircuitStatus" class="racing-line-status" aria-live="polite"></div>
-            <div class="racing-line-actions">
-              <button id="racingLineWholeCircuitPrevCornerBtn" type="button">◀ Prev Corner</button>
-              <button id="racingLineWholeCircuitNextCornerBtn" type="button">Next Corner ▶</button>
-            </div>
-            <div id="racingLineCornerGammaRow" class="racing-line-weight-controls" hidden>
-              <label>Minimize Curvature (γ) — this corner only
-                <input id="racingLineGammaWeight" type="range" min="0" max="10" step="0.1" value="0" />
-                <span id="racingLineGammaWeightValue">0.0</span>
-                <input id="racingLineGammaWeightNumber" type="number" min="0" max="10" step="0.1" value="0" />
-              </label>
-            </div>
-            <div class="racing-line-hint">Click a control point on the map to remove it.</div>
-            <div class="racing-line-actions">
-              <button id="racingLineWholeCircuitAcceptBtn" type="button" disabled>Accept &amp; Add as Lap</button>
-              <button id="racingLineWholeCircuitDiscardBtn" type="button">Discard</button>
-            </div>
-          </div>
-        </details>
-
         <div class="vehicle-sim-controls">
           <details id="vehicleSimDetails" class="collapsible-action">
             <summary class="collapsible-action-summary">
@@ -404,7 +390,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-15a</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-17j</div>
     </section>
 
     <section class="plot">
@@ -511,6 +497,12 @@
   <script src="map-coordinate-utils.js"></script>
   <script src="racing-line-calculations.js"></script>
   <script src="fit-functions.js"></script>
+  <!-- Sessions layer: model -> storage -> services -> ui, each depending on the one
+       before it, and all four before app.js, which builds the services on startup. -->
+  <script src="sessions-model.js"></script>
+  <script src="sessions-storage.js"></script>
+  <script src="sessions-services.js"></script>
+  <script src="sessions-ui.js"></script>
   <script src="app.js"></script>
   <script src="resize-panels.js"></script>
 </body>

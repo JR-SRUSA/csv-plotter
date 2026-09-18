@@ -38,6 +38,14 @@ try {
   const mapCoordSource = path.join(rootDir, 'map-coordinate-utils.js');
   const fitFunctionsSource = path.join(rootDir, 'fit-functions.js');
   const resizePanelsSource = path.join(rootDir, 'resize-panels.js');
+  // Sessions layer, in dependency order: model -> storage -> services -> ui. All four
+  // must precede app.min.js in the bundle, which builds the services on startup.
+  const sessionsSources = [
+    path.join(rootDir, 'sessions-model.js'),
+    path.join(rootDir, 'sessions-storage.js'),
+    path.join(rootDir, 'sessions-services.js'),
+    path.join(rootDir, 'sessions-ui.js')
+  ];
   const appMinified = path.join(buildDir, 'app.min.js');
   const bundleSource = path.join(buildDir, 'gpbikes-plotter.bundle.js');
   const bundleMinified = path.join(buildDir, 'gpbikes-plotter.bundle.min.js');
@@ -69,6 +77,7 @@ try {
     fs.readFileSync(processorSource, 'utf8'),
     fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(fitFunctionsSource, 'utf8'),
+    ...sessionsSources.map((file) => fs.readFileSync(file, 'utf8')),
     fs.readFileSync(appMinified, 'utf8'),
     fs.readFileSync(resizePanelsSource, 'utf8'),
     fs.readFileSync(racingLineCalculationsSource, 'utf8')
@@ -93,6 +102,8 @@ try {
     .replace(/\s*<script src="fit-functions\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="resize-panels\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="racing-line-calculations\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<!-- Sessions layer:[\s\S]*?-->\n?/g, '\n')
+    .replace(/\s*<script src="sessions-(?:model|storage|services|ui)\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);

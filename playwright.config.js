@@ -12,6 +12,12 @@ module.exports = defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: 'retain-on-failure',
+    // A synthetic camera device + auto-granted permission prompt, so tests can exercise
+    // the real Take Photo/getUserMedia flow without ever touching a real camera or
+    // needing a manual permission click.
+    launchOptions: {
+      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
+    },
   },
   webServer: {
     command: `python3 -m http.server ${PORT}`,
