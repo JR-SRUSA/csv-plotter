@@ -1,0 +1,309 @@
+{
+  "schemaVersion": "1.0",
+  "exportedAt": "2026-09-16T18:30:27.678Z",
+  "users": [
+    {
+      "id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "name": "Pit Wall Laptop",
+      "role": "local",
+      "created_at": "2026-09-16T18:30:27.674Z",
+      "updated_at": "2026-09-16T18:30:27.674Z"
+    }
+  ],
+  "riders": [
+    {
+      "name": "Jo Mercer",
+      "license": "ACU-118842",
+      "weight_kg": 68,
+      "experience": "Clubman",
+      "tags": [
+        "novice-plate"
+      ],
+      "id": "rider_963339d3-76f5-47af-8f7b-c0e76dd3eff4",
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.675Z"
+    },
+    {
+      "name": "Sam Okafor",
+      "weight_kg": 74,
+      "experience": "National",
+      "tags": [
+        "coach"
+      ],
+      "id": "rider_dfb45584-dc03-469e-86e1-c294f5caeaaf",
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.675Z"
+    }
+  ],
+  "vehicles": [
+    {
+      "type": "motorcycle",
+      "make": "Yamaha",
+      "model": "YZF-R3",
+      "year": 2022,
+      "tags": [
+        "club-sport"
+      ],
+      "metadata": {
+        "class": "Junior Supersport",
+        "engine_cc": 321
+      },
+      "id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.675Z"
+    }
+  ],
+  "setups": [
+    {
+      "vehicle_id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "session_id": "session_ea773d61-4894-4322-93aa-2b4c58307037",
+      "author_id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "name": "Baseline",
+      "timestamp": "2026-04-16T12:40:00Z",
+      "values": {
+        "front_tyre_psi_cold": 2,
+        "rear_tyre_psi_cold": 1.9,
+        "front_preload_turns": 4,
+        "rear_preload_turns": 6,
+        "front_compression_clicks": 8,
+        "rear_rebound_clicks": 10,
+        "front_sprocket": 14,
+        "rear_sprocket": 47,
+        "ride_height_mm": 0
+      },
+      "notes": "Stock settings carried over from last round.",
+      "tags": [
+        "baseline"
+      ],
+      "id": "setup_73a1c622-df48-4175-b91a-27c2f0d33578",
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.675Z"
+    },
+    {
+      "vehicle_id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "session_id": "session_ea773d61-4894-4322-93aa-2b4c58307037",
+      "author_id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "name": "Softer rear, +1 tooth",
+      "values": {
+        "front_tyre_psi_cold": 2,
+        "rear_tyre_psi_cold": 1.8,
+        "front_preload_turns": 4,
+        "rear_preload_turns": 6,
+        "front_compression_clicks": 8,
+        "rear_rebound_clicks": 8,
+        "front_sprocket": 14,
+        "rear_sprocket": 48,
+        "ride_height_mm": 0
+      },
+      "notes": "Chasing drive out of the final corner.",
+      "tags": [
+        "revision"
+      ],
+      "supersedes_id": "setup_73a1c622-df48-4175-b91a-27c2f0d33578",
+      "timestamp": "2026-09-16T18:30:27.675Z",
+      "id": "setup_3559299c-ca1a-40cd-bb7b-1def4d0f0549",
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.675Z"
+    }
+  ],
+  "sessions": [
+    {
+      "name": "Pitt Race - Saturday FP1",
+      "location": "Pitt Race, PA",
+      "start_time": "2026-04-16T13:11:00Z",
+      "end_time": "2026-04-16T13:31:00Z",
+      "tags": [
+        "dry",
+        "baseline"
+      ],
+      "metadata": {
+        "air_temp_c": 18,
+        "track_temp_c": 24,
+        "conditions": "Dry, light breeze"
+      },
+      "id": "session_ea773d61-4894-4322-93aa-2b4c58307037",
+      "vehicle_ids": [
+        "vehicle_b9e2040a-2802-4489-aa93-da7220473230"
+      ],
+      "rider_ids": [
+        "rider_963339d3-76f5-47af-8f7b-c0e76dd3eff4"
+      ],
+      "file_ids": [
+        "file_da2f9c27-07a7-4c1a-85b1-e38fed3d9122"
+      ],
+      "note_ids": [
+        "note_b486e3e3-d8d7-48a7-bf8b-d4b41905fc34",
+        "note_8f020463-dee2-4645-a673-c48fb89bca3c",
+        "note_8528f7e6-a2aa-424b-85dd-ae74b7debdb9"
+      ],
+      "kpis": [
+        {
+          "type": "best_lap_s",
+          "kpi": 92.551
+        },
+        {
+          "type": "avg_speed_kph",
+          "kpi": 118.4
+        },
+        {
+          "type": "laps_completed",
+          "kpi": 8
+        },
+        {
+          "type": "tyre_used",
+          "kpi": "Dunlop GP Racer D212"
+        }
+      ],
+      "created_at": "2026-09-16T18:30:27.675Z",
+      "updated_at": "2026-09-16T18:30:27.677Z"
+    },
+    {
+      "name": "Pitt Race - Saturday FP2",
+      "location": "Pitt Race, PA",
+      "start_time": "2026-04-16T15:05:00Z",
+      "tags": [
+        "dry"
+      ],
+      "metadata": {
+        "air_temp_c": 21,
+        "track_temp_c": 31
+      },
+      "id": "session_1ff55065-a148-4ca7-9f77-97c506eb17f3",
+      "vehicle_ids": [
+        "vehicle_b9e2040a-2802-4489-aa93-da7220473230"
+      ],
+      "rider_ids": [
+        "rider_963339d3-76f5-47af-8f7b-c0e76dd3eff4"
+      ],
+      "file_ids": [],
+      "note_ids": [
+        "note_8f020463-dee2-4645-a673-c48fb89bca3c"
+      ],
+      "kpis": [
+        {
+          "type": "best_lap_s",
+          "kpi": 91.204
+        }
+      ],
+      "created_at": "2026-09-16T18:30:27.677Z",
+      "updated_at": "2026-09-16T18:30:27.677Z"
+    }
+  ],
+  "notes": [
+    {
+      "session_ids": [
+        "session_ea773d61-4894-4322-93aa-2b4c58307037"
+      ],
+      "author_id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "type": "pre",
+      "timestamp": "2026-04-16T12:55:00Z",
+      "content": "Green track, nobody out yet. Plan: 3 laps building, then a push lap on the baseline setup.",
+      "tags": [
+        "plan"
+      ],
+      "id": "note_b486e3e3-d8d7-48a7-bf8b-d4b41905fc34",
+      "file_ids": [],
+      "media": [],
+      "created_at": "2026-09-16T18:30:27.676Z",
+      "updated_at": "2026-09-16T18:30:27.676Z"
+    },
+    {
+      "session_ids": [
+        "session_ea773d61-4894-4322-93aa-2b4c58307037",
+        "session_1ff55065-a148-4ca7-9f77-97c506eb17f3"
+      ],
+      "file_ids": [
+        "file_da2f9c27-07a7-4c1a-85b1-e38fed3d9122"
+      ],
+      "vehicle_id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "rider_id": "rider_963339d3-76f5-47af-8f7b-c0e76dd3eff4",
+      "author_id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "type": "during",
+      "timestamp": "2026-04-16T13:19:00Z",
+      "content": "Rider reports the front pushing wide on entry to T1 and no drive out of the final corner. Rear feels harsh over the kerb.",
+      "tags": [
+        "front-push",
+        "drive"
+      ],
+      "id": "note_8f020463-dee2-4645-a673-c48fb89bca3c",
+      "media": [],
+      "created_at": "2026-09-16T18:30:27.677Z",
+      "updated_at": "2026-09-16T18:30:27.677Z"
+    },
+    {
+      "session_ids": [
+        "session_ea773d61-4894-4322-93aa-2b4c58307037"
+      ],
+      "vehicle_id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "author_id": "user_local_f7d8faa9-7e40-4177-8f02-b8bf41706ac8",
+      "type": "post",
+      "timestamp": "2026-04-16T13:40:00Z",
+      "content": "Dropped rear pressure to 1.8 bar, backed rebound off 2 clicks and went +1 on the rear sprocket. Re-run in FP2 before touching the front.",
+      "tags": [
+        "action"
+      ],
+      "id": "note_8528f7e6-a2aa-424b-85dd-ae74b7debdb9",
+      "file_ids": [],
+      "media": [],
+      "created_at": "2026-09-16T18:30:27.677Z",
+      "updated_at": "2026-09-16T18:30:27.677Z"
+    }
+  ],
+  "files": [
+    {
+      "id": "file_da2f9c27-07a7-4c1a-85b1-e38fed3d9122",
+      "filename": "PiBoSo_R3_PittRace_2026-04-16_11-11-18.csv",
+      "filetype": "csv",
+      "uploaded_at": "2026-09-16T18:30:27.676Z",
+      "session_ids": [
+        "session_ea773d61-4894-4322-93aa-2b4c58307037"
+      ],
+      "created_at": "2026-09-16T18:30:27.676Z",
+      "updated_at": "2026-09-16T18:30:27.676Z",
+      "vehicle_id": "vehicle_b9e2040a-2802-4489-aa93-da7220473230",
+      "rider_id": "rider_963339d3-76f5-47af-8f7b-c0e76dd3eff4",
+      "setup_id": "setup_73a1c622-df48-4175-b91a-27c2f0d33578",
+      "tags": [
+        "fp1",
+        "baseline"
+      ],
+      "metadata": {
+        "columns": [
+          "Time",
+          "Distance",
+          "Speed",
+          "rpm",
+          "lat",
+          "lon"
+        ],
+        "row_count": 1,
+        "lap_count": 8,
+        "fileMeta": {
+          "track": "Pitt Race",
+          "rider": "Jo Mercer",
+          "vehicle": "Yamaha YZF-R3",
+          "date": "2026-04-16",
+          "session": "FP1"
+        }
+      }
+    }
+  ],
+  "mediaIndex": [
+    {
+      "url": "https://example.invalid/media/rear-tyre-wear-fp1.jpg",
+      "filename": "rear-tyre-wear-fp1.jpg",
+      "mimeType": "image/jpeg",
+      "id": "media_f4c98143-722a-4ec5-be34-87529fe54621",
+      "created_at": "2026-09-16T18:30:27.677Z",
+      "updated_at": "2026-09-16T18:30:27.677Z"
+    }
+  ],
+  "appMetadata": {
+    "schemaVersion": "1.0",
+    "created_at": "2026-09-16T18:30:27.671Z",
+    "updated_at": "2026-09-16T18:30:27.675Z",
+    "exportSettings": {
+      "includeMediaBlobs": false
+    }
+  }
+}

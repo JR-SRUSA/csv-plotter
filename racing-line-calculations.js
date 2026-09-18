@@ -215,7 +215,6 @@
   const WHOLE_CIRCUIT_TARGET_SPACING_M = 20;
   const WHOLE_CIRCUIT_MIN_CONTROL_POINTS = 24;
   const WHOLE_CIRCUIT_MAX_CONTROL_POINTS = 220;
-  const WHOLE_CIRCUIT_ABSOLUTE_MIN_CONTROL_POINTS = 12; // must stay > SPLINE_DEGREE + 1
   const WHOLE_CIRCUIT_MIN_SPAN_M = 2;
   const QP_SAMPLE_MIN = 150;
   const QP_SAMPLE_MAX = 400;
@@ -246,16 +245,6 @@
     return { points, knots, degree, period, numControlPoints: S };
   }
 
-  function periodicEntryDistances(entries) {
-    const distances = [];
-    let acc = 0;
-    entries.forEach((entry) => {
-      distances.push(acc);
-      acc += entry.span;
-    });
-    return distances;
-  }
-
   function evalPeriodicBSpline(rep, t) {
     const tc = ((t % rep.period) + rep.period) % rep.period;
     return evalBSplineDeBoor(rep.points, rep.knots, rep.degree, tc);
@@ -284,19 +273,6 @@
       pts.push({ x: p.x, y: p.y, t: t / rep.period, dist: t });
     }
     return pts;
-  }
-
-  // Removes the control point at `indexToRemove`, merging its knot span into the
-  // previous one.
-  function removePeriodicControlPoint(entries, indexToRemove) {
-    const S = entries.length;
-    if (S <= WHOLE_CIRCUIT_ABSOLUTE_MIN_CONTROL_POINTS) return null;
-    const idx = ((indexToRemove % S) + S) % S;
-    const prevIdx = (idx - 1 + S) % S;
-    const newEntries = entries.slice();
-    newEntries[prevIdx] = { point: entries[prevIdx].point, span: entries[prevIdx].span + entries[idx].span };
-    newEntries.splice(idx, 1);
-    return newEntries;
   }
 
   function collectWholeLapMapPoints(log, lap, deps) {
@@ -956,19 +932,6 @@
     return finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants);
   }
 
-  // Re-fits an already-built whole-circuit fit after the user has removed a control
-  // point while navigating corners, or changed alpha/beta -- reuses the same reference
-  // lap and baseDist coordinate system, just re-running both fit stages for the
-  // (possibly thinned) entries ring.
-  function refitWholeCircuitFromEntries(log, lap, entries, baseDist, fitWeights, fitOptions, deps, constants) {
-    const rawPoints = collectWholeLapMapPoints(log, lap, deps);
-    if (rawPoints.length < 20) return null;
-    const points = rawPoints.map((p) => ({ ...p, dist: p.dist - baseDist }));
-    const totalLapDistance = entries.reduce((sum, e) => sum + e.span, 0);
-    if (!(totalLapDistance > 0)) return null;
-    return finishWholeCircuitFit(log, entries, points, totalLapDistance, baseDist, fitWeights, fitOptions, deps, constants);
-  }
-
   // =======================================================================
   // Vehicle simulation: a quasi-steady-state point-mass lap-time simulator, the standard
   // technique used throughout motorsport lap simulation (three passes over the track):
@@ -1132,9 +1095,6 @@
   window.RacingLineCalculations = {
     normalizeFitWeight,
     buildWholeCircuitFit,
-    refitWholeCircuitFromEntries,
-    removePeriodicControlPoint,
-    periodicEntryDistances,
     evalPeriodicBSpline,
     computePeriodicBSplineRadiusAtT,
     samplePeriodicBSpline,

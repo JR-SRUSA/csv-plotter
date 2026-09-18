@@ -31,23 +31,6 @@
   const cornerEditorMergeLeftBtn = document.getElementById('cornerEditorMergeLeft');
   const cornerEditorMergeRightBtn = document.getElementById('cornerEditorMergeRight');
   const cornerEditorResetBtn = document.getElementById('cornerEditorResetBtn');
-  const fitRacingLineBtn = document.getElementById('fitRacingLineBtn');
-  const racingLineDetails = document.getElementById('racingLineDetails');
-  const racingLineWholeCircuitStatus = document.getElementById('racingLineWholeCircuitStatus');
-  const racingLineWholeCircuitAcceptBtn = document.getElementById('racingLineWholeCircuitAcceptBtn');
-  const racingLineWholeCircuitDiscardBtn = document.getElementById('racingLineWholeCircuitDiscardBtn');
-  const racingLineWholeCircuitPrevCornerBtn = document.getElementById('racingLineWholeCircuitPrevCornerBtn');
-  const racingLineWholeCircuitNextCornerBtn = document.getElementById('racingLineWholeCircuitNextCornerBtn');
-  const racingLineBetaWeightInput = document.getElementById('racingLineBetaWeight');
-  const racingLineBetaWeightNumberInput = document.getElementById('racingLineBetaWeightNumber');
-  const racingLineAlphaWeightInput = document.getElementById('racingLineAlphaWeight');
-  const racingLineAlphaWeightNumberInput = document.getElementById('racingLineAlphaWeightNumber');
-  const racingLineBetaWeightValue = document.getElementById('racingLineBetaWeightValue');
-  const racingLineAlphaWeightValue = document.getElementById('racingLineAlphaWeightValue');
-  const racingLineCornerGammaRow = document.getElementById('racingLineCornerGammaRow');
-  const racingLineGammaWeightInput = document.getElementById('racingLineGammaWeight');
-  const racingLineGammaWeightNumberInput = document.getElementById('racingLineGammaWeightNumber');
-  const racingLineGammaWeightValue = document.getElementById('racingLineGammaWeightValue');
   const vehicleSimMaxLatGInput = document.getElementById('vehicleSimMaxLatG');
   const vehicleSimMaxLongGInput = document.getElementById('vehicleSimMaxLongG');
   const vehicleSimPowerKwInput = document.getElementById('vehicleSimPowerKw');
@@ -64,6 +47,8 @@
   const uploadSettingsBtn = document.getElementById('uploadSettingsBtn');
   const settingsFileInput = document.getElementById('settingsFileInput');
   const settingsIoStatus = document.getElementById('settingsIoStatus');
+  const authorNameInput = document.getElementById('authorNameInput');
+  const authorNameStatus = document.getElementById('authorNameStatus');
   const storedFilesList = document.getElementById('storedFilesList');
   const loadAllStoredFilesBtn = document.getElementById('loadAllStoredFilesBtn');
   const downloadAllDataBtn = document.getElementById('downloadAllDataBtn');
@@ -77,6 +62,8 @@
   const pickUploadedSortSelect = document.getElementById('pickUploadedSortSelect');
   const pickUploadedSearch = document.getElementById('pickUploadedSearch');
   const pickUploadedList = document.getElementById('pickUploadedList');
+  const pickUploadedFileControls = document.getElementById('pickUploadedFileControls');
+  const pickUploadedTabButtons = document.querySelectorAll('.pick-uploaded-tab');
   const plotDiv = document.getElementById('plotDiv');
   const mapDiv = document.getElementById('mapDiv');
   const leafletMapDiv = document.getElementById('leafletMapDiv');
@@ -204,11 +191,13 @@
         name: 'toggleHoverData',
         title: 'Toggle Hover Data',
         icon: Plotly.Icons.tooltip_basic,
-        attr: 'hovermode',
-        val: 'x',
         click: (gd) => {
-          hoverEnabled = !hoverEnabled;
-          Plotly.relayout(gd, {hovermode: hoverEnabled ? 'x' : false});
+          // hovermode stays 'x' regardless (see updatePlot) -- Plotly only fires
+          // plotly_hover at all while hovermode is truthy, and the map/track marker
+          // sync (bindMainPlotHoverSync) depends on that firing even when the user
+          // doesn't want the tooltip TEXT showing. So this toggles tooltip visibility
+          // via CSS instead of ever setting hovermode to false.
+          setHoverTooltipVisible(gd, !hoverEnabled);
         }
       },
       {
@@ -218,7 +207,9 @@
         click: (gd) => {
           selectionFitBoxesVisible = !selectionFitBoxesVisible;
           Plotly.relayout(gd, {
-            annotations: baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+            annotations: baseCornerAnnotationsForOverlay
+              .concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+              .concat(notePinAnnotationsForOverlay)
           });
         }
       }
@@ -491,6 +482,7 @@
   let leafletColorLegendControl = null;
   let leafletOsmLayer = null; // the 'OpenStreetMap' base layer -- its tile URL swaps with the app theme
   let leafletMapColorManualRanges = new Map(); // channel -> {min, max}
+  let mapFullscreenActive = false;
   let currentTsTraces = []; // latest timeslip traces for Y-range recomputation on X zoom
   let isSyncingPlotHover = false;
   let lastLinkedHoverKey = null;
@@ -502,14 +494,18 @@
   let cornerEditorVenueKey = ''; // normalizeVenueKey() of the venue the editor is currently bound to
   let activeCornerDataForFitting = null;
   let activeCornerReferenceForFitting = null;
-  let wholeCircuitLeafletLayers = [];
-  let wholeCircuitFitPreview = null; // { fit, referenceLog, referenceLap, cornerSegments, currentCornerIndex } awaiting Accept/Discard
   let mainPlotXRange = null; // persisted x-range for main plot, independent of y-channel selection
   let mainPlotXRangeSignature = '';
   let baseCornerShapesForOverlay = []; // corner/straight shading shapes, kept separate so selection fit lines can be layered on top
   let baseCornerAnnotationsForOverlay = []; // corner labels, kept separate so selection fit annotations can be layered on top
   let selectionFitShapes = []; // temporary best-fit line(s) drawn for the current box/lasso selection
   let selectionFitAnnotations = []; // on-plot text mirroring the selection stats panel, so PNG exports carry the same numbers
+  // Pinned-note markers ("Pin on Graph"). Always appended LAST in every annotations
+  // merge below (after selectionFitAnnotations) so the pre-existing annotation-index
+  // math for dragging a selection-fit annotation's tail (see the plotly_relayout
+  // handler's `annotations[idx]` regex) keeps working unmodified -- it assumes
+  // selectionFitAnnotations are the tail of the array.
+  let notePinAnnotationsForOverlay = [];
   // Hides the on-plot colored annotation boxes above (declutters the graph while
   // inspecting a fit) without discarding the fit itself -- selectionFitAnnotations still
   // holds the real content so switching this back on doesn't need a new selection.
@@ -529,6 +525,20 @@
   // panning; desktop keeps the traditional always-on hover. User's manual toggle (see the
   // modebar button) sticks regardless of later window resizes.
   let hoverEnabled = window.innerWidth > 980;
+
+  // Shows/hides the hover tooltip TEXT without touching layout.hovermode (which stays
+  // 'x' always -- see updatePlot) -- Plotly stops firing plotly_hover entirely whenever
+  // hovermode is false, and the map/track marker following the mouse depends on that
+  // event, so hovermode can't be the thing this toggles. .hoverlayer is Plotly's own SVG
+  // group for rendered hover labels; hiding it via CSS leaves hover computation (and the
+  // marker sync) running normally.
+  function setHoverTooltipVisible(gd, visible) {
+    hoverEnabled = visible;
+    const target = gd || plotDiv;
+    if (target) target.classList.toggle('hover-tooltip-hidden', !visible);
+    const btn = document.querySelector('.modebar-btn[data-title="Toggle Hover Data"]');
+    if (btn) btn.classList.toggle('is-active', visible);
+  }
 
   // Start/finish-line lap editor state -- lets a log's laps be recomputed from where its
   // GPS track crosses a user-drawn line, instead of trusting the file format's own
@@ -865,8 +875,27 @@
       handlePointEvent(eventData, false);
     });
 
+    // A click on one of the pinned-note markers (an annotation, not a data point --
+    // see notePinAnnotationsForOverlay) always opens that note, regardless of whether
+    // picking is currently armed. Plotly's own event for this is plotly_clickannotation,
+    // fired separately from plotly_click below.
+    plotDiv.on('plotly_clickannotation', (event) => {
+      const clicked = plotDiv.layout && Array.isArray(plotDiv.layout.annotations)
+        ? plotDiv.layout.annotations[event.index]
+        : null;
+      if (clicked && clicked._noteId && window.SessionsUI) window.SessionsUI.viewNote(clicked._noteId);
+    });
+
     // Mobile touch interaction primarily fires click events; keep marker linked on tap.
     plotDiv.on('plotly_click', (eventData) => {
+      const points = (eventData && Array.isArray(eventData.points)) ? eventData.points : [];
+
+      if (notePickMode === 'plot') {
+        const point = points.find((p) => getPointKey(p)) || points[0];
+        handlePlotNotePickClick(point, point ? getPointKey(point) : null);
+        return;
+      }
+
       handlePointEvent(eventData, true);
     });
 
@@ -976,7 +1005,7 @@
       suppressSelectionReentry = true;
       Plotly.relayout(plotDiv, {
         shapes: baseCornerShapesForOverlay,
-        annotations: baseCornerAnnotationsForOverlay
+        annotations: baseCornerAnnotationsForOverlay.concat(notePinAnnotationsForOverlay)
       }).then(() => { suppressSelectionReentry = false; });
     }
   }
@@ -1524,7 +1553,9 @@
     suppressSelectionReentry = true;
     Plotly.relayout(plotDiv, {
       shapes: baseCornerShapesForOverlay.concat(selectionFitShapes),
-      annotations: baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+      annotations: baseCornerAnnotationsForOverlay
+        .concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+        .concat(notePinAnnotationsForOverlay)
     }).then(() => { suppressSelectionReentry = false; });
   }
 
@@ -1778,14 +1809,6 @@
     lapColorOverrides.set(lapColorKey(fileId, lap), normalizeHexColor(color));
   }
 
-  // The racing-line synthetic log is always a single lap numbered 1, so this is exactly
-  // the color the laps list will show for it once added -- used to keep the map polyline
-  // and the curvature comparison trace visually matched to that sidebar entry, both
-  // during preview and after acceptance.
-  function getRacingLineDisplayColor() {
-    return colorForLap(1);
-  }
-
   function getLineDashForFileIndex(fileIdx) {
     return DASHES[fileIdx % DASHES.length];
   }
@@ -1864,6 +1887,14 @@
     return PLOTLY_THEME_TEMPLATES[getCurrentTheme()];
   }
 
+  // Same accent used for the pinned-note map marker and elsewhere in the sessions UI
+  // (badges, active buttons, the note-type pill) -- --accent-active-text's literal
+  // values, since a Plotly annotation's font.color needs an actual color, not a CSS
+  // custom property reference.
+  function getNoteMarkerAccentColor() {
+    return getCurrentTheme() === 'dark' ? '#cfe0f8' : '#12386b';
+  }
+
   function getBlankBasemapBackground() {
     return getCurrentTheme() === 'dark' ? BLANK_BASEMAP_BACKGROUND_DARK : BLANK_BASEMAP_BACKGROUND_LIGHT;
   }
@@ -1891,7 +1922,22 @@
     if (options.rerenderPlots !== false) {
       const template = getPlotlyThemeTemplate();
       if (plotDiv && Array.isArray(plotDiv.data) && plotDiv.data.length > 0) {
-        Plotly.relayout(plotDiv, {template});
+        // Pinned-note markers' font.color is baked in at build time (a template can't
+        // reach into individual annotation fields), so without this they'd keep the
+        // outgoing theme's colour until the next full updatePlot() render.
+        if (notePinAnnotationsForOverlay.length) {
+          notePinAnnotationsForOverlay = notePinAnnotationsForOverlay.map((a) => Object.assign({}, a, {
+            font: Object.assign({}, a.font, { color: getNoteMarkerAccentColor() })
+          }));
+          Plotly.relayout(plotDiv, {
+            template,
+            annotations: baseCornerAnnotationsForOverlay
+              .concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+              .concat(notePinAnnotationsForOverlay)
+          });
+        } else {
+          Plotly.relayout(plotDiv, {template});
+        }
       }
       if (mapDiv && Array.isArray(mapDiv.data) && mapDiv.data.length > 0) {
         Plotly.relayout(mapDiv, {template});
@@ -2953,6 +2999,13 @@
     renderLapsList();
     updatePlot();
     applySavedImporterConfigToLog(file.name, newLog.id);
+    // Re-checks for graph-pinned notes belonging to this (or any) newly-loaded file,
+    // rather than relying solely on the one-time startup call -- if that first call
+    // ever missed for any reason (a slow/cold IndexedDB open, say), a note's marker
+    // could otherwise stay missing for the rest of the page's life with no other
+    // trigger to retry it. Cheap (a couple of IndexedDB reads) and safe to call
+    // whenever a file shows up, which is exactly when a marker becomes relevant.
+    if (typeof refreshNoteMarkerCaches === 'function') refreshNoteMarkerCaches();
   }
 
   // If this file has a custom importer config (channel mapping, filters, downsample rate)
@@ -3071,6 +3124,40 @@
     }
   }
 
+  // Sessions row. Attaching is entirely opt-in: plotting a CSV never creates or
+  // requires a session, this button just lets the user file it against one later.
+  // Shared between a synthetic log's minimal row and a real file's fuller row.
+  function appendSessionRow(el, log) {
+    if (!(sessionsApi && window.SessionsUI)) return;
+    const sessionRow = document.createElement('div');
+    sessionRow.className = 'file-session-row';
+
+    const addToSessionBtn = document.createElement('button');
+    addToSessionBtn.type = 'button';
+    addToSessionBtn.className = 'file-add-to-session-btn';
+    addToSessionBtn.textContent = 'Add to Session';
+    addToSessionBtn.title = `Attach ${log.name} to a session`;
+    addToSessionBtn.addEventListener('click', () => {
+      // A synthetic log (e.g. a simulated racing line) was never "uploaded", so it has
+      // to be persisted as a stored file first -- a real log already was, back at load
+      // time -- otherwise openAddToSession can't find it by name to attach.
+      const ready = (log.meta && log.meta.synthetic)
+        ? persistSyntheticLogForSession(log)
+        : Promise.resolve();
+      ready.then(() => window.SessionsUI.openAddToSession([{ name: log.name }]));
+    });
+    sessionRow.appendChild(addToSessionBtn);
+
+    // Shows which sessions this file already belongs to, so the row reflects state
+    // rather than just offering an action.
+    const sessionBadges = document.createElement('span');
+    sessionBadges.className = 'file-session-badges';
+    sessionRow.appendChild(sessionBadges);
+    renderFileSessionBadges(log.name, sessionBadges);
+
+    el.appendChild(sessionRow);
+  }
+
   function renderFilesList() {
     filesList.innerHTML = '';
     logs.forEach((log, fileIdx) => {
@@ -3113,6 +3200,7 @@
         removeBtn.className = 'file-synthetic-remove-btn';
         el.appendChild(label);
         el.appendChild(removeBtn);
+        appendSessionRow(el, log);
         filesList.appendChild(el);
         return;
       }
@@ -3189,6 +3277,8 @@
       }
 
       el.appendChild(startFinishRow);
+
+      appendSessionRow(el, log);
 
       if (isEditingThis) {
         const editorPanel = document.createElement('div');
@@ -5275,214 +5365,11 @@
     return `T${num} (${CORNER_TYPE_LABELS[seg.type]})`;
   }
 
-  // Resets any in-progress whole-circuit fit preview and its map overlay -- called when
-  // the underlying data changes (file removed, "Clear All") so a stale preview referring
-  // to a log that may no longer exist doesn't linger.
-  function resetWholeCircuitFitState() {
-    wholeCircuitFitPreview = null;
-    if (racingLineDetails) racingLineDetails.open = false;
-    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-    if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = '';
-    renderWholeCircuitOverlay();
-  }
-
   function getRacingLineCalculationsApi() {
     return (typeof window !== 'undefined' && window.RacingLineCalculations)
       ? window.RacingLineCalculations
       : null;
   }
-
-  function normalizeFitWeight(value, fallback) {
-    const n = Number(value);
-    return Number.isFinite(n) && n >= 0 ? n : fallback;
-  }
-
-  // Per-corner gamma ("minimize curvature") overrides, keyed by corner index, in the
-  // reference log's lapRelDist coordinate frame -- converted to the fit's baseDist-
-  // relative frame in buildCornerWeightOverrides(). Global alpha/beta apply everywhere;
-  // gamma is 0 (off) everywhere except a corner the user has explicitly dialed in while
-  // reviewing, which is why changes to it are scoped to just that corner, not the lap.
-  function buildCornerWeightOverrides() {
-    if (!wholeCircuitFitPreview) return [];
-    const { cornerSegments, cornerGammaOverrides, fit } = wholeCircuitFitPreview;
-    if (!Array.isArray(cornerSegments) || !Array.isArray(cornerGammaOverrides) || !fit) return [];
-    const overrides = [];
-    cornerSegments.forEach((segment, i) => {
-      const gamma = cornerGammaOverrides[i];
-      if (!(gamma > 0)) return;
-      overrides.push({
-        startDist: Number(segment.startDist) - fit.baseDist,
-        endDist: Number(segment.endDist) - fit.baseDist,
-        gamma
-      });
-    });
-    return overrides;
-  }
-
-  function getRacingLineFitWeights() {
-    const beta = normalizeFitWeight(
-      racingLineBetaWeightInput ? racingLineBetaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.beta,
-      RACING_LINE_DEFAULT_WEIGHTS.beta
-    );
-    const alpha = normalizeFitWeight(
-      racingLineAlphaWeightInput ? racingLineAlphaWeightInput.value : RACING_LINE_DEFAULT_WEIGHTS.alpha,
-      RACING_LINE_DEFAULT_WEIGHTS.alpha
-    );
-    return { alpha, beta, cornerOverrides: buildCornerWeightOverrides() };
-  }
-
-  function updateRacingLineWeightLabels() {
-    const w = getRacingLineFitWeights();
-    if (racingLineBetaWeightValue) racingLineBetaWeightValue.textContent = w.beta.toFixed(1);
-    if (racingLineBetaWeightNumberInput) racingLineBetaWeightNumberInput.value = w.beta.toFixed(1);
-    if (racingLineAlphaWeightValue) racingLineAlphaWeightValue.textContent = w.alpha.toFixed(1);
-    if (racingLineAlphaWeightNumberInput) racingLineAlphaWeightNumberInput.value = w.alpha.toFixed(1);
-  }
-
-  // Shows/hides the per-corner gamma slider based on whether a corner is currently
-  // focused, and syncs its displayed value to that corner's stored override (0 if none).
-  function updateCornerGammaControl() {
-    if (!racingLineCornerGammaRow) return;
-    if (!wholeCircuitFitPreview || wholeCircuitFitPreview.currentCornerIndex < 0) {
-      racingLineCornerGammaRow.hidden = true;
-      return;
-    }
-    racingLineCornerGammaRow.hidden = false;
-    const { cornerGammaOverrides, currentCornerIndex } = wholeCircuitFitPreview;
-    const gamma = (Array.isArray(cornerGammaOverrides) && Number.isFinite(cornerGammaOverrides[currentCornerIndex]))
-      ? cornerGammaOverrides[currentCornerIndex]
-      : 0;
-    if (racingLineGammaWeightInput) racingLineGammaWeightInput.value = gamma;
-    if (racingLineGammaWeightNumberInput) racingLineGammaWeightNumberInput.value = gamma.toFixed(1);
-    if (racingLineGammaWeightValue) racingLineGammaWeightValue.textContent = gamma.toFixed(1);
-  }
-
-  // Curvature of the in-progress whole-circuit fit preview (before it's been accepted
-  // as a lap), sampled analytically -- unsmoothed, since the fit itself is already
-  // smooth -- across the whole lap so it can be overlaid against the logged
-  // Curvature/Curvature (Smoothed 35m) channels to judge fit quality while reviewing.
-  function buildWholeCircuitPreviewCurvatureSeries() {
-    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return null;
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.computePeriodicBSplineRadiusAtT !== 'function') return null;
-    const { fit } = wholeCircuitFitPreview;
-    const xArr = [];
-    const yArr = [];
-    (Array.isArray(fit.sampled) ? fit.sampled : []).forEach((pt) => {
-      const radius = calc.computePeriodicBSplineRadiusAtT(fit.control, pt.dist);
-      const curvature = (Number.isFinite(radius) && radius > 0) ? (1 / radius) : 0;
-      xArr.push(pt.dist + fit.baseDist);
-      yArr.push(curvature);
-    });
-    if (xArr.length === 0) return null;
-    return { x: xArr, y: yArr };
-  }
-
-  // Curvature of the accepted racing-line lap, read directly from its own precomputed
-  // (unsmoothed, analytic) Curvature column -- the after-Accept counterpart to
-  // buildWholeCircuitPreviewCurvatureSeries above.
-  function buildAcceptedRacingLineCurvatureSeries() {
-    const log = logs.find(l => l.meta && l.meta.racingLine);
-    if (!log || !Array.isArray(log.data) || !log.meta || !Array.isArray(log.meta.lapRelDist)) return null;
-    const xArr = [];
-    const yArr = [];
-    log.data.forEach((row, i) => {
-      const d = Number(log.meta.lapRelDist[i]);
-      const c = Number(row.Curvature);
-      if (!Number.isFinite(d) || !Number.isFinite(c)) return;
-      xArr.push(d);
-      yArr.push(c);
-    });
-    if (xArr.length === 0) return null;
-    return { x: xArr, y: yArr };
-  }
-
-  function getRacingLineGeoContext(selFiles) {
-    const trackDefaults = getSelectedGpBikesTrackDefaults(selFiles);
-    const manualOrigin = getManualMapOrigin();
-    const origin = manualOrigin
-      || (trackDefaults ? { originLat: trackDefaults.latitude, originLon: trackDefaults.longitude } : null)
-      || getFirstDerivedMapOrigin(selFiles);
-    const offsets = getMapOffsets();
-    return { origin, offsets };
-  }
-
-  function racingLinePointToLeafletLatLng(point, mode, geoCtx) {
-    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
-    if (mode === 'xy') return [point.y, point.x];
-    if (mode !== 'geo') return null;
-
-    if (!window.MapCoordinateUtils || typeof window.MapCoordinateUtils.localXYToLatLonMeters !== 'function') return null;
-    if (!geoCtx || !geoCtx.origin || !Number.isFinite(geoCtx.origin.originLat) || !Number.isFinite(geoCtx.origin.originLon)) return null;
-
-    const offsets = geoCtx.offsets || { x: 0, y: 0 };
-    const localX = point.x - (Number.isFinite(offsets.x) ? offsets.x : 0);
-    const localY = point.y - (Number.isFinite(offsets.y) ? offsets.y : 0);
-    const ll = window.MapCoordinateUtils.localXYToLatLonMeters(localX, localY, geoCtx.origin.originLat, geoCtx.origin.originLon);
-    if (!ll || !Number.isFinite(ll.lat) || !Number.isFinite(ll.lon)) return null;
-    return [ll.lat, ll.lon];
-  }
-
-  function clearWholeCircuitOverlay() {
-    if (!leafletMap || !Array.isArray(wholeCircuitLeafletLayers)) return;
-    wholeCircuitLeafletLayers.forEach((layer) => {
-      if (leafletMap.hasLayer(layer)) leafletMap.removeLayer(layer);
-    });
-    wholeCircuitLeafletLayers = [];
-  }
-
-  // Shows the in-progress whole-circuit fit preview: the fitted curve plus every
-  // control point (dimmed), with the control points near the corner currently being
-  // inspected highlighted -- lets the user step corner-by-corner and see exactly which
-  // control points are shaping that corner before accepting the fit.
-  function renderWholeCircuitOverlay(mode = leafletMapMode) {
-    clearWholeCircuitOverlay();
-    if (!leafletMap || !mode || (mode !== 'geo' && mode !== 'xy')) return;
-    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
-
-    const { fit, cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
-    const selFiles = getSelectedFiles();
-    const geoCtx = getRacingLineGeoContext(selFiles);
-
-    const curveLatLng = fit.sampled
-      .map(pt => racingLinePointToLeafletLatLng(pt, mode, geoCtx))
-      .filter(pt => Array.isArray(pt));
-    if (curveLatLng.length >= 2) {
-      const line = L.polyline(curveLatLng, {
-        color: getRacingLineDisplayColor(),
-        weight: 3,
-        opacity: 0.9
-      }).addTo(leafletMap);
-      wholeCircuitLeafletLayers.push(line);
-    }
-
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || !Array.isArray(fit.entries) || typeof calc.periodicEntryDistances !== 'function') return;
-    const entryDistances = calc.periodicEntryDistances(fit.entries);
-    const currentSegment = (Array.isArray(cornerSegments) && currentCornerIndex >= 0)
-      ? cornerSegments[currentCornerIndex]
-      : null;
-    const highlightPadM = 20;
-
-    fit.entries.forEach((entry, i) => {
-      const approxDist = entryDistances[i];
-      const latlng = racingLinePointToLeafletLatLng(entry.point, mode, geoCtx);
-      if (!Array.isArray(latlng)) return;
-      const isCurrent = !!(currentSegment
-        && approxDist >= (Number(currentSegment.startDist) - highlightPadM)
-        && approxDist <= (Number(currentSegment.endDist) + highlightPadM));
-      const marker = L.circleMarker(latlng, {
-        radius: isCurrent ? 7 : 3,
-        color: isCurrent ? '#c0392b' : '#8892a6',
-        weight: isCurrent ? 2 : 1,
-        fillColor: isCurrent ? '#ffb3a8' : '#c7cedb',
-        fillOpacity: isCurrent ? 0.95 : 0.6
-      }).bindTooltip(`Control point ${i} — click to remove`, { permanent: false, direction: 'top' }).addTo(leafletMap);
-      marker.on('click', () => removeWholeCircuitControlPoint(i));
-      wholeCircuitLeafletLayers.push(marker);
-    });
-  }
-
 
   // Builds a synthetic single-lap "log" from a whole-circuit fit so it can flow through
   // all the existing files-list / laps-list / map / Y-channel machinery unchanged. The
@@ -5645,31 +5532,51 @@
     });
   }
 
-  // Runs the quasi-steady-state lap simulation against the accepted racing-line lap's
-  // exact spline (retained in meta.splineControl at accept time) and writes the result
-  // in as new channels on that same log -- re-runnable any time the vehicle parameters
-  // change, without needing to re-fit or re-accept the racing line itself. Written under
-  // the same channel names real telemetry uses (Speed, LatAcc, LongAcc -- resolved via
-  // resolveChannelForLog so they line up correctly regardless of log format) rather than
-  // a separate "(Sim)" set, so the simulated lap plots, colors, and channel-selects
-  // exactly like any other lap and can be directly overlaid against a real one. Total
-  // Acceleration (calc) then comes for free from the existing LatAcc/LongAcc-driven
-  // calculation shared with real logs.
+  // Fits a whole-circuit racing line (fixed default weights -- no manual tuning UI
+  // anymore) to the currently selected lap, builds it into a synthetic single-lap "log"
+  // (replacing any previous one), and immediately runs the quasi-steady-state vehicle
+  // simulation on it. One button now does what used to be three steps (Fit Racing Line
+  // -> Accept & Add as Lap -> Simulate Vehicle). Written under the same channel names
+  // real telemetry uses (Speed, LatAcc, LongAcc -- resolved via resolveChannelForLog so
+  // they line up correctly regardless of log format) rather than a separate "(Sim)" set,
+  // so the simulated lap plots, colors, and channel-selects exactly like any other lap
+  // and can be directly overlaid against a real one. Total Acceleration (calc) then
+  // comes for free from the existing LatAcc/LongAcc-driven calculation shared with real
+  // logs. Re-runnable any time the vehicle parameters change -- fitting is fast enough
+  // that there's no need to cache/reuse the previous fit.
   function simulateVehicle() {
     const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.simulateVehicleSpeed !== 'function' || typeof calc.samplePeriodicBSpline !== 'function') {
+    if (!calc || typeof calc.buildWholeCircuitFit !== 'function' || typeof calc.simulateVehicleSpeed !== 'function' || typeof calc.samplePeriodicBSpline !== 'function') {
       if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation is unavailable (calculations module not loaded).';
       return;
     }
-    const log = logs.find(l => l.meta && l.meta.racingLine);
-    if (!log || !log.meta.splineControl) {
-      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Fit and accept a racing line first, then simulate the vehicle on it.';
+
+    const ref = getReferenceLapForCorners(getSelectedFiles(), getSelectedLaps());
+    if (!ref) {
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Select at least one lap with map data, then simulate.';
       return;
     }
 
-    const rep = log.meta.splineControl;
+    const fit = calc.buildWholeCircuitFit(
+      ref.log,
+      ref.lap,
+      RACING_LINE_DEFAULT_WEIGHTS,
+      {},
+      { resolveChannelForLog, computeWindowedAverage, getMapSourceForLog },
+      { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS }
+    );
+    if (!fit) {
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Could not fit a racing line to the selected lap (not enough logged map/radius data).';
+      return;
+    }
+
+    const log = buildRacingLineSyntheticLog({ fit, referenceLog: ref.log, referenceLap: ref.lap });
+    const existingIdx = logs.findIndex(l => l.meta && l.meta.racingLine);
+    if (existingIdx >= 0) logs.splice(existingIdx, 1, log);
+    else logs.push(log);
+
     const n = log.data.length;
-    const sampled = calc.samplePeriodicBSpline(rep, n);
+    const sampled = calc.samplePeriodicBSpline(log.meta.splineControl, n);
     const params = getVehicleSimParams();
 
     const referenceLog = log.meta.sourceLogId ? logs.find(l => l.id === log.meta.sourceLogId) : null;
@@ -5678,245 +5585,44 @@
       ? buildGradeDegForSampled(referenceLog, log.meta.sourceLap, log.meta.sourceBaseDist, sampled)
       : null;
 
-    const result = calc.simulateVehicleSpeed(rep, sampled, params, gradeDeg);
-    if (!result) {
-      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation failed on this racing line.';
-      return;
-    }
-
-    const speedCol = resolveChannelForLog('Speed', log);
-    const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, log);
-    const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, log);
-    [speedCol, latAccCol, longAccCol].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
-    for (let i = 0; i < n; i++) {
-      log.data[i][speedCol] = result.speed[i] * 3.6; // m/s -> km/h
-      log.data[i][longAccCol] = result.ax[i] / 9.81; // m/s^2 -> g
-      log.data[i][latAccCol] = result.ay[i] / 9.81;
-      log.data[i]['Lap Time'] = result.time[i];
-      log.meta.lapTime[i] = result.time[i];
-    }
-    // result.time[] deliberately excludes the final closing segment back to the
-    // start/finish line (see simulateVehicleSpeed's own doc comment), so the per-row max
-    // that getLapDuration() falls back to would under-report the lap by that last
-    // segment. Recording the true total here keeps the laps-list time in sync with the
-    // one shown below the Simulate Vehicle button. This synthetic log always has a
-    // single lap numbered 1.
-    if (!Array.isArray(log.meta.lapDurations)) log.meta.lapDurations = [];
-    log.meta.lapDurations[1] = result.lapTime;
-    if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
-    log.meta.units[speedCol] = 'km/h';
-    log.meta.units[latAccCol] = 'g';
-    log.meta.units[longAccCol] = 'g';
-    addCalculatedCommonChannels(log.data, log.cols, log.meta);
-
-    if (vehicleSimStatus) {
-      const gradeNote = !useElevation
-        ? ' Elevation/altitude effect disabled -- simulated as flat.'
-        : (result.usedGrade ? ' Track grade (Slope/Altitude) factored in.' : ' No Slope/Altitude data found on the source lap -- simulated as flat.');
-      vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
-        + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${gradeNote} `
-        + `${speedCol}, ${latAccCol}, ${longAccCol} added to the racing line lap.`;
-    }
-
-    populateYSelect();
-    renderLapsList();
-    updatePlot();
-  }
-
-  function startWholeCircuitFit() {
-    const selFiles = getSelectedFiles();
-    const selectedLaps = getSelectedLaps();
-    const ref = getReferenceLapForCorners(selFiles, selectedLaps);
-    if (!ref) {
-      wholeCircuitFitPreview = null;
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Unable to start fit: select at least one lap with map data.';
-      if (racingLineDetails) racingLineDetails.open = true;
-      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-      return;
-    }
-
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.buildWholeCircuitFit !== 'function') {
-      wholeCircuitFitPreview = null;
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fitting is unavailable (calculations module not loaded).';
-      if (racingLineDetails) racingLineDetails.open = true;
-      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-      return;
-    }
-
-    const weights = getRacingLineFitWeights();
-    const fitOptions = {};
-    const fit = calc.buildWholeCircuitFit(
-      ref.log,
-      ref.lap,
-      weights,
-      fitOptions,
-      { resolveChannelForLog, computeWindowedAverage, getMapSourceForLog },
-      { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS }
-    );
-
-    if (!fit) {
-      wholeCircuitFitPreview = null;
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Whole-circuit fit failed: not enough logged map/radius data on the selected lap.';
-      if (racingLineDetails) racingLineDetails.open = true;
-      if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-      return;
-    }
-
-    const swapLeftRight = !!(cornerSwapLRInput && cornerSwapLRInput.checked);
-    const cornerData = computeCornerSegments(ref.log, ref.lap, swapLeftRight);
-    const cornerSegments = (cornerData && Array.isArray(cornerData.segments))
-      ? cornerData.segments.filter(seg => seg.type === 'left' || seg.type === 'right')
-      : [];
-
-    wholeCircuitFitPreview = {
-      fit,
-      referenceLog: ref.log,
-      referenceLap: ref.lap,
-      cornerSegments,
-      currentCornerIndex: cornerSegments.length > 0 ? 0 : -1,
-      cornerGammaOverrides: new Array(cornerSegments.length).fill(0)
-    };
-    updateWholeCircuitStatusText();
-    if (racingLineDetails) racingLineDetails.open = true;
-    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = false;
-    // Auto-show the smoothed-curvature comparison so the fit quality is visible right away.
-    if (ySelect) {
-      const smoothedOption = Array.from(ySelect.options).find(o => o.value === CURVATURE_SMOOTHED_CHANNEL);
-      if (smoothedOption && !smoothedOption.selected) {
-        smoothedOption.selected = true;
-        renderSelectedChannelColorControls();
+    const result = calc.simulateVehicleSpeed(log.meta.splineControl, sampled, params, gradeDeg);
+    if (result) {
+      const speedCol = resolveChannelForLog('Speed', log);
+      const latAccCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, log);
+      const longAccCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, log);
+      [speedCol, latAccCol, longAccCol].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
+      for (let i = 0; i < n; i++) {
+        log.data[i][speedCol] = result.speed[i] * 3.6; // m/s -> km/h
+        log.data[i][longAccCol] = result.ax[i] / 9.81; // m/s^2 -> g
+        log.data[i][latAccCol] = result.ay[i] / 9.81;
+        log.data[i]['Lap Time'] = result.time[i];
+        log.meta.lapTime[i] = result.time[i];
       }
-    }
-    updatePlot();
-    if (cornerSegments.length > 0) {
-      focusWholeCircuitCorner(0);
-    } else {
-      updateCornerGammaControl();
-      renderWholeCircuitOverlay();
-    }
-  }
+      // result.time[] deliberately excludes the final closing segment back to the
+      // start/finish line (see simulateVehicleSpeed's own doc comment), so the per-row
+      // max that getLapDuration() falls back to would under-report the lap by that last
+      // segment. Recording the true total here keeps the laps-list time in sync with the
+      // one shown below the Simulate Vehicle button. This synthetic log always has a
+      // single lap numbered 1.
+      if (!Array.isArray(log.meta.lapDurations)) log.meta.lapDurations = [];
+      log.meta.lapDurations[1] = result.lapTime;
+      if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+      log.meta.units[speedCol] = 'km/h';
+      log.meta.units[latAccCol] = 'g';
+      log.meta.units[longAccCol] = 'g';
+      addCalculatedCommonChannels(log.data, log.cols, log.meta);
 
-  // Peak curvature within a corner's distance span, both for the fitted curve (sampled
-  // analytically) and for the logged data (using the precomputed smoothed-curvature
-  // channel) -- lets the user see directly whether the fit is under-shooting a tight
-  // corner (fit peak well below the logged peak) without needing to eyeball the plot.
-  function computeWholeCircuitCornerCurvaturePeaks(segment) {
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || !wholeCircuitFitPreview) return null;
-    const { fit, referenceLog, referenceLap } = wholeCircuitFitPreview;
-    if (!referenceLog || !referenceLog.meta || !Array.isArray(referenceLog.meta.lapNum) || !Array.isArray(referenceLog.meta.lapRelDist)) return null;
-
-    let loggedPeak = null;
-    for (let i = 0; i < referenceLog.meta.lapNum.length; i++) {
-      if (referenceLog.meta.lapNum[i] !== referenceLap) continue;
-      const d = Number(referenceLog.meta.lapRelDist[i]);
-      if (!Number.isFinite(d) || d < Number(segment.startDist) || d > Number(segment.endDist)) continue;
-      const v = Number(referenceLog.data[i][CURVATURE_SMOOTHED_CHANNEL]);
-      if (Number.isFinite(v) && (loggedPeak === null || v > loggedPeak)) loggedPeak = v;
-    }
-
-    let fittedPeak = null;
-    const startT = Number(segment.startDist) - fit.baseDist;
-    const endT = Number(segment.endDist) - fit.baseDist;
-    const steps = 24;
-    for (let s = 0; s <= steps; s++) {
-      const t = startT + (endT - startT) * (s / steps);
-      const radius = calc.computePeriodicBSplineRadiusAtT(fit.control, t);
-      if (Number.isFinite(radius) && radius > 0) {
-        const c = 1 / radius;
-        if (fittedPeak === null || c > fittedPeak) fittedPeak = c;
+      if (vehicleSimStatus) {
+        const gradeNote = !useElevation
+          ? ' Elevation/altitude effect disabled -- simulated as flat.'
+          : (result.usedGrade ? ' Track grade (Slope/Altitude) factored in.' : ' No Slope/Altitude data found on the source lap -- simulated as flat.');
+        vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
+          + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${gradeNote} `
+          + `${speedCol}, ${latAccCol}, ${longAccCol} added to the racing line lap.`;
       }
+    } else if (vehicleSimStatus) {
+      vehicleSimStatus.textContent = 'Racing line fitted, but the vehicle simulation failed on it.';
     }
-
-    return { loggedPeak, fittedPeak };
-  }
-
-  function updateWholeCircuitStatusText() {
-    if (!racingLineWholeCircuitStatus || !wholeCircuitFitPreview) return;
-    const { fit, cornerSegments, currentCornerIndex } = wholeCircuitFitPreview;
-    let cornerText = '';
-    if (Array.isArray(cornerSegments) && cornerSegments.length > 0 && currentCornerIndex >= 0) {
-      const segment = cornerSegments[currentCornerIndex];
-      cornerText = ` Viewing corner ${currentCornerIndex + 1}/${cornerSegments.length}` + (segment.number ? ` (Corner ${segment.number})` : '') + '.';
-      const peaks = computeWholeCircuitCornerCurvaturePeaks(segment);
-      if (peaks && Number.isFinite(peaks.loggedPeak) && Number.isFinite(peaks.fittedPeak)) {
-        const pct = peaks.loggedPeak > 1e-9 ? ((peaks.fittedPeak - peaks.loggedPeak) / peaks.loggedPeak * 100) : 0;
-        const flag = Math.abs(pct) > 15 ? ' — consider adding a control point here.' : '';
-        cornerText += ` Peak curvature: fit ${peaks.fittedPeak.toFixed(4)} vs logged ${peaks.loggedPeak.toFixed(4)} 1/m (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%).${flag}`;
-      }
-    }
-    racingLineWholeCircuitStatus.textContent = `Whole-circuit fit ready: ${fit.control.numControlPoints} control points, `
-      + `${fit.pointCount} source points, `
-      + `position RMSE ${fit.positionRmse.toFixed(2)} m over a ${fit.totalLapDistance.toFixed(0)} m lap.${cornerText} `
-      + `Accept to add it as a lap on the map, or discard and try again.`;
-  }
-
-  function focusWholeCircuitCorner(index) {
-    if (!wholeCircuitFitPreview || !Array.isArray(wholeCircuitFitPreview.cornerSegments)) return;
-    const total = wholeCircuitFitPreview.cornerSegments.length;
-    if (total === 0) return;
-    const clamped = Math.max(0, Math.min(total - 1, index));
-    wholeCircuitFitPreview.currentCornerIndex = clamped;
-    const segment = wholeCircuitFitPreview.cornerSegments[clamped];
-    if (segment) zoomToCornerHeadingSegment(segment);
-    updateWholeCircuitStatusText();
-    updateCornerGammaControl();
-    renderWholeCircuitOverlay();
-  }
-
-  function stepWholeCircuitCorner(delta) {
-    if (!wholeCircuitFitPreview) return;
-    focusWholeCircuitCorner(wholeCircuitFitPreview.currentCornerIndex + delta);
-  }
-
-  function refitWholeCircuitPreviewWithEntries(newEntries) {
-    if (!wholeCircuitFitPreview || !Array.isArray(newEntries)) return false;
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.refitWholeCircuitFromEntries !== 'function') return false;
-    const { fit, referenceLog, referenceLap } = wholeCircuitFitPreview;
-    const weights = getRacingLineFitWeights();
-    const fitOptions = {};
-    const refit = calc.refitWholeCircuitFromEntries(
-      referenceLog,
-      referenceLap,
-      newEntries,
-      fit.baseDist,
-      weights,
-      fitOptions,
-      { resolveChannelForLog, computeWindowedAverage, getMapSourceForLog },
-      { defaultWeights: RACING_LINE_DEFAULT_WEIGHTS }
-    );
-    if (!refit) return false;
-    wholeCircuitFitPreview.fit = refit;
-    updateWholeCircuitStatusText();
-    renderWholeCircuitOverlay();
-    updatePlot();
-    return true;
-  }
-
-  function removeWholeCircuitControlPoint(index) {
-    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
-    const calc = getRacingLineCalculationsApi();
-    if (!calc || typeof calc.removePeriodicControlPoint !== 'function') return;
-    const newEntries = calc.removePeriodicControlPoint(wholeCircuitFitPreview.fit.entries, index);
-    if (!newEntries) {
-      if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Could not remove that control point (already at the minimum count).';
-      return;
-    }
-    refitWholeCircuitPreviewWithEntries(newEntries);
-  }
-
-  function acceptWholeCircuitFit() {
-    if (!wholeCircuitFitPreview) return;
-    const newLog = buildRacingLineSyntheticLog(wholeCircuitFitPreview);
-    const existingIdx = logs.findIndex(l => l.meta && l.meta.racingLine);
-    if (existingIdx >= 0) logs.splice(existingIdx, 1, newLog);
-    else logs.push(newLog);
-
-    wholeCircuitFitPreview = null;
-    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-    if (racingLineDetails) racingLineDetails.open = false;
 
     renderFilesList();
     populateYSelect();
@@ -5926,13 +5632,38 @@
     updatePlot();
   }
 
-  function discardWholeCircuitFit() {
-    wholeCircuitFitPreview = null;
-    if (racingLineWholeCircuitStatus) racingLineWholeCircuitStatus.textContent = 'Fit discarded.';
-    if (racingLineWholeCircuitAcceptBtn) racingLineWholeCircuitAcceptBtn.disabled = true;
-    updateCornerGammaControl();
-    renderWholeCircuitOverlay();
-    updatePlot();
+  // Serializes a log's own data/cols (not whatever the UI currently has selected) into
+  // CSV text, so a synthetic in-memory log (like the simulated racing line) can be
+  // persisted as a stored file and attached to a session the same way any uploaded CSV
+  // would be.
+  function buildCsvTextForLog(log) {
+    const cols = Array.isArray(log.cols) ? log.cols.slice() : [];
+    // A synthetic log's own distance lives in meta.lapRelDist, not as a data column
+    // (the app reads it straight off meta for its own "Distance" X-axis mode). Without
+    // an explicit Distance column here, re-importing this CSV has nothing matching
+    // file-processors.js's distance-column detection, so it falls back to using the
+    // row index as "distance" -- a completely different scale from real meters. Adding
+    // it here makes a round trip through Stored Files/a session come back correct.
+    const distArr = log.meta && Array.isArray(log.meta.lapRelDist) ? log.meta.lapRelDist : null;
+    const hasDistanceCol = cols.some((c) => /dist|distance|odometer/i.test(c));
+    if (!hasDistanceCol && distArr) cols.push('Distance');
+    const lines = [cols.map(csvEscapeValue).join(',')];
+    log.data.forEach((row, i) => {
+      lines.push(cols.map((c) => {
+        const value = (c === 'Distance' && !hasDistanceCol && distArr) ? distArr[i] : row[c];
+        return csvEscapeValue(value);
+      }).join(','));
+    });
+    return lines.join('\n');
+  }
+
+  // Persists a synthetic in-memory log (e.g. the simulated racing line) as a stored
+  // file, upserted by name the same way a real upload is -- it was never "uploaded", so
+  // it has to be stored before a session can reference it (see FileService.storeFile /
+  // storeFileInDB), unlike a real log which was already stored back at load time.
+  function persistSyntheticLogForSession(log) {
+    const text = buildCsvTextForLog(log);
+    return storeFileInDB(log.name, text, computeFileHash(text), extractCsvFileMetadata(text));
   }
 
   // Linear interpolation over a sorted X array.
@@ -7052,7 +6783,9 @@
       ).addTo(leafletMap);
     }
 
-    L.control.zoom({ position: 'bottomleft' }).addTo(leafletMap);
+    // Zoom is already reachable via mouse wheel / two-finger pinch, so the +/- buttons
+    // are replaced with a full-screen toggle in the same corner instead.
+    buildFullscreenControl().addTo(leafletMap);
 
     leafletMap.on('moveend zoomend', () => {
       if (isApplyingLeafletProgrammaticView) return;
@@ -7078,6 +6811,340 @@
 
     // Ensure the map computes tile layout after the element has final dimensions.
     requestAnimationFrame(() => leafletMap.invalidateSize());
+  }
+
+  // ── Map full-screen mode + floating "add note" FAB ───────────────────────
+  // The map's own +/- zoom buttons (removed above -- mouse wheel / two-finger pinch
+  // already zoom) are replaced with a full-screen toggle. While full-screen, a floating
+  // action button arms "pin a note on the map" -- the Sessions panel itself is hidden
+  // behind the full-screen map, so picking a location opens a small floating note card
+  // on top of the map instead of the panel's own composer (see openFullscreenNoteCard
+  // and SessionsUI.quickCreateNoteAtLocation).
+
+  const FULLSCREEN_ENTER_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
+  const FULLSCREEN_EXIT_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>';
+
+  let leafletFullscreenBtn = null;
+  let mapFullscreenFab = null;
+  let mapFullscreenNoteCard = null;
+  let fabNotePickArmed = false;
+  let mapFullscreenIsNative = false; // true once the browser's own Fullscreen API is active
+
+  function nativeFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  // document.exitFullscreen/webkitExitFullscreen and requestFullscreen/webkitRequestFullscreen
+  // cover current evergreen browsers plus Safari, which still needs the -webkit- prefix.
+  function requestNativeFullscreen(target) {
+    const request = target.requestFullscreen || target.webkitRequestFullscreen;
+    if (!request) return Promise.reject(new Error('Fullscreen API not supported'));
+    return Promise.resolve(request.call(target));
+  }
+
+  function exitNativeFullscreen() {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (!exit) return Promise.resolve();
+    return Promise.resolve(exit.call(document));
+  }
+
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach((evtName) => {
+    document.addEventListener(evtName, () => {
+      const fsEl = nativeFullscreenElement();
+      if (fsEl === leafletMapDiv) {
+        applyMapFullscreenState(true, true);
+      } else if (mapFullscreenIsNative) {
+        // Native full-screen just ended -- Esc, the browser's own exit control, or
+        // another tab entering full-screen all land here, not just our own button.
+        applyMapFullscreenState(false, false);
+      }
+    });
+  });
+
+  function buildFullscreenControl() {
+    // Same corner the zoom buttons used to occupy. The attribution strip at the bottom
+    // can span nearly the map's full width at its default (fairly narrow) size, so this
+    // control gets an extra top margin (see .leaflet-map-fullscreen-control in
+    // style.css) lifting it clear of that strip instead of overlapping it.
+    const control = L.control({ position: 'bottomleft' });
+    control.onAdd = function () {
+      // A <div class="leaflet-control leaflet-bar"> containing an <a> matches Leaflet's
+      // own zoom/layers control markup exactly (including the leaflet-control class,
+      // which is what actually re-enables pointer-events over the otherwise
+      // pointer-events:none corner container -- omitting it left the button unclickable,
+      // with clicks falling through to whatever was underneath). This also picks up the
+      // dark-mode-aware .leaflet-bar overrides already in style.css for free.
+      const container = L.DomUtil.create('div', 'leaflet-control leaflet-bar leaflet-map-fullscreen-control');
+      const btn = L.DomUtil.create('a', 'leaflet-map-fullscreen-btn', container);
+      btn.href = '#';
+      btn.title = mapFullscreenActive ? 'Exit full-screen map' : 'Full-screen map';
+      btn.setAttribute('aria-label', 'Toggle full-screen map');
+      btn.innerHTML = mapFullscreenActive ? FULLSCREEN_EXIT_ICON_SVG : FULLSCREEN_ENTER_ICON_SVG;
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.on(btn, 'click', (e) => {
+        L.DomEvent.preventDefault(e);
+        setMapFullscreen(!mapFullscreenActive);
+      });
+      leafletFullscreenBtn = btn;
+      return container;
+    };
+    return control;
+  }
+
+  // The single source of truth for full-screen UI state, reached either directly (the
+  // CSS-only fallback, when the real Fullscreen API is unavailable or refuses the
+  // request) or reactively from the fullscreenchange listener above (the real API,
+  // including when the browser itself ends full-screen via Esc or its own exit control).
+  function applyMapFullscreenState(active, isNative) {
+    mapFullscreenActive = active;
+    mapFullscreenIsNative = !!isNative;
+    if (leafletMapDiv) {
+      leafletMapDiv.classList.toggle('map-fullscreen-active', active);
+      leafletMapDiv.classList.toggle('map-fullscreen-native', active && mapFullscreenIsNative);
+    }
+    // Real full-screen already isolates the page (nothing else is visible or scrollable
+    // regardless), so the body scroll-lock is only needed for the CSS-only fallback.
+    document.body.classList.toggle('map-fullscreen-open', active && !mapFullscreenIsNative);
+    if (leafletFullscreenBtn) {
+      leafletFullscreenBtn.innerHTML = active ? FULLSCREEN_EXIT_ICON_SVG : FULLSCREEN_ENTER_ICON_SVG;
+      leafletFullscreenBtn.title = active ? 'Exit full-screen map' : 'Full-screen map';
+    }
+    if (!active) {
+      disarmFabNotePick();
+      closeFullscreenNoteCard();
+    }
+    updateFullscreenFab();
+    // The container's size changes with the state above; Leaflet needs to recompute
+    // tile layout once that reflow/transition has actually happened.
+    requestAnimationFrame(() => { if (leafletMap) leafletMap.invalidateSize(); });
+  }
+
+  function setMapFullscreen(active) {
+    if (active) {
+      requestNativeFullscreen(leafletMapDiv).catch(() => {
+        // Not supported (or refused -- e.g. an embedding iframe without
+        // allow="fullscreen"): fall back to the CSS-only "maximize" overlay so the
+        // feature still basically works instead of silently doing nothing.
+        applyMapFullscreenState(true, false);
+      });
+      // The success path is handled by the fullscreenchange listener above, not here,
+      // so this stays correct even if the browser is slow to actually transition.
+    } else if (mapFullscreenIsNative) {
+      exitNativeFullscreen();
+    } else {
+      applyMapFullscreenState(false, false);
+    }
+  }
+
+  // Only needed for the CSS-only fallback -- real full-screen already exits on Esc by
+  // itself and reports it through the fullscreenchange listener above.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mapFullscreenActive && !mapFullscreenIsNative) setMapFullscreen(false);
+  });
+
+  function ensureFullscreenFab() {
+    if (mapFullscreenFab || !leafletMapDiv) return mapFullscreenFab;
+    const fab = document.createElement('button');
+    fab.type = 'button';
+    fab.className = 'map-fullscreen-fab';
+    fab.title = 'Add a note here';
+    fab.setAttribute('aria-label', 'Add a note on the map');
+    // Same glyph as the map/graph note markers and the Sessions panel's Add Note button.
+    fab.innerHTML = (window.SessionsModel && window.SessionsModel.NOTE_ICON_SVG) || '';
+    // The FAB lives inside #leafletMapDiv (so it stays fixed to the map in full-screen),
+    // but that means a click on it also bubbles up into Leaflet's own click handling on
+    // the map container -- without this, arming the pick and having Leaflet treat that
+    // very same click as the map location pick would happen in the same tick, using the
+    // FAB's own screen position as the "picked" spot.
+    L.DomEvent.disableClickPropagation(fab);
+    fab.addEventListener('click', () => {
+      if (fabNotePickArmed) disarmFabNotePick();
+      else armFabNotePick();
+    });
+    leafletMapDiv.appendChild(fab);
+    mapFullscreenFab = fab;
+    return fab;
+  }
+
+  function updateFullscreenFab() {
+    const fab = ensureFullscreenFab();
+    if (!fab) return;
+    fab.classList.toggle('is-visible', mapFullscreenActive);
+    fab.classList.toggle('is-armed', fabNotePickArmed);
+    fab.title = fabNotePickArmed ? 'Click a spot on the map… (click again to cancel)' : 'Add a note here';
+  }
+
+  function armFabNotePick() {
+    if (!leafletMap || leafletMapMode !== 'geo') {
+      window.alert('Switch the map to GPS/Lat-Lon mode (not the X/Y overlay) to pin a note by location.');
+      return;
+    }
+    closeFullscreenNoteCard();
+    fabNotePickArmed = true;
+    notePickPurpose = 'fab';
+    setNotePickMode('map');
+    updateFullscreenFab();
+  }
+
+  function disarmFabNotePick() {
+    if (!fabNotePickArmed) return;
+    fabNotePickArmed = false;
+    if (notePickPurpose === 'fab') setNotePickMode(null);
+    updateFullscreenFab();
+  }
+
+  // Object URLs for the fullscreen note card's own pending (not-yet-saved) photo
+  // thumbnails -- built straight from the local blob, not MediaService, since the photo
+  // isn't persisted to mediaIndex until the note itself is saved. Revoked whenever the
+  // card closes (Save, Cancel, or picking a new location) so they don't leak.
+  let fullscreenNoteCardObjectUrls = [];
+
+  function openFullscreenNoteCard(location) {
+    closeFullscreenNoteCard();
+    const card = document.createElement('div');
+    card.className = 'map-fullscreen-note-card';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'map-fullscreen-note-input';
+    textarea.rows = 3;
+    textarea.placeholder = 'Add a note…';
+
+    const mediaThumbs = document.createElement('div');
+    mediaThumbs.className = 'session-note-media-thumbs';
+
+    const mediaStatus = document.createElement('span');
+    mediaStatus.className = 'session-note-media-status';
+
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = 'image/*';
+    fileInput.hidden = true;
+
+    // Media picked before the note exists (there's nothing to attach it to yet) is held
+    // here and attached on Save, same pattern as the Sessions panel's own composer.
+    let pendingMedia = [];
+
+    function addPendingMedia(blob, filename) {
+      if (!sessionsApi || !sessionsApi.MediaService) return Promise.resolve();
+      return sessionsApi.MediaService.saveMediaBlob(blob, filename, blob.type).then((entry) => {
+        pendingMedia.push({ id: entry.id, type: 'photo', filename: entry.filename, mimeType: entry.mimeType });
+        const url = URL.createObjectURL(blob);
+        fullscreenNoteCardObjectUrls.push(url);
+        const img = document.createElement('img');
+        img.className = 'session-note-media-thumb';
+        img.src = url;
+        img.alt = filename || 'Photo';
+        img.addEventListener('click', () => window.open(url, '_blank'));
+        mediaThumbs.appendChild(img);
+        mediaStatus.textContent = pendingMedia.length + (pendingMedia.length === 1 ? ' photo attached' : ' photos attached');
+      });
+    }
+
+    fileInput.addEventListener('change', () => {
+      const picked = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (picked) addPendingMedia(picked, picked.name);
+    });
+
+    // Same "session-note-photo-btn"/"session-note-attach-btn" markup and classes the
+    // panel's own note composer uses (icon wrapped in .icon-btn-glyph), so these pick up
+    // identical styling for free instead of a parallel "map-fullscreen-note-*" copy.
+    const photoModel = window.SessionsModel;
+    function buildFullscreenPhotoIconButton(className, title, svg, onclick) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = className;
+      btn.title = title;
+      btn.setAttribute('aria-label', title);
+      const glyph = document.createElement('span');
+      glyph.className = 'icon-btn-glyph';
+      glyph.setAttribute('aria-hidden', 'true');
+      glyph.innerHTML = svg || '';
+      btn.appendChild(glyph);
+      btn.addEventListener('click', onclick);
+      return btn;
+    }
+
+    const takePhotoBtn = buildFullscreenPhotoIconButton('session-note-photo-btn', 'Take Photo', photoModel && photoModel.CAMERA_ICON_SVG, () => {
+      if (!sessionsApi || !sessionsApi.MediaService || !window.SessionsUI) return;
+      mediaStatus.textContent = 'Requesting camera…';
+      sessionsApi.MediaService.requestCamera({ video: true }).then((result) => {
+        if (!result.ok) {
+          mediaStatus.textContent = result.reason === 'denied'
+            ? 'Camera blocked — pick a file instead.'
+            : 'No camera available — pick a file instead.';
+          fileInput.click();
+          return null;
+        }
+        // While the browser's real Fullscreen API is active on the map, only that
+        // element's own subtree is ever painted -- hosting the capture preview inside
+        // it (rather than its default document.body) is what makes it actually visible
+        // instead of silently invisible until fullscreen exits.
+        const captureContainer = mapFullscreenIsNative ? leafletMapDiv : undefined;
+        return window.SessionsUI.captureFromStream(result.stream, captureContainer).then((blob) => {
+          sessionsApi.MediaService.stopCamera(result.stream);
+          if (blob) return addPendingMedia(blob, 'capture.png');
+          mediaStatus.textContent = 'Capture cancelled.';
+          return null;
+        });
+      });
+    });
+
+    const attachPhotoBtn = buildFullscreenPhotoIconButton('session-note-attach-btn', 'Attach Photo', photoModel && photoModel.PAPERCLIP_ICON_SVG, () => fileInput.click());
+
+    const photoActions = document.createElement('div');
+    photoActions.className = 'session-note-composer-row session-note-photo-actions';
+    photoActions.appendChild(takePhotoBtn);
+    photoActions.appendChild(attachPhotoBtn);
+    photoActions.appendChild(mediaStatus);
+
+    const actions = document.createElement('div');
+    actions.className = 'map-fullscreen-note-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'map-fullscreen-note-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => closeFullscreenNoteCard());
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'map-fullscreen-note-save';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => {
+      const content = textarea.value.trim();
+      if (!content && !pendingMedia.length) { closeFullscreenNoteCard(); return; }
+      saveBtn.disabled = true;
+      if (!window.SessionsUI) { closeFullscreenNoteCard(); return; }
+      window.SessionsUI.quickCreateNoteAtLocation(location, content, pendingMedia).then(() => {
+        closeFullscreenNoteCard();
+      }).catch((err) => {
+        closeFullscreenNoteCard();
+        window.alert((err && err.message) || 'Could not save note.');
+      });
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    card.appendChild(textarea);
+    card.appendChild(mediaThumbs);
+    card.appendChild(photoActions);
+    card.appendChild(fileInput);
+    card.appendChild(actions);
+    // Same reasoning as the FAB above: this card lives inside #leafletMapDiv, so clicks
+    // and drags inside it (typing, selecting text, hitting Save/Cancel) must not bubble
+    // into Leaflet's own map click/drag handling.
+    L.DomEvent.disableClickPropagation(card);
+    L.DomEvent.disableScrollPropagation(card);
+    leafletMapDiv.appendChild(card);
+    mapFullscreenNoteCard = card;
+    textarea.focus();
+  }
+
+  function closeFullscreenNoteCard() {
+    fullscreenNoteCardObjectUrls.forEach((url) => { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } });
+    fullscreenNoteCardObjectUrls = [];
+    if (mapFullscreenNoteCard) { mapFullscreenNoteCard.remove(); mapFullscreenNoteCard = null; }
   }
 
   function mapPlotlyDashToLeaflet(dash) {
@@ -7669,7 +7736,6 @@
   function clearLeafletMapPlot() {
     leafletHoverLookup = new Map();
     clearLeafletHoverMarker();
-    clearWholeCircuitOverlay();
     removeLeafletColorLegend();
     leafletViewState = null;
     leafletViewStateUserSet = false;
@@ -7943,7 +8009,7 @@
     leafletHoverLookup = nextLeafletHoverLookup;
     clearLeafletHoverMarker();
     updateLeafletColorLegend(mapColorEnabled ? mapColorChannel : '', effectiveMapColorScaleConfig, mapColorScaleConfig, mapColorMode);
-    renderWholeCircuitOverlay(mode);
+    renderMapNoteMarkers();
 
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
@@ -9230,7 +9296,9 @@
       layout.xaxis.autorange = false;
     }
 
-    layout.hovermode = hoverEnabled ? 'x' : false;
+    // Always on, regardless of the user's tooltip-visibility toggle -- see
+    // setHoverTooltipVisible for why hovermode itself can never be false here.
+    layout.hovermode = 'x';
     layout.hoverlabel = { namelength: -1 };
     layout.hoverdistance = 40;
 
@@ -9251,8 +9319,54 @@
       activeCornerHeadingSegments = [];
       if (cornerTrackInfoDiv) cornerTrackInfoDiv.textContent = '';
     }
+    // Pinned-note markers ("Pin on Graph" -- see setNotePickMode/handlePlotNotePickClick).
+    // Rendered as annotations just above the plot area rather than on any data trace, so
+    // a marker never depends on -- and is never hidden by -- which Y channels happen to
+    // be selected right now. Still scoped to: its file being currently loaded, its lap
+    // (if any) being selected, and having a known position for the CURRENT x-axis mode --
+    // time_value/distance_value (captured alongside x at pin time, see
+    // handlePlotNotePickClick) cover a straight Time<->Distance switch; a 'custom'
+    // channel axis only matches a note pinned on that exact same channel.
+    notePinAnnotationsForOverlay = plotNotesRaw.map((entry) => {
+      const loc = entry.note.location;
+      let positionX;
+      if (xMode === 'time') {
+        positionX = Number.isFinite(loc.time_value) ? loc.time_value
+          : (entry.x_axis === 'time' ? entry.x : undefined);
+      } else if (xMode === 'distance') {
+        positionX = Number.isFinite(loc.distance_value) ? loc.distance_value
+          : (entry.x_axis === 'distance' ? entry.x : undefined);
+      } else if (xMode === 'custom' && entry.x_axis === 'custom' && entry.x_channel === customXCol) {
+        positionX = entry.x;
+      }
+      return { entry, positionX };
+    }).filter(({ entry, positionX }) => {
+      if (!Number.isFinite(positionX)) return false;
+      const matchingLog = selFiles.find((l) => l.name === entry.fileName);
+      if (!matchingLog) return false;
+      if (entry.lap != null && !isLapSelected(selectedLaps, matchingLog.id, entry.lap)) return false;
+      return true;
+    }).map(({ entry, positionX }) => ({
+      x: positionX, xref: 'x',
+      y: built.mainDomainTop, yref: 'paper', yanchor: 'bottom',
+      // A plain glyph in the theme's own accent colour rather than a colour emoji, so
+      // this reads as part of the app rather than a generic sticker (see also
+      // .note-map-marker-icon, the equivalent marker on the track map).
+      text: '▼',
+      showarrow: false,
+      captureevents: true,
+      hovertext: noteHoverPreview(entry.note),
+      font: { size: 13, color: getNoteMarkerAccentColor() },
+      // Not a native Plotly field -- plotly_clickannotation's handler (see
+      // bindMainPlotHoverSync) reads this straight off plotDiv.layout.annotations[index]
+      // to know which note a click landed on.
+      _noteId: entry.note.id
+    }));
+
     layout.shapes = baseCornerShapesForOverlay.concat(selectionFitShapes);
-    layout.annotations = baseCornerAnnotationsForOverlay.concat(selectionFitBoxesVisible ? selectionFitAnnotations : []);
+    layout.annotations = baseCornerAnnotationsForOverlay
+      .concat(selectionFitBoxesVisible ? selectionFitAnnotations : [])
+      .concat(notePinAnnotationsForOverlay);
     mainPlotXAxisTitle = mainXTitle;
     mainPlotXAxisUnit = getXAxisUnit(xMode, customXCol);
     // Plotly.react takes a fresh layout object each call; without this, any re-render
@@ -9338,27 +9452,6 @@
       });
     });
 
-    // Overlay the race lap's own curvature (unsmoothed, since it's already a fitted
-    // curve) against whichever curvature channel is selected -- during review this is
-    // the live fit preview; once accepted, it's the racing-line lap's own data.
-    if (xMode === 'distance' && (ycols.includes('Curvature') || ycols.includes(CURVATURE_SMOOTHED_CHANNEL))) {
-      const raceLapSeries = wholeCircuitFitPreview
-        ? buildWholeCircuitPreviewCurvatureSeries()
-        : buildAcceptedRacingLineCurvatureSeries();
-      if (raceLapSeries) {
-        const axisChannel = ycols.includes(CURVATURE_SMOOTHED_CHANNEL) ? CURVATURE_SMOOTHED_CHANNEL : 'Curvature';
-        traces.push({
-          x: raceLapSeries.x,
-          y: raceLapSeries.y,
-          yaxis: channelToRef.get(axisChannel) || 'y',
-          name: wholeCircuitFitPreview ? 'Fitted Lap Curvature (preview)' : 'Race Lap Curvature',
-          mode: 'lines',
-          line: { color: getRacingLineDisplayColor(), width: 2 },
-          hovertemplate: buildHoverTemplate(mainXTitle, 'Race Lap Curvature [1/m]')
-        });
-      }
-    }
-
     if (binnedPlotEnabled && Number.isFinite(binnedPlotBinWidth) && binnedPlotBinWidth > 0) {
       traces.push(...computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, binnedPlotAxis, binnedPlotBinWidth, channelToRef));
     }
@@ -9421,6 +9514,7 @@
     ].join('|');
     layout.template = getPlotlyThemeTemplate();
     const plotReactDone = Plotly.react(plotDiv, traces.concat(tsPreview), layout, plotlyConfig);
+    setHoverTooltipVisible(plotDiv, hoverEnabled);
     bindMainPlotHoverSync();
     bindMainPlotRelayoutSync();
     bindMainPlotSelectionSync();
@@ -9509,98 +9603,19 @@
   if (cornerEditorMergeLeftBtn) cornerEditorMergeLeftBtn.addEventListener('click', () => mergeCornerEditorSelected('left'));
   if (cornerEditorMergeRightBtn) cornerEditorMergeRightBtn.addEventListener('click', () => mergeCornerEditorSelected('right'));
   if (cornerEditorResetBtn) cornerEditorResetBtn.addEventListener('click', () => resetCornerEditorToAutoDetected());
-  if (fitRacingLineBtn) {
-    fitRacingLineBtn.addEventListener('click', (event) => {
-      // The button lives inside a <summary>; without this the click would also
-      // toggle the <details> open/closed via the browser's default disclosure
-      // behavior, fighting with the open=true it's about to be set to below.
-      event.preventDefault();
-      startWholeCircuitFit();
-    });
-  }
-  if (racingLineWholeCircuitAcceptBtn) {
-    racingLineWholeCircuitAcceptBtn.addEventListener('click', () => {
-      acceptWholeCircuitFit();
-    });
-  }
   if (vehicleSimulateBtn) {
     vehicleSimulateBtn.addEventListener('click', (event) => {
-      // Same reasoning as the racing-line fit button: stop the click from also
-      // toggling the surrounding <details>, since this button is a pure action.
+      // The button lives inside a <summary>; without this the click would also toggle
+      // the <details> open/closed via the browser's default disclosure behavior.
       event.preventDefault();
       simulateVehicle();
     });
   }
-  // Toggling the elevation effect live-updates an already-simulated lap in place, rather
-  // than requiring the user to hit "Simulate Vehicle" again to see the effect of the change.
+  // Toggling the elevation effect re-fits and re-simulates in place, rather than
+  // requiring the user to hit "Simulate Vehicle" again to see the effect of the change.
   if (vehicleSimUseElevationInput) {
     vehicleSimUseElevationInput.addEventListener('change', () => {
-      const log = logs.find(l => l.meta && l.meta.racingLine);
-      if (log && log.meta.splineControl) simulateVehicle();
-    });
-  }
-  if (racingLineWholeCircuitDiscardBtn) {
-    racingLineWholeCircuitDiscardBtn.addEventListener('click', () => {
-      discardWholeCircuitFit();
-    });
-  }
-  if (racingLineWholeCircuitPrevCornerBtn) {
-    racingLineWholeCircuitPrevCornerBtn.addEventListener('click', () => {
-      stepWholeCircuitCorner(-1);
-    });
-  }
-  if (racingLineWholeCircuitNextCornerBtn) {
-    racingLineWholeCircuitNextCornerBtn.addEventListener('click', () => {
-      stepWholeCircuitCorner(1);
-    });
-  }
-  // Weight sliders re-fit the live preview in place (same control points, new weights)
-  // so tuning is immediately visible without losing any manual removal edits.
-  const onRacingLineWeightChanged = () => {
-    updateRacingLineWeightLabels();
-    if (!wholeCircuitFitPreview || !wholeCircuitFitPreview.fit) return;
-    refitWholeCircuitPreviewWithEntries(wholeCircuitFitPreview.fit.entries);
-  };
-
-  const bindSliderAndNumber = (slider, numeric, decimals = 1) => {
-    if (!slider || !numeric) return;
-    slider.addEventListener('input', () => {
-      const v = Number(slider.value);
-      numeric.value = Number.isFinite(v) ? v.toFixed(decimals) : slider.value;
-      onRacingLineWeightChanged();
-    });
-    numeric.addEventListener('input', () => {
-      const n = Number(numeric.value);
-      if (!Number.isFinite(n)) return;
-      slider.value = String(n);
-      onRacingLineWeightChanged();
-    });
-  };
-  bindSliderAndNumber(racingLineBetaWeightInput, racingLineBetaWeightNumberInput, 1);
-  bindSliderAndNumber(racingLineAlphaWeightInput, racingLineAlphaWeightNumberInput, 1);
-
-  // Gamma is stored per-corner (index into cornerGammaOverrides), not read back from the
-  // slider on every fit like alpha/beta -- so its handler writes the value into state
-  // itself before re-fitting, instead of going through the generic weight-changed path.
-  const onCornerGammaChanged = (value) => {
-    if (!wholeCircuitFitPreview || wholeCircuitFitPreview.currentCornerIndex < 0) return;
-    const gamma = Number.isFinite(value) ? Math.max(0, value) : 0;
-    wholeCircuitFitPreview.cornerGammaOverrides[wholeCircuitFitPreview.currentCornerIndex] = gamma;
-    if (racingLineGammaWeightValue) racingLineGammaWeightValue.textContent = gamma.toFixed(1);
-    if (!wholeCircuitFitPreview.fit) return;
-    refitWholeCircuitPreviewWithEntries(wholeCircuitFitPreview.fit.entries);
-  };
-  if (racingLineGammaWeightInput && racingLineGammaWeightNumberInput) {
-    racingLineGammaWeightInput.addEventListener('input', () => {
-      const v = Number(racingLineGammaWeightInput.value);
-      racingLineGammaWeightNumberInput.value = Number.isFinite(v) ? v.toFixed(1) : racingLineGammaWeightInput.value;
-      onCornerGammaChanged(v);
-    });
-    racingLineGammaWeightNumberInput.addEventListener('input', () => {
-      const n = Number(racingLineGammaWeightNumberInput.value);
-      if (!Number.isFinite(n)) return;
-      racingLineGammaWeightInput.value = String(n);
-      onCornerGammaChanged(n);
+      if (logs.some(l => l.meta && l.meta.racingLine)) simulateVehicle();
     });
   }
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
@@ -9786,7 +9801,6 @@
       if (idx>=0) {
         if (startFinishEditLogId === id) cancelStartFinishLineEdit();
         logs.splice(idx,1);
-        resetWholeCircuitFitState();
         mapOffsetManuallyAdjusted = false;
         lastAutoOffsetSignature = '';
         lastTrackDefaultSignature = '';
@@ -10046,7 +10060,6 @@
 
   clearBtn.addEventListener('click', ()=>{
     logs.length = 0;
-    resetWholeCircuitFitState();
     mapOffsetManuallyAdjusted = false;
     mapCenterManuallyAdjusted = false;
     showMapManuallyToggled = false;
@@ -10421,10 +10434,354 @@
   // ── Stored Files (IndexedDB) ──────────────────────────────────────────────
   // Uploaded files are persisted in IndexedDB so they survive page reloads.
   // On startup all stored entries are re-parsed automatically.
+  //
+  // The csvPlotterFiles database itself is owned by sessions-storage.js, which also
+  // carries its schema migration (v2 keyed by `name` -> v3 keyed by a UUID `id`, with
+  // the filename kept as a field). Opening the same database from two places at two
+  // versions would deadlock the upgrade, so everything below delegates rather than
+  // calling indexedDB.open directly. Stored records gained session-link fields
+  // (session_ids, vehicle_id, rider_id, setup_id, tags) at v3; the quick-plot path that
+  // writes them is otherwise unchanged.
 
-  const FILE_DB_NAME = 'csvPlotterFiles';
-  const FILE_DB_VERSION = 2;
-  const FILE_STORE = 'files';
+  const sessionsApi = (window.SessionsServices && window.SessionsStorage)
+    ? window.SessionsServices.createServices()
+    : null;
+  const sessionsFiles = sessionsApi ? sessionsApi.FileService : null;
+
+  // The sessions UI owns the Sessions panel and the Add to Session modal; app.js only
+  // tells it when session state changed so the stored-file lists can re-render.
+  if (sessionsApi && window.SessionsUI) {
+    window.SessionsUI.init({
+      services: sessionsApi,
+      onChanged: () => {
+        renderStoredFilesList();
+        renderPickerList();
+        // Also re-render the loaded-files list so each row's session badges reflect the
+        // attachment that just happened.
+        if (logs.length) renderFilesList();
+        refreshNoteMarkerCaches();
+      },
+      onPickModeChange: (kind) => {
+        // The Sessions panel's own "Pin on Graph"/"Pin on Map" buttons always mean the
+        // panel composer should receive the next pick, not the full-screen FAB's floating
+        // card -- even if the FAB happened to be armed a moment ago.
+        notePickPurpose = 'panel';
+        if (fabNotePickArmed) { fabNotePickArmed = false; updateFullscreenFab(); }
+        setNotePickMode(kind);
+      }
+    });
+    refreshNoteMarkerCaches();
+  }
+
+  // ── Author Name (User tab) ────────────────────────────────────────────────
+  // Names the device-local user notes are attributed to (there's no login system yet).
+  if (sessionsApi && authorNameInput) {
+    sessionsApi.UserService.ensureLocalUser().then((user) => {
+      authorNameInput.value = (user && user.name) || '';
+    }).catch(() => {});
+
+    let lastSavedAuthorName = null;
+    const saveAuthorName = () => {
+      const value = authorNameInput.value;
+      if (value === lastSavedAuthorName) return;
+      lastSavedAuthorName = value;
+      sessionsApi.UserService.setLocalUserName(value).then((user) => {
+        authorNameInput.value = user.name; // reflects the "This device" fallback if left blank
+        lastSavedAuthorName = user.name;
+        if (authorNameStatus) authorNameStatus.textContent = 'Saved.';
+        renderSessionsPanel(); // the note composer's author list shows this name
+      }).catch(() => {
+        if (authorNameStatus) authorNameStatus.textContent = 'Could not save that name.';
+      });
+    };
+    authorNameInput.addEventListener('blur', saveAuthorName);
+    authorNameInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); authorNameInput.blur(); }
+    });
+  }
+
+  function renderSessionsPanel() {
+    if (window.SessionsUI) window.SessionsUI.renderPanel();
+  }
+
+  // ── Pin-a-note-on-graph/map ──────────────────────────────────────────────
+  // "Pin on Graph"/"Pin on Map" in the Sessions panel arm one of these; the next click
+  // on the plot (native plotly_click) or the Leaflet map (a click handler attached only
+  // while armed, mirroring the start/finish-line editor's own attach/detach pattern)
+  // captures a location and hands it to SessionsUI.beginNoteAtLocation. Notes with a
+  // location are rendered back as markers below, independent of whether picking is armed.
+
+  let notePickMode = null; // 'plot' | 'map' | null
+  let notePickPurpose = 'panel'; // 'panel' (Sessions panel composer) | 'fab' (full-screen map FAB)
+  let noteMapPickHandler = null; // bound fn currently attached to leafletMap's click event
+
+  function setNotePickMode(kind) {
+    notePickMode = kind;
+    if (plotDiv) plotDiv.style.cursor = kind === 'plot' ? 'crosshair' : '';
+    if (leafletMapDiv) leafletMapDiv.style.cursor = kind === 'map' ? 'crosshair' : '';
+    if (kind === 'map') {
+      // Two "click the map to place something" modes at once would be confusing.
+      cancelStartFinishLineEdit();
+      attachNoteMapPickHandler();
+    } else {
+      detachNoteMapPickHandler();
+    }
+  }
+
+  function attachNoteMapPickHandler() {
+    if (!leafletMap) return;
+    detachNoteMapPickHandler();
+    noteMapPickHandler = (e) => handleMapNotePickClick(e);
+    // 'preclick' rather than 'click': the track itself is drawn as an interactive
+    // Leaflet path, and an interactive path consumes the click before it would reach a
+    // plain map 'click' listener -- which is exactly where a user pinning a note to a
+    // spot on the track is most likely to click. 'preclick' fires on the map first,
+    // before any layer gets a chance to swallow it, and carries the same e.latlng.
+    leafletMap.on('preclick', noteMapPickHandler);
+  }
+
+  function detachNoteMapPickHandler() {
+    if (leafletMap && noteMapPickHandler) leafletMap.off('preclick', noteMapPickHandler);
+    noteMapPickHandler = null;
+  }
+
+  function handleMapNotePickClick(e) {
+    const purpose = notePickPurpose;
+    setNotePickMode(null);
+    if (purpose === 'fab') {
+      fabNotePickArmed = false;
+      updateFullscreenFab();
+    }
+    if (leafletMapMode !== 'geo') {
+      const message = 'Switch the map to GPS/Lat-Lon mode (not the X/Y overlay) to pin a note by location.';
+      if (purpose === 'fab') window.alert(message);
+      else if (window.SessionsUI) window.SessionsUI.notifyPickCancelled('map', message);
+      return;
+    }
+    const location = { kind: 'map', lat: e.latlng.lat, lon: e.latlng.lng };
+    if (purpose === 'fab') {
+      openFullscreenNoteCard(location);
+    } else if (window.SessionsUI) {
+      window.SessionsUI.beginNoteAtLocation(location);
+    }
+  }
+
+  // Called from the main plot's plotly_click handler (see bindMainPlotHoverSync) with
+  // whichever point Plotly resolved the click to, and that point's row key (see rowKey),
+  // when picking is armed for the plot.
+  function handlePlotNotePickClick(point, key) {
+    setNotePickMode(null);
+    if (!point) {
+      if (window.SessionsUI) {
+        window.SessionsUI.notifyPickCancelled('plot', 'Click directly on a plotted line to pin a note there.');
+      }
+      return;
+    }
+    const parts = key ? String(key).split('|') : [];
+    const logId = parts[0];
+    const lap = parts.length > 1 ? Number(parts[1]) : null;
+    const rowIndex = parts.length > 2 ? Number(parts[2]) : NaN;
+    const log = logId ? logs.find((l) => l.id === logId) : null;
+    if (!log || !sessionsFiles) {
+      if (window.SessionsUI) {
+        window.SessionsUI.notifyPickCancelled('plot', 'Could not determine which file that point belongs to.');
+      }
+      return;
+    }
+
+    const trace = point.fullData || point.data || {};
+    const channel = trace.meta && trace.meta.channel;
+    const xValue = Number(point.x);
+    const yValue = Number(point.y);
+    const xMode = document.querySelector('input[name=xaxis]:checked').value;
+    const customXCol = xCustomSelect ? xCustomSelect.value : '';
+
+    if (!Number.isFinite(xValue)) {
+      if (window.SessionsUI) {
+        window.SessionsUI.notifyPickCancelled('plot', 'Could not read a position for that point.');
+      }
+      return;
+    }
+
+    sessionsFiles.getFileByName(log.name).then((record) => {
+      if (!record) {
+        if (window.SessionsUI) {
+          window.SessionsUI.notifyPickCancelled('plot', `"${log.name}" needs to be stored in this browser before you can pin a note to it.`);
+        }
+        return;
+      }
+      // Every row has both a time and a distance value regardless of which one is
+      // currently the x-axis -- capturing both here (via the same helper the plot itself
+      // uses to build its x-series) lets the marker keep its position after switching
+      // between Time and Distance, instead of only ever matching the mode it was pinned
+      // in. Not attempted for a 'custom' channel x-axis: there's no second axis to fall
+      // back to that's guaranteed to make sense.
+      let timeValue;
+      let distanceValue;
+      if (Number.isFinite(rowIndex) && log.meta) {
+        const timeSeries = getXSeriesForMode(log, [rowIndex], 'time', '');
+        const distanceSeries = getXSeriesForMode(log, [rowIndex], 'distance', '');
+        if (timeSeries && Number.isFinite(timeSeries[0])) timeValue = timeSeries[0];
+        if (distanceSeries && Number.isFinite(distanceSeries[0])) distanceValue = distanceSeries[0];
+      }
+
+      const location = {
+        kind: 'plot',
+        file_id: record.id,
+        file_name: log.name,
+        lap: Number.isFinite(lap) ? lap : undefined,
+        x: xValue,
+        x_axis: xMode,
+        x_channel: xMode === 'custom' ? customXCol : undefined,
+        time_value: timeValue,
+        distance_value: distanceValue,
+        channel: channel || undefined,
+        value: Number.isFinite(yValue) ? yValue : undefined
+      };
+      if (window.SessionsUI) window.SessionsUI.beginNoteAtLocation(location);
+    });
+  }
+
+  function noteHoverPreview(note) {
+    const text = String((note && note.content) || '').trim();
+    if (!text) return '(no content)';
+    // Both hover surfaces now wrap long text (.note-map-tooltip on the map, Plotly's own
+    // hoverlabel wrapping on the graph) instead of running off in one line, so this can
+    // afford to show more than a token-length snippet.
+    return text.length > 160 ? text.slice(0, 157) + '…' : text;
+  }
+
+  // Raw notes-with-a-location, refreshed from IndexedDB whenever session data changes
+  // (see the onChanged callback above). Per-render filtering against whichever files/
+  // laps/x-axis mode are currently displayed happens synchronously in updatePlot() and
+  // renderMapNoteMarkers(), so those stay cheap even though this refresh is async.
+  let plotNotesRaw = []; // [{ fileName, lap, x, x_axis, note }]
+  let mapNotesRaw = [];  // Note[] with location.kind === 'map'
+
+  function refreshNoteMarkerCaches() {
+    if (!sessionsApi) {
+      plotNotesRaw = [];
+      mapNotesRaw = [];
+      updatePlot();
+      renderMapNoteMarkers();
+      return Promise.resolve();
+    }
+    return sessionsApi.NoteService.listNotes().then((notes) => {
+      const plotNotes = (notes || []).filter((n) => (
+        n.location && n.location.kind === 'plot' && n.location.file_id && Number.isFinite(n.location.x)
+      ));
+      mapNotesRaw = (notes || []).filter((n) => (
+        n.location && n.location.kind === 'map' && Number.isFinite(n.location.lat) && Number.isFinite(n.location.lon)
+      ));
+
+      if (!plotNotes.length) {
+        plotNotesRaw = [];
+        updatePlot();
+        renderMapNoteMarkers();
+        return null;
+      }
+
+      // file_id is the persisted sessions File.id, not the transient in-memory log.id
+      // used for plotting -- resolve it back to a filename here (once, async) so
+      // updatePlot()'s per-render filter can match it against `logs` by name (sync).
+      const fileIds = Array.from(new Set(plotNotes.map((n) => n.location.file_id)));
+      return Promise.all(fileIds.map((id) => sessionsFiles.getFile(id))).then((files) => {
+        const nameById = new Map();
+        files.forEach((f, i) => { if (f) nameById.set(fileIds[i], f.name); });
+        plotNotesRaw = plotNotes.map((n) => ({
+          fileName: nameById.get(n.location.file_id) || null,
+          lap: n.location.lap,
+          x: n.location.x,
+          x_axis: n.location.x_axis,
+          x_channel: n.location.x_channel,
+          note: n
+        })).filter((entry) => entry.fileName);
+        updatePlot();
+        renderMapNoteMarkers();
+      });
+    }).catch((err) => {
+      // Left visible (rather than swallowed) so a persistent failure here -- which
+      // would otherwise look like "my pinned note just never comes back" -- shows up
+      // as something diagnosable in devtools instead of failing completely silently.
+      console.error('Could not refresh note markers:', err);
+    });
+  }
+
+  // Leaflet markers for map-pinned notes. Rebuilt on every updateLeafletMap() call and
+  // whenever the notes cache refreshes -- map notes aren't file-specific (a physical
+  // track location is a fact about the place, not about any one log), so unlike the
+  // plot markers they don't need to be re-filtered against the currently loaded files.
+  let leafletNoteMarkers = [];
+
+  function clearMapNoteMarkers() {
+    leafletNoteMarkers.forEach((marker) => {
+      if (leafletMap && leafletMap.hasLayer(marker)) leafletMap.removeLayer(marker);
+    });
+    leafletNoteMarkers = [];
+  }
+
+  function renderMapNoteMarkers() {
+    if (!leafletMap || !window.L) return;
+    clearMapNoteMarkers();
+    if (leafletMapMode !== 'geo' || !mapNotesRaw.length) return;
+    mapNotesRaw.forEach((note) => {
+      const icon = L.divIcon({
+        className: 'note-map-marker-icon',
+        // The same "note" glyph as the Add Note button and the graph marker (see
+        // sessions-model.js's NOTE_ICON_SVG) -- a plain stroked icon (fill:none,
+        // stroke:currentColor), not a colour emoji, so it inherits .note-map-marker-icon's
+        // CSS color (the same accent used for badges/active buttons elsewhere in the
+        // sessions UI) and matches both themes.
+        html: (window.SessionsModel && window.SessionsModel.NOTE_ICON_SVG) || '',
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      });
+      const marker = L.marker([note.location.lat, note.location.lon], { icon, keyboard: false });
+      // className: Leaflet's default tooltip CSS is white-space:nowrap, which either
+      // overflows or stretches very wide for anything longer than a few words -- see
+      // .note-map-tooltip for the override that lets a long note preview wrap instead.
+      marker.bindTooltip(noteHoverPreview(note), { direction: 'top', offset: [0, -14], className: 'note-map-tooltip' });
+      // Leaflet's own tooltip pane isn't sized to the map (it's auto-width, content-
+      // sized), so a CSS percentage width on .note-map-tooltip would have nothing real
+      // to resolve against -- this sets a max-width in real pixels, computed from the
+      // map's own current width, each time a tooltip actually opens (not once at build
+      // time, so it stays correct if the map gets resized afterward).
+      marker.on('tooltipopen', () => {
+        const tooltipEl = marker.getTooltip() && marker.getTooltip().getElement();
+        if (!tooltipEl || !leafletMapDiv) return;
+        const mapWidth = leafletMapDiv.clientWidth || 280;
+        tooltipEl.style.maxWidth = `${Math.max(160, Math.min(420, Math.round(mapWidth * 0.75)))}px`;
+      });
+      marker.on('click', (ev) => {
+        if (window.L && window.L.DomEvent) L.DomEvent.stopPropagation(ev);
+        if (window.SessionsUI) window.SessionsUI.viewNote(note.id);
+      });
+      marker.addTo(leafletMap);
+      leafletNoteMarkers.push(marker);
+    });
+  }
+
+  // Fills `target` with a badge per session the named file is attached to. Async and
+  // best-effort: the file row is already on screen, badges just arrive a tick later.
+  function renderFileSessionBadges(fileName, target) {
+    if (!sessionsApi || !target) return;
+    sessionsFiles.getFileByName(fileName).then((record) => {
+      const sessionIds = (record && record.session_ids) || [];
+      if (!sessionIds.length) return null;
+      return Promise.all(sessionIds.map((id) => sessionsApi.SessionService.getSession(id)))
+        .then((sessions) => {
+          target.textContent = '';
+          sessions.filter(Boolean).forEach((session) => {
+            const badge = document.createElement('span');
+            badge.className = 'file-session-badge';
+            badge.textContent = session.name;
+            badge.title = `Attached to "${session.name}"`;
+            target.appendChild(badge);
+          });
+          return null;
+        });
+    }).catch(() => { /* badges are cosmetic -- never break the file row over them */ });
+  }
 
   // Lightweight DJB2 hash of a string -- avoids crypto.subtle which requires a
   // secure context (HTTPS/localhost) not guaranteed in the ESP32 embedded build.
@@ -10463,21 +10820,6 @@
     return { track, rider, vehicle, date: meta.date || '', session: meta.session || '', event: meta.event || '' };
   }
 
-  function openFileDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(FILE_DB_NAME, FILE_DB_VERSION);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains(FILE_STORE)) {
-          db.createObjectStore(FILE_STORE, { keyPath: 'name' });
-        }
-        // v2 migration: no structural change needed (just adding new fields to records)
-      };
-      req.onsuccess = (e) => resolve(e.target.result);
-      req.onerror = (e) => reject(e.target.error);
-    });
-  }
-
   // Returns a promise that resolves to the stored entry if a file with the same
   // hash already exists (but different name), or null otherwise.
   function findDuplicateByHash(hash) {
@@ -10486,86 +10828,55 @@
     });
   }
 
+  // Upserts by filename: an existing record keeps its id and its session links, so
+  // re-opening a file never detaches it from the sessions it belongs to.
   function storeFileInDB(name, text, hash, fileMeta) {
-    const entry = {
+    if (!sessionsFiles) return Promise.resolve();
+    return sessionsFiles.storeFile(
       name,
       text,
-      storedAt: new Date().toISOString(),
-      hash: hash || computeFileHash(text),
-      fileMeta: fileMeta || extractCsvFileMetadata(text),
-    };
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readwrite');
-      tx.objectStore(FILE_STORE).put(entry);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    })).then(() => {
+      hash || computeFileHash(text),
+      fileMeta || extractCsvFileMetadata(text)
+    ).then(() => {
       renderStoredFilesList();
       renderPickerList();
     }).catch(() => { /* storage failure -- continue silently */ });
   }
 
-  function removeFileFromDB(name) {
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readwrite');
-      tx.objectStore(FILE_STORE).delete(name);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    })).then(() => {
+  // Takes a record id (not a filename): deleteFile also scrubs the file out of any
+  // session that listed it.
+  function removeFileFromDB(fileId) {
+    if (!sessionsFiles) return Promise.resolve();
+    return sessionsFiles.deleteFile(fileId).then(() => {
       renderStoredFilesList();
       renderPickerList();
     }).catch(() => {});
   }
 
   function getAllFilesFromDB() {
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readonly');
-      const req = tx.objectStore(FILE_STORE).getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = (e) => reject(e.target.error);
-    })).catch(() => []);
+    if (!sessionsFiles) return Promise.resolve([]);
+    return sessionsFiles.listFiles().catch(() => []);
   }
 
   function getFileEntryByName(name) {
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readonly');
-      const req = tx.objectStore(FILE_STORE).get(name);
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = (e) => reject(e.target.error);
-    })).catch(() => null);
+    if (!sessionsFiles) return Promise.resolve(null);
+    return sessionsFiles.getFileByName(name).then((entry) => entry || null).catch(() => null);
   }
 
   // Persists (or, when config is null, clears) the custom importer config -- channel
   // mapping, filters, downsample rate -- for a stored file, so it's reapplied
   // automatically the next time that file is loaded (see applySavedImporterConfigToLog).
   function saveImporterConfigForFile(name, decoderName, config) {
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readwrite');
-      const store = tx.objectStore(FILE_STORE);
-      const getReq = store.get(name);
-      getReq.onsuccess = () => {
-        const entry = getReq.result;
-        if (!entry) { resolve(); return; }
-        if (config) {
-          entry.importerConfig = { decoder: decoderName, channels: config.channels, filters: config.filters, downsampleHz: config.downsampleHz };
-        } else {
-          delete entry.importerConfig;
-        }
-        store.put(entry);
-      };
-      getReq.onerror = (e) => reject(e.target.error);
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    })).catch(() => {});
+    if (!sessionsFiles) return Promise.resolve();
+    return getFileEntryByName(name).then((entry) => {
+      if (!entry) return null;
+      return sessionsFiles.saveImporterConfig(entry.id, decoderName, config);
+    }).catch(() => {});
   }
 
   function clearAllFilesFromDB() {
-    return openFileDB().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(FILE_STORE, 'readwrite');
-      tx.objectStore(FILE_STORE).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = (e) => reject(e.target.error);
-    })).then(() => {
+    if (!sessionsApi) return Promise.resolve();
+    return sessionsApi.storage.files.clear().then(() => {
       renderStoredFilesList();
       renderPickerList();
     }).catch(() => {});
@@ -10612,7 +10923,7 @@
         removeBtn.textContent = '✕';
         removeBtn.title = 'Remove from browser storage';
         removeBtn.addEventListener('click', () => {
-          removeFileFromDB(entry.name);
+          removeFileFromDB(entry.id);
           setStoredFilesStatus(`Removed "${entry.name}" from storage.`);
         });
         row.appendChild(nameSpan);
@@ -10638,10 +10949,25 @@
 
   // ── Pick Uploaded Data modal ──────────────────────────────────────────────
 
+  // 'files' (unchanged default), 'sessions', or 'events' -- picking one of the latter two
+  // loads every file linked to that session/event at once, instead of one CSV at a time.
+  let pickUploadedActiveTab = 'files';
+
+  function setPickUploadedTab(tab) {
+    pickUploadedActiveTab = tab;
+    pickUploadedTabButtons.forEach((btn) => {
+      const isActive = btn.dataset.pickTab === tab;
+      btn.classList.toggle('is-active', isActive);
+      btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+    if (pickUploadedFileControls) pickUploadedFileControls.hidden = tab !== 'files';
+    renderPickerList();
+  }
+
   function openPickerModal() {
     if (!pickUploadedModal) return;
     pickUploadedModal.hidden = false;
-    renderPickerList();
+    setPickUploadedTab('files');
     if (pickUploadedSearch) pickUploadedSearch.focus();
   }
 
@@ -10650,8 +10976,28 @@
     pickUploadedModal.hidden = true;
   }
 
+  // Loads every stored file behind the given File.id list into the plotter (skipping
+  // ones already loaded), the same way the per-file "Load" button in the Files tab does.
+  function loadStoredFileRecordsIntoPlotter(fileIds) {
+    if (!sessionsFiles || !fileIds || !fileIds.length) return Promise.resolve(0);
+    const alreadyLoaded = new Set(logs.map((l) => l.name));
+    return Promise.all(fileIds.map((id) => sessionsFiles.getFile(id))).then((records) => {
+      let loadedCount = 0;
+      records.forEach((record) => {
+        if (!record || !record.text || alreadyLoaded.has(record.name)) return;
+        const blob = new Blob([record.text], { type: 'text/plain' });
+        const file = new File([blob], record.name, { type: 'text/plain' });
+        parseFile(file, /* skipStore */ true);
+        loadedCount += 1;
+      });
+      return loadedCount;
+    });
+  }
+
   function renderPickerList() {
     if (!pickUploadedList) return;
+    if (pickUploadedActiveTab === 'sessions') { renderPickerSessionsList(); return; }
+    if (pickUploadedActiveTab === 'events') { renderPickerEventsList(); return; }
     const sortBy = pickUploadedSortSelect ? pickUploadedSortSelect.value : 'date';
     const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
 
@@ -10745,7 +11091,7 @@
         removeBtn.textContent = '✕';
         removeBtn.title = 'Remove from browser storage';
         removeBtn.addEventListener('click', () => {
-          removeFileFromDB(entry.name).then(() => renderPickerList());
+          removeFileFromDB(entry.id).then(() => renderPickerList());
         });
 
         actions.appendChild(loadBtn);
@@ -10756,6 +11102,100 @@
       });
     });
   }
+
+  // Builds one pick-uploaded-item row with a single "Load All Files" action, shared by
+  // the Sessions and Events tabs below.
+  function buildPickUploadedGroupItem(title, subtitle, fileIds) {
+    const item = document.createElement('div');
+    item.className = 'pick-uploaded-item';
+
+    const metaDiv = document.createElement('div');
+    metaDiv.className = 'pick-uploaded-item-meta';
+    const nameDiv = document.createElement('div');
+    nameDiv.className = 'pick-uploaded-item-name';
+    nameDiv.textContent = title;
+    nameDiv.title = title;
+    metaDiv.appendChild(nameDiv);
+    if (subtitle) {
+      const tagsDiv = document.createElement('div');
+      tagsDiv.className = 'pick-uploaded-item-tags';
+      tagsDiv.textContent = subtitle;
+      metaDiv.appendChild(tagsDiv);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'pick-uploaded-item-actions';
+    const loadBtn = document.createElement('button');
+    loadBtn.type = 'button';
+    loadBtn.className = 'pick-uploaded-item-load-btn';
+    loadBtn.textContent = fileIds.length === 1 ? 'Load File' : `Load All Files (${fileIds.length})`;
+    loadBtn.title = 'Load every file linked to this into the plotter';
+    loadBtn.disabled = fileIds.length === 0;
+    loadBtn.addEventListener('click', () => {
+      loadBtn.disabled = true;
+      loadStoredFileRecordsIntoPlotter(fileIds).then((loadedCount) => {
+        setStoredFilesStatus(
+          loadedCount ? `Loaded ${loadedCount} file(s).` : 'Those files are already loaded, or not stored in this browser.'
+        );
+        closePickerModal();
+      });
+    });
+    actions.appendChild(loadBtn);
+    item.appendChild(metaDiv);
+    item.appendChild(actions);
+    return item;
+  }
+
+  function renderPickerSessionsList() {
+    if (!pickUploadedList || !sessionsApi) return;
+    const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
+    sessionsApi.SessionService.listSessions().then((sessions) => {
+      pickUploadedList.innerHTML = '';
+      const filtered = filter
+        ? sessions.filter((s) => (s.name || '').toLowerCase().includes(filter) || (s.location || '').toLowerCase().includes(filter))
+        : sessions;
+      if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = sessions.length ? 'No sessions match that filter.' : 'No sessions yet -- use Add to Session on a file first.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+      filtered.forEach((session) => {
+        const when = session.start_time ? new Date(session.start_time).toLocaleDateString() : '';
+        const subtitle = [session.location, when ? `Started ${when}` : '', `${session.file_ids.length} file(s)`]
+          .filter(Boolean).join('  ·  ');
+        pickUploadedList.appendChild(buildPickUploadedGroupItem(session.name, subtitle, session.file_ids));
+      });
+    });
+  }
+
+  function renderPickerEventsList() {
+    if (!pickUploadedList || !sessionsApi) return;
+    const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
+    Promise.all([sessionsApi.EventService.listEvents(), sessionsApi.SessionService.listSessions()]).then(([events, sessions]) => {
+      pickUploadedList.innerHTML = '';
+      const filtered = filter ? events.filter((e) => (e.name || '').toLowerCase().includes(filter)) : events;
+      if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'pick-uploaded-empty';
+        empty.textContent = events.length ? 'No events match that filter.' : 'No events yet -- assign a session to one in the Sessions panel first.';
+        pickUploadedList.appendChild(empty);
+        return;
+      }
+      filtered.forEach((event) => {
+        const eventSessions = sessions.filter((s) => s.event_id === event.id);
+        const fileIds = Array.from(new Set(eventSessions.reduce((all, s) => all.concat(s.file_ids), [])));
+        const subtitle = [event.location, `${eventSessions.length} session(s)`, `${fileIds.length} file(s)`]
+          .filter(Boolean).join('  ·  ');
+        pickUploadedList.appendChild(buildPickUploadedGroupItem(event.name, subtitle, fileIds));
+      });
+    });
+  }
+
+  pickUploadedTabButtons.forEach((btn) => {
+    btn.addEventListener('click', () => setPickUploadedTab(btn.dataset.pickTab));
+  });
 
   if (pickUploadedDataBtn) {
     pickUploadedDataBtn.addEventListener('click', openPickerModal);
@@ -10778,7 +11218,16 @@
   }
 
   function downloadAllData() {
-    getAllFilesFromDB().then((entries) => {
+    // The sessions bundle (sessions, notes, vehicles, riders, setups, users, media refs)
+    // rides along inside the same manifest, so one Download All Data still captures
+    // everything. Bumped to version 3 for that key; v1/v2 backups still restore.
+    const sessionsBundlePromise = sessionsApi
+      ? sessionsApi.ExportService.exportAll(false).catch(() => null)
+      : Promise.resolve(null);
+
+    Promise.all([getAllFilesFromDB(), sessionsBundlePromise]).then((results) => {
+      const entries = results[0];
+      const sessionsBundle = results[1];
       const settings = {};
       SETTINGS_STORAGE_KEYS.forEach((key) => {
         const value = readSettingValue(key);
@@ -10790,12 +11239,15 @@
       // separate files inside the ZIP rather than being inlined in the JSON.
       const manifest = {
         app: 'csv-plotter-backup',
-        version: 2,
+        version: 3,
         plotterVersion,
         exportedAt: new Date().toISOString(),
-        files: entries.map(e => ({ name: e.name, storedAt: e.storedAt || '' })),
+        // `id` carries the stored record's UUID so session links survive the round trip
+        // even if the same filename is later reused for different content.
+        files: entries.map(e => ({ name: e.name, id: e.id || '', storedAt: e.storedAt || '' })),
         settings
       };
+      if (sessionsBundle) manifest.sessions = sessionsBundle;
 
       const zipEntries = [
         { name: 'manifest.json', data: JSON.stringify(manifest, null, 2) },
@@ -10828,6 +11280,19 @@
         });
       });
       Promise.all(storePromises).then(() => {
+        // Sessions are imported after the files are stored, so the bundle's file
+        // references resolve onto the records just written (matched by filename) instead
+        // of landing as metadata-only rows. Absent in v1/v2 backups, which skip this.
+        const sessionsBundle = parsed && parsed.sessions;
+        if (!sessionsApi || !sessionsBundle) return null;
+        return sessionsApi.ExportService
+          .importAll(sessionsBundle, { overwriteMatchingIds: true })
+          .then((result) => result)
+          .catch(() => null);
+      }).then((sessionsResult) => {
+        const sessionsSummary = (sessionsResult && sessionsResult.ok)
+          ? `, ${sessionsResult.counts.sessions || 0} session(s)`
+          : '';
         if (parsed && parsed.settings && typeof parsed.settings === 'object') {
           let applied = 0;
           SETTINGS_STORAGE_KEYS.forEach((key) => {
@@ -10835,13 +11300,14 @@
             try { if (writeSettingValue(key, parsed.settings[key])) applied += 1; } catch {}
           });
           if (applied > 0) {
-            setStoredFilesStatus(`Restored ${fileEntries.length} file(s) and ${applied} setting(s). Reloading...`);
+            setStoredFilesStatus(`Restored ${fileEntries.length} file(s)${sessionsSummary} and ${applied} setting(s). Reloading...`);
             setTimeout(() => location.reload(), 800);
             return;
           }
         }
-        setStoredFilesStatus(`Restored ${fileEntries.length} file(s).`);
+        setStoredFilesStatus(`Restored ${fileEntries.length} file(s)${sessionsSummary}.`);
         renderStoredFilesList();
+        if (typeof renderSessionsPanel === 'function') renderSessionsPanel();
       });
     }
 
@@ -10926,6 +11392,7 @@
   }
 
   renderStoredFilesList();
+  renderSessionsPanel();
 
   if (xCustomSelect) {
     const checkedMode = document.querySelector('input[name=xaxis]:checked');
@@ -10941,7 +11408,6 @@
   setMapDisplayMode('none');
   syncShowMapDefault(false);
   applyMapColumnLayout(false);
-  updateRacingLineWeightLabels();
 
   const PANEL7_FLAG_KEY = 'uiFlag7';
   const PANEL7_TARGET = 7;
