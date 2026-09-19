@@ -552,33 +552,47 @@
         type: 'text', class: 'session-modal-input', placeholder: 'Gear ratios, comma separated',
         value: Array.isArray(gearing.gear_ratios) ? gearing.gear_ratios.join(', ') : ''
       });
-      // Tyre size can be given either way; circumference (pi x diameter) is what's stored
-      // and what the simulator uses to turn road speed into wheel/engine RPM. Typing one
-      // fills in the other, so entering a diameter where a circumference was expected
-      // (which silently made the engine redline arrive at a third of the real speed) can't
-      // happen by accident.
-      const wheelDiaInput = numberField('Wheel diameter, m');
-      const wheelCircInput = numberField('Wheel circumference, m');
-      const roundTo = (n, places) => String(Math.round(n * Math.pow(10, places)) / Math.pow(10, places));
-      if (gearing.wheel_circumference_m != null) {
-        wheelCircInput.value = gearing.wheel_circumference_m;
-        wheelDiaInput.value = roundTo(Number(gearing.wheel_circumference_m) / Math.PI, 4);
+      // Tire size (e.g. 140/70R17) is what's entered; the overall diameter it implies is
+      // shown in mm so a wrong size is obvious. The simulator turns road speed into wheel/
+      // engine RPM from it (the model derives the circumference on save).
+      const tireSizeInput = el('input', {
+        type: 'text', class: 'session-modal-input', placeholder: 'Tire size, e.g. 140/70R17',
+        value: gearing.tire_size || ''
+      });
+      // Time off power per gear change. Blank = 0 (instant); the simulator only downshifts
+      // when the extra drive gained outweighs the down + up shift time.
+      const shiftTimeInput = numberField('Shift time, ms (e.g. 100)');
+      if (gearing.shift_time_ms != null) shiftTimeInput.value = gearing.shift_time_ms;
+      const tireDiameterEl = el('div', { class: 'session-modal-hint' });
+      function updateTireDiameter() {
+        const text = tireSizeInput.value.trim();
+        const parsed = text && Model && Model.parseTireSize ? Model.parseTireSize(text) : null;
+        if (parsed) {
+          tireDiameterEl.textContent = `Overall diameter: ${Math.round(parsed.diameter_mm)} mm`;
+        } else if (text) {
+          tireDiameterEl.textContent = 'Unrecognised tire size -- use width/aspect-rim, e.g. 140/70R17.';
+        } else if (gearing.wheel_circumference_m != null && Model && Model.wheelDiameterMm) {
+          tireDiameterEl.textContent = `Overall diameter: ${Math.round(Model.wheelDiameterMm(gearing))} mm (from stored wheel size)`;
+        } else {
+          tireDiameterEl.textContent = '';
+        }
       }
-      wheelDiaInput.addEventListener('input', () => {
-        const d = Number(wheelDiaInput.value);
-        wheelCircInput.value = wheelDiaInput.value !== '' && d > 0 ? roundTo(d * Math.PI, 4) : '';
-      });
-      wheelCircInput.addEventListener('input', () => {
-        const c = Number(wheelCircInput.value);
-        wheelDiaInput.value = wheelCircInput.value !== '' && c > 0 ? roundTo(c / Math.PI, 4) : '';
-      });
+      tireSizeInput.addEventListener('input', updateTireDiameter);
+      updateTireDiameter();
       const statusEl = el('div', { class: 'session-modal-status' });
 
       const saveBtn = el('button', {
         type: 'button', class: 'session-modal-save', text: isEdit ? 'Save Changes' : 'Add Vehicle',
         onclick: () => {
-          saveBtn.disabled = true;
           statusEl.textContent = '';
+          statusEl.classList.remove('is-error');
+          const tireText = tireSizeInput.value.trim();
+          if (tireText && Model && Model.parseTireSize && !Model.parseTireSize(tireText)) {
+            statusEl.textContent = 'Tire size not recognised -- use width/aspect-rim, e.g. 140/70R17.';
+            statusEl.classList.add('is-error');
+            return;
+          }
+          saveBtn.disabled = true;
           const payload = {
             type: typeSelect.value,
             make: makeInput.value.trim() || undefined,
@@ -592,7 +606,10 @@
               primary_ratio: readNumber(primaryRatioInput),
               final_ratio: readNumber(finalRatioInput),
               gear_ratios: gearRatiosInput.value.split(',').map((s) => s.trim()).filter(Boolean),
-              wheel_circumference_m: readNumber(wheelCircInput)
+              shift_time_ms: readNumber(shiftTimeInput),
+              tire_size: tireText || undefined,
+              // Legacy vehicles with no tire size keep their stored circumference.
+              wheel_circumference_m: tireText ? undefined : gearing.wheel_circumference_m
             }
           };
           const save = isEdit ? VehicleService.updateVehicle(v.id, payload) : VehicleService.createVehicle(payload);
@@ -623,7 +640,8 @@
           powerCurveInput,
           powerCurveChart,
           el('div', { class: 'session-modal-subheading', text: 'Gearing (optional)' }),
-          el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, wheelDiaInput, wheelCircInput]),
+          el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, tireSizeInput, shiftTimeInput]),
+          tireDiameterEl,
           statusEl,
           el('div', { class: 'session-modal-actions' }, [
             el('button', { type: 'button', class: 'session-modal-cancel', text: 'Cancel', onclick: () => overlay.remove() }),
@@ -1885,6 +1903,10 @@
     },
     openAddToSession(files) {
       return instance ? instance.openAddToSession(files) : Promise.resolve(null);
+    },
+    // The session currently selected in the Sessions panel (null if none).
+    getSelectedSessionId() {
+      return instance ? instance.getSelectedSessionId() : null;
     },
     renderPanel() {
       return instance ? instance.renderPanel() : Promise.resolve();

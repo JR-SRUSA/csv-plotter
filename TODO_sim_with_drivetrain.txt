@@ -5,3 +5,14 @@ I would also like to use the actual motor curve with gearing and tire size to de
 The simulate vehicle can use the CdA and mass from the combined bike/ rider as well. (We will need rider selection in the sim area as well.)
 
 Using the actual motor curve will allow us to generate syntheic RPM and Gear data for the simulation as well (please make those outputs)
+
+Added Required Lean angle, required lean angle rate, simulate by tire size
+
+I'd like every time we run a sim, for it to be added to the current active session (if there is one) with the vehicle and rider used for the sim. Also its not saving the sim data files as far as I can tell, even when added to the session. I'd also like to be able to rename the sim, and have a notes area where I can describe what the sim was for (optional).
+
+A couple of bugs on mobile: 
+    Clicking on the turn number in the graph doesn't zoom the map to that area.
+    In the drawer, the X/ close icon doesn't appear properly. 
+    The "Map Type" icon has disappeared from the map (both mobile and Desktop)
+
+When a new sim is added, the title formatting gets a bit messed up, it shows in a very tall skinny column, not like the other data. Sometimes on data load this seems to happen too.

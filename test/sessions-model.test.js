@@ -217,3 +217,67 @@ test('normalize on notes applies normalizeNoteLocation and drops an unresolvable
   const withoutEnoughInfo = Model.normalize('notes', { content: 'x', location: { kind: 'plot', x: 5 } });
   assert.equal('location' in withoutEnoughInfo, false);
 });
+
+// ── Tire size ──────────────────────────────────────────────────────────────
+
+test('parseTireSize computes the overall diameter as 2 x sidewall + rim, the R3 example being 627.8 mm', () => {
+  const t = Model.parseTireSize('140/70R17');
+  assert.equal(t.width_mm, 140);
+  assert.equal(t.aspect_pct, 70);
+  assert.equal(t.rim_in, 17);
+  // 140 x 0.70 x 2 + 17 x 25.4 = 196 + 431.8
+  assert.ok(Math.abs(t.diameter_mm - 627.8) < 1e-9);
+  assert.equal(t.label, '140/70R17');
+});
+
+test('parseTireSize accepts the usual ways of writing a size and normalises them', () => {
+  for (const written of ['140/70R17', '140/70 R17', '140/70-17', ' 140 / 70 r17 ', '140/70r17', '140/70R17 66H']) {
+    const t = Model.parseTireSize(written);
+    assert.ok(t, `should parse "${written}"`);
+    assert.equal(t.label, '140/70R17', `"${written}" normalises to the same size`);
+  }
+  assert.equal(Model.parseTireSize('190/55ZR17').label, '190/55R17');
+  assert.equal(Model.parseTireSize('190/55 ZR17 (75W)').rim_in, 17);
+  // A car tire uses the same scheme.
+  assert.ok(Math.abs(Model.parseTireSize('205/55R16').diameter_mm - (2 * 205 * 0.55 + 16 * 25.4)) < 1e-9);
+});
+
+test('parseTireSize rejects things that are not a plausible tire size', () => {
+  for (const bad of ['', 'abc', '140', '140/70', '140/70R', '1/70R17', '140/70R170', '140/70R5', '600/70R17', '140/10R17', null, undefined, 42]) {
+    assert.equal(Model.parseTireSize(bad), null, `"${bad}" should not parse`);
+  }
+});
+
+test('normalize derives the simulator circumference from a parseable tire size and stores the tidy label', () => {
+  const vehicle = Model.normalize('vehicles', { type: 'motorcycle', gearing: { final_ratio: 2.9, tire_size: '140/70 r17' } });
+  assert.equal(vehicle.gearing.tire_size, '140/70R17');
+  assert.ok(Math.abs(vehicle.gearing.wheel_circumference_m - Math.PI * 0.6278) < 1e-9);
+});
+
+test('a parseable tire size wins over a stale circumference; an unparseable one is dropped, keeping the circumference', () => {
+  const both = Model.normalize('vehicles', { type: 'x', gearing: { tire_size: '140/70R17', wheel_circumference_m: 0.59 } });
+  assert.ok(Math.abs(both.gearing.wheel_circumference_m - Math.PI * 0.6278) < 1e-9);
+
+  const junk = Model.normalize('vehicles', { type: 'x', gearing: { tire_size: 'big wheels', wheel_circumference_m: 1.9 } });
+  assert.equal('tire_size' in junk.gearing, false);
+  assert.equal(junk.gearing.wheel_circumference_m, 1.9);
+});
+
+test('a vehicle saved before tire sizes existed (circumference only) is unchanged', () => {
+  const old = Model.normalize('vehicles', { type: 'motorcycle', gearing: { final_ratio: 2.9, wheel_circumference_m: 1.9 } });
+  assert.deepEqual(old.gearing, { final_ratio: 2.9, wheel_circumference_m: 1.9 });
+});
+
+test('wheelDiameterMm reads the tire size, and falls back to circumference / pi for older records', () => {
+  assert.ok(Math.abs(Model.wheelDiameterMm({ tire_size: '140/70R17' }) - 627.8) < 1e-9);
+  assert.ok(Math.abs(Model.wheelDiameterMm({ wheel_circumference_m: Math.PI * 0.6 }) - 600) < 1e-9);
+  assert.equal(Model.wheelDiameterMm({}), null);
+  assert.equal(Model.wheelDiameterMm(undefined), null);
+});
+
+test('normalizeGearing keeps a positive shift time and drops blank/zero/invalid ones', () => {
+  const g = (shift) => Model.normalizeGearing({ final_ratio: 2.8, shift_time_ms: shift });
+  assert.equal(g(100).shift_time_ms, 100);
+  assert.equal(g('80').shift_time_ms, 80);
+  for (const bad of [0, '', null, -5, 'abc']) assert.equal('shift_time_ms' in g(bad), false);
+});

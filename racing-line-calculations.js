@@ -994,11 +994,14 @@
     }
     if (!Array.isArray(g.gear_ratios) || !g.gear_ratios.some((r) => Number(r) > 0)) problems.push('gear ratios');
     if (!(Number(g.final_ratio) > 0)) problems.push('a final drive ratio');
-    if (!(Number(g.wheel_circumference_m) > 0)) problems.push('a wheel circumference');
+    if (!(Number(g.wheel_circumference_m) > 0)) problems.push('a tire size');
     return problems;
   }
 
-  function buildEngineModel(engine) {
+  // `ctx` (optional): { massKg, dragDecel(v), accelCap } -- what's needed to weigh a
+  // downshift against the engine's shift time. Without it (or with no shift time) the
+  // gear is always simply the strongest one.
+  function buildEngineModel(engine, ctx) {
     if (!engine || describeEngineProblems(engine).length) return null;
     const curve = engine.powerCurve
       .filter((p) => p && Number.isFinite(p.rpm) && Number.isFinite(p.power_kw))
@@ -1040,7 +1043,16 @@
     // The gear giving the most wheel power at road speed v (m/s). Ties (e.g. launching, when
     // every gear is below the curve's first point) go to the lowest gear. Past the top
     // gear's redline nothing is valid: zero power, reported in top gear at redline.
-    function best(v) {
+    // A specific gear at road speed v, or null if it would over-rev.
+    function inGear(gear, v) {
+      const g = gears.find((x) => x.gear === gear);
+      if (!g) return null;
+      const rpm = rpmFor(v, g.ratio);
+      if (rpm > redlineRpm * (1 + 1e-9)) return null;
+      return { gear, rpm: Math.max(rpm, idleRpm), powerW: powerAtRpm(rpm) * efficiency };
+    }
+
+    function bestRaw(v) {
       let pick = null;
       for (const { gear, ratio } of gears) {
         const rpm = rpmFor(v, ratio);
@@ -1051,6 +1063,45 @@
       if (pick) return pick;
       const top = gears[gears.length - 1];
       return { gear: top.gear, rpm: redlineRpm, powerW: 0 };
+    }
+
+    // Shift time (s): time off power per gear change. 0 (the default) = instant.
+    const shiftS = Math.max(0, Number(g.shift_time_ms) || 0) / 1000;
+    const mass = ctx && Number(ctx.massKg) > 0 ? Number(ctx.massKg) : 0;
+    const dragDecel = ctx && typeof ctx.dragDecel === 'function' ? ctx.dragDecel : () => 0;
+    const accelCap = ctx && Number(ctx.accelCap) > 0 ? Number(ctx.accelCap) : Infinity;
+    const canWeighShifts = shiftS > 0 && mass > 0;
+
+    // Time saved, accelerating from v0, by running `low` instead of staying in `held`, for
+    // as long as `low` is the stronger of the two (past that, upshifting back is free of
+    // any benefit). Acceleration is drive-limited but capped at the traction limit, so a
+    // corner exit that is grip-limited anyway gains nothing from the extra gear.
+    function downshiftGain(held, low, v0) {
+      let gain = 0;
+      const dv = 0.5;
+      for (let v = v0; v < v0 + 60; v += dv) {
+        const vm = v + dv / 2;
+        const h = inGear(held, vm);
+        const l = inGear(low, vm);
+        if (!l || (h && l.powerW <= h.powerW)) break;
+        const aH = h ? Math.min(accelCap, h.powerW / (mass * vm) - dragDecel(vm)) : 0;
+        const aL = Math.min(accelCap, l.powerW / (mass * vm) - dragDecel(vm));
+        if (aL <= 0) break;
+        gain += dv * (1 / Math.max(0.05, aH) - 1 / aL);
+      }
+      return gain;
+    }
+
+    // The gear to be in at road speed v. Memoryless (the strongest gear) unless `held` -- the
+    // gear currently engaged -- is given and a shift time is set: then a *downshift* only
+    // happens if the time it saves beats the cost of going down and back up (two shifts of
+    // lost drive); otherwise the taller gear is kept. Upshifts always go through.
+    function best(v, held) {
+      const pick = bestRaw(v);
+      if (!canWeighShifts || held == null || pick.gear >= held) return pick;
+      const keep = inGear(held, v);
+      if (!keep) return pick;
+      return downshiftGain(held, pick.gear, v) > 2 * shiftS ? pick : keep;
     }
 
     // Fastest road speed the top gear allows before hitting the redline.
@@ -1117,7 +1168,15 @@
     };
     // Wheel power available at road speed v: the engine curve through the best gear when
     // an engine model was given, otherwise the one flat average-power figure.
-    const engine = buildEngineModel(params.engine);
+    const engine = buildEngineModel(params.engine, { massKg: mass, dragDecel, accelCap: aLongMax });
+    // The gear engaged as the lap is driven, so a downshift can be weighed against the
+    // shift time (see buildEngineModel). Carried from one point to the next in driving order.
+    let heldGear = null;
+    const drivePowerAt = (v) => {
+      const pick = engine.best(v, heldGear);
+      heldGear = pick.gear;
+      return pick.powerW;
+    };
     const wheelPowerAt = engine ? (v) => engine.best(v).powerW : () => powerW;
     const hasPower = engine ? true : powerW > 0;
 
@@ -1145,7 +1204,8 @@
         const prev = (i - 1 + n) % n;
         const aLatDemand = vFwd[prev] * vFwd[prev] * kappaAbs[prev];
         const aTraction = tractionAvail(aLatDemand);
-        const aPower = hasPower ? (wheelPowerAt(vFwd[prev]) / (mass * Math.max(1, vFwd[prev]))) : Infinity;
+        const pAvail = engine ? drivePowerAt(vFwd[prev]) : wheelPowerAt(vFwd[prev]);
+        const aPower = hasPower ? (pAvail / (mass * Math.max(1, vFwd[prev]))) : Infinity;
         const aEngine = Math.min(aTraction, aPower);
         const aNet = aEngine - dragDecel(vFwd[prev]) - gradeAccel(prev);
         const vReach = Math.sqrt(Math.max(0, vFwd[prev] * vFwd[prev] + 2 * aNet * ds[prev]));
@@ -1196,6 +1256,26 @@
     const vAvgClose = Math.max(0.5, (speed[n - 1] + speed[0]) / 2);
     const lapTime = acc + ds[n - 1] / vAvgClose;
 
+    // Lean angle a rider has to hold to balance that lateral acceleration: tan(lean) =
+    // a_lat / g, so lean = atan(a_lat[g]). Signed like ay (positive = right-hand turn).
+    // This is the lean of the bike + rider centre of mass; a rider hanging off the inside
+    // means the frame itself leans less than this.
+    const leanDeg = new Array(n);
+    for (let i = 0; i < n; i++) leanDeg[i] = Math.atan(ay[i] / GRAVITY_MS2) * 180 / Math.PI;
+
+    // How fast that lean angle has to change (deg/s): a central difference in time around
+    // each point, wrapped around the lap (the circuit is periodic, so the last point's
+    // "next" is the first point one lap later).
+    const leanRateDegS = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const prev = i === 0 ? n - 1 : i - 1;
+      const next = i === n - 1 ? 0 : i + 1;
+      const tPrev = i === 0 ? time[n - 1] - lapTime : time[prev];
+      const tNext = i === n - 1 ? lapTime : time[next];
+      const dt = tNext - tPrev;
+      leanRateDegS[i] = dt > 1e-9 ? (leanDeg[next] - leanDeg[prev]) / dt : 0;
+    }
+
     // Synthetic gear/RPM channels: the gear (and the engine RPM it implies) the best-gear
     // rule would have the rider in at each point's final speed. Only meaningful with an
     // engine model -- null otherwise, so callers know not to write the channels at all.
@@ -1206,8 +1286,13 @@
       gear = new Array(n);
       rpm = new Array(n);
       let atLimit = 0;
+      // Gear at each point of the final speed profile, in driving order with the engaged
+      // gear carried along (one warm-up lap so the start isn't a fresh state).
+      let held = null;
+      for (let i = 0; i < n; i++) held = engine.best(speed[i], held).gear;
       for (let i = 0; i < n; i++) {
-        const pick = engine.best(speed[i]);
+        const pick = engine.best(speed[i], held);
+        held = pick.gear;
         gear[i] = pick.gear;
         rpm[i] = pick.rpm;
         if (speed[i] >= engine.maxGearSpeed * 0.995) atLimit++;
@@ -1220,7 +1305,7 @@
     }
 
     return {
-      speed, ax, ay, time, lapTime, topSpeedFromPower, usedGrade: hasGrade,
+      speed, ax, ay, leanDeg, leanRateDegS, time, lapTime, topSpeedFromPower, usedGrade: hasGrade,
       gear, rpm, usedEngineModel: !!engine,
       revLimitedFraction, redlineSpeed: engine ? engine.maxGearSpeed : null
     };
