@@ -55,10 +55,10 @@ async function seed(page) {
       type: 'motorcycle', make: 'Test', model: 'NoGears', mass_kg: 180, cda_m2: 0.28,
       avg_power_kw: 35, power_curve: curve
     });
-    for (const [model, circumference] of [['R3Good', 1.85], ['R3DiameterTypo', 0.59]]) {
+    for (const [model, circumference, shiftMs] of [['R3Good', 1.85], ['R3DiameterTypo', 0.59], ['R3SlowShift', 1.85, 3000]]) {
       await api.VehicleService.createVehicle({
         type: 'motorcycle', make: 'Yamaha', model, mass_kg: 170, cda_m2: 0.3, avg_power_kw: 30,
-        power_curve: r3Curve, gearing: Object.assign({}, r3Gearing, { wheel_circumference_m: circumference })
+        power_curve: r3Curve, gearing: Object.assign({}, r3Gearing, { wheel_circumference_m: circumference }, shiftMs ? { shift_time_ms: shiftMs } : {})
       });
     }
     await api.RiderService.createRider({ name: 'Rider One', weight_kg: 75, cda_tucked_m2: 0.1 });
@@ -91,7 +91,7 @@ async function racingLineChannelValues(page, channel) {
   await selectYChannels(page, [channel]);
   return page.evaluate((ch) => {
     const pd = document.getElementById('plotDiv');
-    const trace = pd.data.find((t) => t.meta && t.meta.channel === ch && /^Racing Line/.test(t.name || ''));
+    const trace = pd.data.find((t) => t.meta && t.meta.channel === ch && /^(Racing Line|Sim )/.test(t.name || ''));
     return trace ? Array.from(trace.y).filter((v) => Number.isFinite(v)) : null;
   }, channel);
 }
@@ -183,15 +183,15 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     const hint = page.locator('#vehicleSimVehicleHint');
 
     await pickVehicle(page, 'R3Good');
-    await expect(hint).toContainText('Wheel: 1.850 m circumference (59 cm diameter)');
+    await expect(hint).toContainText('Wheel: 589 mm diameter');
     await expect(hint).toContainText('6 gears, primary 3.043, final 2.867');
     await expect(hint).not.toContainText('unusual wheel size');
 
-    // 0.59 m "circumference" is a 19 cm wheel -- obviously a diameter typed in the wrong field.
+    // A 188 mm wheel is obviously wrong for a motorcycle.
     await pickVehicle(page, 'R3DiameterTypo');
-    await expect(hint).toContainText('Wheel: 0.590 m circumference (19 cm diameter)');
+    await expect(hint).toContainText('Wheel: 188 mm diameter');
     await expect(hint).toContainText('unusual wheel size for a motorcycle');
-    await expect(hint).toContainText('circumference, not diameter');
+    await expect(hint).toContainText('check the tire size');
   });
 
   test('a diameter typed as the circumference caps the whole lap at the top-gear redline, and is called out', async ({ page }) => {
@@ -202,7 +202,7 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await simulate(page);
     const status = page.locator('#vehicleSimStatus');
     await expect(status).toContainText('WARNING: rev-limited in top gear at 6');
-    await expect(status).toContainText('circumference = pi x diameter');
+    await expect(status).toContainText('final drive and tire size');
 
     // The reported symptom: pinned at one speed (~68 km/h) in top gear, near redline RPM.
     const speed = await racingLineChannelValues(page, 'Speed');
@@ -211,6 +211,24 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     expect(gears.filter((g) => g === 6).length / gears.length).toBeGreaterThan(0.5);
     const rpm = await racingLineChannelValues(page, 'RPM');
     expect(Math.max(...rpm)).toBeGreaterThan(16000);
+  });
+
+  test('a long shift time makes the sim hold gears instead of downshifting for every corner', async ({ page }) => {
+    test.setTimeout(180000);
+    const changes = async (model) => {
+      await pickVehicle(page, model);
+      await simulate(page);
+      const gears = await racingLineChannelValues(page, 'Gear');
+      let n = 0;
+      for (let i = 1; i < gears.length; i++) if (gears[i] !== gears[i - 1]) n++;
+      return n;
+    };
+    await loadSampleFile(page, PITT_LAP);
+    await openSimPanel(page);
+    const instant = await changes('R3Good');
+    const slow = await changes('R3SlowShift');
+    expect(slow).toBeLessThan(instant);
+    await expect(page.locator('#vehicleSimVehicleHint')).toContainText('Shift time 3000 ms');
   });
 
   test('the same bike with the right wheel size is not rev-limited and lays down a plausible lap', async ({ page }) => {
@@ -284,28 +302,44 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await expect(page.locator('#vehicleSimVehicleSelect option:checked')).toContainText('Brand');
   });
 
-  test('the vehicle editor takes a wheel diameter or a circumference and keeps the two in step', async ({ page }) => {
+  test('the vehicle editor takes a tire size and shows the diameter in mm', async ({ page }) => {
     await loadSampleFile(page);
     await openSimPanel(page);
     await page.locator('#vehicleSimVehicleNewBtn').click();
-    const diameter = page.locator('.session-modal-dialog input[placeholder^="Wheel diameter"]');
-    const circumference = page.locator('.session-modal-dialog input[placeholder^="Wheel circumference"]');
+    const dialog = page.locator('.session-modal-dialog');
+    const tire = dialog.locator('input[placeholder^="Tire size"]');
 
-    await diameter.fill('0.6');
-    await expect(circumference).toHaveValue('1.885'); // pi x 0.6
-    await circumference.fill('2');
-    await expect(diameter).toHaveValue('0.6366'); // 2 / pi
-    await diameter.fill('');
-    await expect(circumference).toHaveValue('');
+    await tire.fill('140/70R17');
+    await expect(dialog).toContainText('Overall diameter: 628 mm'); // 2 x 140 x 0.7 + 17 x 25.4
+    await tire.fill('190/55ZR17');
+    await expect(dialog).toContainText('Overall diameter: 641 mm');
+    await tire.fill('nonsense');
+    await expect(dialog).toContainText('Unrecognised tire size');
+    await dialog.locator('input[placeholder^="Make"]').fill('Bad');
+    await dialog.locator('.session-modal-save').click();
+    await expect(dialog).toContainText('Tire size not recognised');
+    await expect(dialog).toBeVisible();
   });
 
-  test('a saved circumference shows its diameter when the vehicle is edited again', async ({ page }) => {
+  test('a legacy stored circumference shows its diameter in mm when the vehicle is edited again', async ({ page }) => {
     await loadSampleFile(page);
     await openSimPanel(page);
     await pickVehicle(page, 'Full');
     await page.locator('#vehicleSimVehicleEditBtn').click();
-    await expect(page.locator('.session-modal-dialog input[placeholder^="Wheel circumference"]')).toHaveValue('1.9');
-    await expect(page.locator('.session-modal-dialog input[placeholder^="Wheel diameter"]')).toHaveValue('0.6048'); // 1.9 / pi
+    await expect(page.locator('.session-modal-dialog')).toContainText('Overall diameter: 605 mm'); // 1.9 / pi
+  });
+
+  test('the simulated lap includes a Required Lean Angle channel equal to atan(lateral g)', async ({ page }) => {
+    test.setTimeout(120000);
+    await loadSampleFile(page, PITT_LAP);
+    await openSimPanel(page);
+    await pickVehicle(page, 'R3Good');
+    await simulate(page);
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle');
+    const lean = await racingLineChannelValues(page, 'Required Lean Angle');
+    expect(lean.length).toBeGreaterThan(10);
+    expect(Math.max(...lean.map(Math.abs))).toBeGreaterThan(20);
+    expect(Math.max(...lean.map(Math.abs))).toBeLessThan(65);
   });
 
   test('the rider editor works from the sim panel too', async ({ page }) => {

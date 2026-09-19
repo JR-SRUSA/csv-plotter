@@ -39,6 +39,9 @@
   const vehicleSimUseElevationInput = document.getElementById('vehicleSimUseElevation');
   const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
   const vehicleSimStatus = document.getElementById('vehicleSimStatus');
+  const vehicleSimNameInput = document.getElementById('vehicleSimName');
+  const vehicleSimNotesInput = document.getElementById('vehicleSimNotes');
+  const vehicleSimRenameBtn = document.getElementById('vehicleSimRenameBtn');
   const vehicleSimVehicleSelect = document.getElementById('vehicleSimVehicleSelect');
   const vehicleSimVehicleEditBtn = document.getElementById('vehicleSimVehicleEditBtn');
   const vehicleSimVehicleNewBtn = document.getElementById('vehicleSimVehicleNewBtn');
@@ -1770,33 +1773,56 @@
     plotDiv.__cornerStripZoomBound = true;
 
     // Clicking the color strip at the top zooms X and fits Y for that segment.
+    // Touch: Plotly's drag layer cancels the browser's synthesized click on a tap (so the
+    // click listener below never fires on a phone). A short, mostly stationary
+    // pointerdown/pointerup pair is treated as a tap instead; the click that follows a
+    // mouse/pen tap is ignored so a segment is never zoomed to twice.
+    let tapStart = null;
+    let lastTapHandledAt = 0;
+    plotDiv.addEventListener('pointerdown', (event) => {
+      tapStart = { x: event.clientX, y: event.clientY, t: Date.now(), id: event.pointerId };
+    });
+    plotDiv.addEventListener('pointerup', (event) => {
+      const start = tapStart;
+      tapStart = null;
+      if (!start || start.id !== event.pointerId) return;
+      if (Date.now() - start.t > 600) return;
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) return;
+      if (handleCornerStripPoint(event.clientX, event.clientY)) lastTapHandledAt = Date.now();
+    });
     plotDiv.addEventListener('click', (event) => {
-      if (!Array.isArray(activeCornerHeadingSegments) || activeCornerHeadingSegments.length === 0) return;
+      if (Date.now() - lastTapHandledAt < 700) return;
+      handleCornerStripPoint(event.clientX, event.clientY);
+    });
+
+    function handleCornerStripPoint(clientX, clientY) {
+      if (!Array.isArray(activeCornerHeadingSegments) || activeCornerHeadingSegments.length === 0) return false;
       const fullLayout = plotDiv._fullLayout;
-      if (!fullLayout || !fullLayout.xaxis || !fullLayout._size) return;
+      if (!fullLayout || !fullLayout.xaxis || !fullLayout._size) return false;
 
       const bounds = plotDiv.getBoundingClientRect();
       const size = fullLayout._size;
-      const pxFromLeft = event.clientX - bounds.left;
-      const pxFromTop = event.clientY - bounds.top;
+      const pxFromLeft = clientX - bounds.left;
+      const pxFromTop = clientY - bounds.top;
       const plotX0 = size.l;
       const plotX1 = size.l + size.w;
       const plotY0 = size.t;
       const plotY1 = size.t + size.h;
 
-      if (pxFromLeft < plotX0 || pxFromLeft > plotX1 || pxFromTop < plotY0 || pxFromTop > plotY1) return;
+      if (pxFromLeft < plotX0 || pxFromLeft > plotX1 || pxFromTop < plotY0 || pxFromTop > plotY1) return false;
 
       const paperY = 1 - ((pxFromTop - plotY0) / size.h);
-      if (paperY < CORNER_STRIP_DOMAIN[0] || paperY > CORNER_STRIP_DOMAIN[1]) return;
+      if (paperY < CORNER_STRIP_DOMAIN[0] || paperY > CORNER_STRIP_DOMAIN[1]) return false;
 
       const xPixels = pxFromLeft - fullLayout.xaxis._offset;
       const xValue = Number(fullLayout.xaxis.p2l(xPixels));
-      if (!Number.isFinite(xValue)) return;
+      if (!Number.isFinite(xValue)) return false;
 
       const segment = findCornerHeadingSegmentAtDistance(xValue);
-      if (!segment) return;
+      if (!segment) return false;
       zoomToCornerHeadingSegment(segment);
-    });
+      return true;
+    }
   }
 
   function colorForLap(lap) {
@@ -5531,26 +5557,28 @@
     };
   }
 
-  // Typical rolling-wheel diameters (m) by vehicle type, for a sanity check on the stored
-  // circumference. Only types with a narrow, well-known range are checked -- karts and
+  // Typical overall wheel diameters (mm) by vehicle type, for a sanity check on the stored
+  // wheel size. Only types with a narrow, well-known range are checked -- karts and
   // "other" vary too much to second-guess.
-  const SIM_WHEEL_DIAMETER_RANGE_M = { motorcycle: [0.4, 0.75], car: [0.5, 0.9] };
+  const SIM_WHEEL_DIAMETER_RANGE_MM = { motorcycle: [400, 750], car: [500, 900] };
 
   // Spells out the gearing numbers actually stored for the vehicle (so a wrong one is
-  // visible without opening the editor) and flags a wheel size that implies an implausible
-  // diameter -- the classic slip being a diameter typed into the circumference field.
+  // visible without opening the editor) and flags a wheel size outside the usual range
+  // for that type of vehicle.
   function describeSimGearing(vehicle, gearing) {
-    const circ = Number(gearing.wheel_circumference_m);
-    const diameter = circ / Math.PI;
+    const model = window.SessionsModel;
+    const diameterMm = model && typeof model.wheelDiameterMm === 'function'
+      ? model.wheelDiameterMm(gearing)
+      : (Number(gearing.wheel_circumference_m) / Math.PI) * 1000;
     const ratios = (gearing.gear_ratios || []).map(Number).filter((r) => r > 0);
-    let text = `Wheel: ${circ.toFixed(3)} m circumference (${(diameter * 100).toFixed(0)} cm diameter). `
+    let text = `Wheel: ${gearing.tire_size ? gearing.tire_size + ', ' : ''}${Math.round(diameterMm)} mm diameter. `
       + `${ratios.length} gears, primary ${Number(gearing.primary_ratio) > 0 ? Number(gearing.primary_ratio) : 1}, `
-      + `final ${Number(gearing.final_ratio)}.`;
-    const range = SIM_WHEEL_DIAMETER_RANGE_M[vehicle && vehicle.type];
-    if (range && (diameter < range[0] || diameter > range[1])) {
-      text += ` That is an unusual wheel size for a ${vehicle.type} (expected roughly `
-        + `${Math.round(range[0] * 100)}-${Math.round(range[1] * 100)} cm across) -- check that circumference, not `
-        + 'diameter, was entered.';
+      + `final ${Number(gearing.final_ratio)}.`
+      + (Number(gearing.shift_time_ms) > 0 ? ` Shift time ${Number(gearing.shift_time_ms)} ms.` : '');
+    const range = SIM_WHEEL_DIAMETER_RANGE_MM[vehicle && vehicle.type];
+    if (range && (diameterMm < range[0] || diameterMm > range[1])) {
+      text += ` That is an unusual wheel size for a ${vehicle.type} (expected roughly ${range[0]}-${range[1]} mm `
+        + 'across) -- check the tire size.';
     }
     return text;
   }
@@ -5730,7 +5758,7 @@
   // comes for free from the existing LatAcc/LongAcc-driven calculation shared with real
   // logs. Re-runnable any time the vehicle parameters change -- fitting is fast enough
   // that there's no need to cache/reuse the previous fit.
-  function simulateVehicle() {
+  function simulateVehicle(rerun) {
     const calc = getRacingLineCalculationsApi();
     if (!calc || typeof calc.buildWholeCircuitFit !== 'function' || typeof calc.simulateVehicleSpeed !== 'function' || typeof calc.samplePeriodicBSpline !== 'function') {
       if (vehicleSimStatus) vehicleSimStatus.textContent = 'Vehicle simulation is unavailable (calculations module not loaded).';
@@ -5814,6 +5842,19 @@
       // Engine-curve mode also yields which gear (and the engine RPM it implies) the
       // best-gear rule would use at every point -- written as ordinary channels.
       const extraChannels = [];
+      // Required lean angle = atan(lateral accel [g]), signed like the lateral accel.
+      if (result.leanDeg) {
+        if (!log.cols.includes('Required Lean Angle')) log.cols.push('Required Lean Angle');
+        for (let i = 0; i < n; i++) log.data[i]['Required Lean Angle'] = result.leanDeg[i];
+        log.meta.units['Required Lean Angle'] = 'deg';
+        extraChannels.push('Required Lean Angle');
+      }
+      if (result.leanRateDegS) {
+        if (!log.cols.includes('Required Lean Angle Rate')) log.cols.push('Required Lean Angle Rate');
+        for (let i = 0; i < n; i++) log.data[i]['Required Lean Angle Rate'] = result.leanRateDegS[i];
+        log.meta.units['Required Lean Angle Rate'] = 'deg/s';
+        extraChannels.push('Required Lean Angle Rate');
+      }
       if (result.gear && result.rpm) {
         ['Gear', 'RPM'].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
         for (let i = 0; i < n; i++) {
@@ -5839,7 +5880,7 @@
         if (result.usedEngineModel && result.revLimitedFraction > 0.2) {
           modelNote += ` WARNING: rev-limited in top gear at ${(result.redlineSpeed * 3.6).toFixed(0)} km/h for `
             + `${Math.round(result.revLimitedFraction * 100)}% of the lap -- check the vehicle's gear ratios, `
-            + 'final drive and wheel size (circumference = pi x diameter).';
+            + 'final drive and tire size.';
         }
         vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
           + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${modelNote}${gradeNote} `
@@ -5855,7 +5896,126 @@
     populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
+    if (result) saveSimulation(log, !!rerun);
   }
+
+  // ── Simulate Vehicle: saving each run ─────────────────────────────────────
+  // Every run is stored as a file (so it survives a reload and shows up under "Pick
+  // Uploaded Data"), tagged with the vehicle and rider it used, and attached to the
+  // session currently selected in the Sessions panel, if there is one. Stored files are
+  // keyed by name, so every run needs a unique name or it would silently overwrite the
+  // previous sim -- a name clash gets " (2)", " (3)"... The user can rename a sim and
+  // add notes afterwards (Save Name & Notes), which update the stored record in place.
+  let lastSim = null; // { logId, fileId, name } of the most recent run
+
+  function simFileName(text) {
+    const t = String(text || '').trim().replace(/\s+/g, ' ');
+    return /\.csv$/i.test(t) ? t : `${t}.csv`;
+  }
+
+  function simDisplayName(fileName) {
+    return String(fileName || '').replace(/\.csv$/i, '');
+  }
+
+  function defaultSimName(log, vehicle) {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const track = String(log.name || '').replace(/^Racing Line\s*—\s*/, '').replace(/\.csv$/i, '');
+    return ['Sim', track, vehicle ? describeSimVehicle(vehicle) : '', stamp].filter(Boolean).join(' — ');
+  }
+
+  // `ownName` is the sim's own current stored name (re-running or renaming in place),
+  // which doesn't count as a clash.
+  function uniqueSimFileName(base, ownName) {
+    return getAllFilesFromDB().then((entries) => {
+      const taken = new Set(entries.map((e) => e.name));
+      logs.forEach((l) => { if (!(l.meta && l.meta.racingLine)) taken.add(l.name); });
+      if (ownName) taken.delete(ownName);
+      if (!taken.has(base)) return base;
+      const stem = base.replace(/\.csv$/i, '');
+      for (let n = 2; ; n++) {
+        const candidate = `${stem} (${n}).csv`;
+        if (!taken.has(candidate)) return candidate;
+      }
+    });
+  }
+
+  function refreshAfterSimRename() {
+    renderFilesList();
+    renderLapsList();
+    renderStoredFilesList();
+    renderPickerList();
+    updatePlot();
+    if (window.SessionsUI) window.SessionsUI.renderPanel();
+  }
+
+  function saveSimulation(log, rerun) {
+    if (!sessionsFiles) return Promise.resolve();
+    const vehicle = selectedSimVehicle();
+    const rider = selectedSimRider();
+    const own = rerun && lastSim ? lastSim.name : null;
+    const typed = vehicleSimNameInput ? vehicleSimNameInput.value.trim() : '';
+    const desired = own || simFileName(typed || defaultSimName(log, vehicle));
+    const notes = vehicleSimNotesInput ? vehicleSimNotesInput.value.trim() : '';
+    let sessionName = '';
+
+    return uniqueSimFileName(desired, own).then((name) => {
+      log.name = name;
+      const text = buildCsvTextForLog(log);
+      return sessionsFiles.storeFile(name, text, computeFileHash(text), extractCsvFileMetadata(text));
+    }).then((record) => sessionsFiles.updateFileLinks(record.id, {
+      vehicle_id: vehicle ? vehicle.id : '',
+      rider_id: rider ? rider.id : '',
+      metadata: Object.assign({}, record.metadata, { simulated: true, notes })
+    })).then((record) => {
+      lastSim = { logId: log.id, fileId: record.id, name: record.name };
+      if (vehicleSimRenameBtn) vehicleSimRenameBtn.disabled = false;
+      const sessionId = window.SessionsUI && window.SessionsUI.getSelectedSessionId
+        ? window.SessionsUI.getSelectedSessionId() : null;
+      if (!sessionId) return record;
+      return sessionsApi.SessionService.getSession(sessionId).then((session) => {
+        if (!session) return record;
+        sessionName = session.name;
+        return sessionsApi.SessionService.addFileToSession(session.id, record.id).then(() => record);
+      });
+    }).then((record) => {
+      if (vehicleSimStatus) {
+        vehicleSimStatus.textContent += ` Saved as "${simDisplayName(record.name)}"`
+          + (sessionName ? ` and added to session "${sessionName}".` : '.');
+      }
+      refreshAfterSimRename();
+    }).catch((err) => {
+      console.error('Could not save the simulation:', err);
+      if (vehicleSimStatus) vehicleSimStatus.textContent += ' (Could not save this sim to storage.)';
+    });
+  }
+
+  // Renames the most recent sim and stores its notes.
+  function saveSimDetails() {
+    if (!lastSim || !sessionsFiles) return;
+    const typed = vehicleSimNameInput ? vehicleSimNameInput.value.trim() : '';
+    const notes = vehicleSimNotesInput ? vehicleSimNotesInput.value.trim() : '';
+    const desired = typed ? simFileName(typed) : lastSim.name;
+    uniqueSimFileName(desired, lastSim.name).then((name) => sessionsFiles.getFile(lastSim.fileId).then((record) => {
+      if (!record) throw new Error('The stored sim file no longer exists.');
+      return sessionsFiles.updateFileLinks(record.id, {
+        name,
+        metadata: Object.assign({}, record.metadata, { simulated: true, notes })
+      });
+    })).then((record) => {
+      const log = logs.find((l) => l.id === lastSim.logId);
+      if (log) log.name = record.name;
+      lastSim.name = record.name;
+      if (vehicleSimNameInput) vehicleSimNameInput.value = simDisplayName(record.name);
+      if (vehicleSimStatus) vehicleSimStatus.textContent = `Saved sim as "${simDisplayName(record.name)}".`;
+      refreshAfterSimRename();
+    }).catch((err) => {
+      console.error('Could not rename the simulation:', err);
+      if (vehicleSimStatus) vehicleSimStatus.textContent = 'Could not save the sim name/notes.';
+    });
+  }
+  if (vehicleSimRenameBtn) vehicleSimRenameBtn.addEventListener('click', saveSimDetails);
 
   // Serializes a log's own data/cols (not whatever the UI currently has selected) into
   // CSV text, so a synthetic in-memory log (like the simulated racing line) can be
@@ -9861,14 +10021,14 @@
       // The button lives inside a <summary>; without this the click would also toggle
       // the <details> open/closed via the browser's default disclosure behavior.
       event.preventDefault();
-      simulateVehicle();
+      simulateVehicle(false);
     });
   }
   // Toggling the elevation effect re-fits and re-simulates in place, rather than
   // requiring the user to hit "Simulate Vehicle" again to see the effect of the change.
   if (vehicleSimUseElevationInput) {
     vehicleSimUseElevationInput.addEventListener('change', () => {
-      if (logs.some(l => l.meta && l.meta.racingLine)) simulateVehicle();
+      if (logs.some(l => l.meta && l.meta.racingLine)) simulateVehicle(true);
     });
   }
 

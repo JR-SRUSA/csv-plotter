@@ -121,7 +121,9 @@ test.describe('sessions: notes with a location, CTA styling, add vehicle/rider',
     await dialog.locator('input[placeholder="Primary ratio"]').fill('2.1');
     await dialog.locator('input[placeholder="Final ratio"]').fill('2.9');
     await dialog.locator('input[placeholder="Gear ratios, comma separated"]').fill('2.5, 1.8, 1.4');
-    await dialog.locator('input[placeholder="Wheel circumference, m"]').fill('1.9');
+    await dialog.locator('input[placeholder="Tire size, e.g. 140/70R17"]').fill('140/70R17');
+    await expect(dialog).toContainText('Overall diameter: 628 mm');
+    await dialog.locator('input[placeholder="Shift time, ms (e.g. 100)"]').fill('100');
     await dialog.locator('.session-modal-save', { hasText: 'Add Vehicle' }).click();
 
     await expect(dialog).toBeHidden();
@@ -135,9 +137,9 @@ test.describe('sessions: notes with a location, CTA styling, add vehicle/rider',
     expect(vehicle.mass_kg).toBe(180);
     expect(vehicle.cda_m2).toBe(0.32);
     expect(vehicle.avg_power_kw).toBe(35);
-    expect(vehicle.gearing).toEqual({
-      primary_ratio: 2.1, final_ratio: 2.9, gear_ratios: [2.5, 1.8, 1.4], wheel_circumference_m: 1.9
-    });
+    expect(vehicle.gearing.tire_size).toBe('140/70R17');
+    expect(vehicle.gearing.wheel_circumference_m).toBeCloseTo(Math.PI * 0.6278, 4);
+    expect(vehicle.gearing).toMatchObject({ primary_ratio: 2.1, final_ratio: 2.9, gear_ratios: [2.5, 1.8, 1.4], shift_time_ms: 100 });
   });
 
   test('Add Vehicle accepts a power curve (kW) instead of an average, and charts it', async ({ page }) => {

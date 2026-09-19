@@ -68,11 +68,11 @@ test('describeEngineProblems names each missing piece and is empty when complete
   assert.ok(none.some((p) => /power curve/.test(p)));
   assert.ok(none.some((p) => /gear ratios/.test(p)));
   assert.ok(none.some((p) => /final drive/.test(p)));
-  assert.ok(none.some((p) => /wheel circumference/.test(p)));
+  assert.ok(none.some((p) => /tire size/.test(p)));
   const noTyre = Array.from(calc.describeEngineProblems({
     powerCurve: shapedCurve, gearing: Object.assign({}, GEARING, { wheel_circumference_m: 0 })
   }));
-  assert.deepStrictEqual(noTyre, ['a wheel circumference']);
+  assert.deepStrictEqual(noTyre, ['a tire size']);
 });
 
 test('the best gear only ever goes up with speed, stays under redline, and cuts out past top gear', () => {
@@ -233,4 +233,94 @@ test('a wheel diameter entered as the circumference pins the bike at the top-gea
   assert.ok(Array.from(wrong.gear).every((g) => g === 6));
   assert.ok(Array.from(wrong.rpm).every((r) => Math.abs(r - 12500) < 1));
   assert.ok(Math.abs(wrong.redlineSpeed - Math.max(...speeds)) < 0.5);
+});
+
+test('required lean angle is atan(lateral acceleration in g), signed like the lateral acceleration', () => {
+  const rep = circleRep(120, 40);
+  const sampled = sampleAt(rep, 160);
+  const res = calc.simulateVehicleSpeed(rep, sampled, Object.assign({ powerKw: 60 }, BASE), null);
+  assert.equal(res.leanDeg.length, 160);
+  for (let i = 0; i < 160; i++) {
+    const expected = (Math.atan(res.ay[i] / 9.81) * 180) / Math.PI;
+    assert.ok(Math.abs(res.leanDeg[i] - expected) < 1e-9, `lean at ${i} should be atan(ay/g)`);
+    assert.strictEqual(Math.sign(res.leanDeg[i]), Math.sign(res.ay[i]), 'same sign as lateral acceleration');
+  }
+});
+
+test('a lap held at the lateral-grip limit needs a lean of exactly atan(max lateral g)', () => {
+  // Plenty of power and a small circle, so cornering grip (1.5 g) is what limits speed
+  // everywhere -- which means lateral acceleration is 1.5 g at every point.
+  const rep = circleRep(120, 40);
+  const sampled = sampleAt(rep, 160);
+  const res = calc.simulateVehicleSpeed(rep, sampled, Object.assign({ powerKw: 400 }, BASE), null);
+  const expectedDeg = (Math.atan(BASE.maxLatG) * 180) / Math.PI; // 56.31 deg for 1.5 g
+  const mags = Array.from(res.leanDeg).map(Math.abs);
+  assert.ok(Math.max(...mags) - Math.min(...mags) < 0.5, 'constant around the circle');
+  const mean = mags.reduce((a, b) => a + b, 0) / mags.length;
+  assert.ok(Math.abs(mean - expectedDeg) < 0.5, `mean lean ${mean} vs ${expectedDeg}`);
+});
+
+test('lean angle rate is the time derivative of lean angle, and ~0 on a steady-state circle', () => {
+  const rep = circleRep(120, 40);
+  const sampled = sampleAt(rep, 160);
+  const res = calc.simulateVehicleSpeed(rep, sampled, Object.assign({ powerKw: 400 }, BASE), null);
+  assert.equal(res.leanRateDegS.length, 160);
+  assert.ok(Math.max(...Array.from(res.leanRateDegS).map(Math.abs)) < 1, 'steady lean has no lean rate');
+  // Interior points: central difference of lean over the elapsed time.
+  const i = 50;
+  const expected = (res.leanDeg[i + 1] - res.leanDeg[i - 1]) / (res.time[i + 1] - res.time[i - 1]);
+  assert.ok(Math.abs(res.leanRateDegS[i] - expected) < 1e-9);
+});
+
+test('the lean angle is produced in every power model, since it only depends on lateral acceleration', () => {
+  const rep = circleRep(120, 40);
+  const sampled = sampleAt(rep, 100);
+  const avg = calc.simulateVehicleSpeed(rep, sampled, Object.assign({ powerKw: 30 }, BASE), null);
+  const eng = calc.simulateVehicleSpeed(rep, sampled, Object.assign({
+    engine: { powerCurve: shapedCurve, gearing: GEARING, efficiency: 0.95 }
+  }, BASE), null);
+  assert.equal(avg.leanDeg.length, 100);
+  assert.equal(eng.leanDeg.length, 100);
+});
+
+test('shift time: a downshift only happens when it gains more than a down + up shift costs', () => {
+  const mk = (ms) => calc.buildEngineModel(
+    { powerCurve: shapedCurve, gearing: Object.assign({}, GEARING, { shift_time_ms: ms }), efficiency: 1 },
+    { massKg: 250, dragDecel: () => 0, accelCap: 20 }
+  );
+  const instant = mk(0);
+  // Find a speed where the strongest gear is well below the top gear.
+  let v = 8;
+  while (instant.best(v).gear >= instant.gearCount - 1 && v < 60) v += 1;
+  v = 12;
+  const lowGear = instant.best(v).gear;
+  const top = instant.gearCount;
+  assert.ok(lowGear < top, 'premise: best gear at low speed is below top gear');
+
+  // No shift time: always the strongest gear, even if a taller one is engaged.
+  assert.equal(instant.best(v, top).gear, lowGear);
+  // A huge shift time: the gain can never repay it, so the taller gear is kept.
+  assert.equal(mk(60000).best(v, top).gear, top);
+  // A negligible one: the downshift is worth it.
+  assert.equal(mk(0.001).best(v, top).gear, lowGear);
+  // Upshifts always go through, whatever the shift time.
+  assert.equal(mk(60000).best(v, 1).gear, lowGear);
+});
+
+test('shift time lengthens (never shortens) the simulated lap, and 0 leaves it unchanged', () => {
+  const rep = circleRep(120, 40);
+  const sampled = sampleAt(rep, 160);
+  const run = (shift) => calc.simulateVehicleSpeed(rep, sampled, Object.assign({
+    engine: {
+      powerCurve: shapedCurve,
+      gearing: shift === undefined ? GEARING : Object.assign({}, GEARING, { shift_time_ms: shift }),
+      efficiency: 0.95
+    }
+  }, BASE), null);
+  const none = run(undefined);
+  const zero = run(0);
+  const slow = run(400);
+  assert.equal(zero.lapTime, none.lapTime);
+  assert.ok(slow.lapTime >= none.lapTime - 1e-9);
+  assert.equal(slow.gear.length, 160);
 });

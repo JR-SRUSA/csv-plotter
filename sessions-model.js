@@ -125,7 +125,9 @@
    * @typedef {Object} Gearing
    * @property {number} [primary_ratio]
    * @property {number} [final_ratio]
+   * @property {number} [shift_time_ms] time off power per gear change; omitted = 0
    * @property {number[]} [gear_ratios]
+   * @property {string} [tire_size]            metric size like "140/70R17"; when it parses, wheel_circumference_m is derived from it
    * @property {number} [wheel_circumference_m]
    *
    * @typedef {Object} Vehicle
@@ -546,21 +548,64 @@
       .sort((a, b) => a.rpm - b.rpm);
   }
 
+  // Parses a metric tire size -- "140/70R17", "190/55 ZR17", "140/70-17", optionally
+  // followed by a load/speed rating ("140/70R17 66H") -- into its parts plus the overall
+  // diameter: 2 x sidewall (width x aspect ratio) + rim. Returns null when it isn't a
+  // plausible tire size, so callers can tell "not a size" from "a size".
+  function parseTireSize(text) {
+    const m = /^(\d{2,3})\s*\/\s*(\d{2,3})\s*[- ]?\s*(?:Z?R|-)?\s*(\d{2})(?:\D.*)?$/
+      .exec(String(text == null ? '' : text).trim().toUpperCase());
+    if (!m) return null;
+    const width = Number(m[1]);
+    const aspect = Number(m[2]);
+    const rim = Number(m[3]);
+    if (width < 50 || width > 400 || aspect < 20 || aspect > 100 || rim < 8 || rim > 24) return null;
+    return {
+      width_mm: width,
+      aspect_pct: aspect,
+      rim_in: rim,
+      diameter_mm: 2 * width * aspect / 100 + rim * 25.4,
+      label: `${width}/${aspect}R${rim}`
+    };
+  }
+
+  // Overall wheel diameter in mm for a gearing record: from its tire size when that parses,
+  // otherwise back-calculated from a stored circumference (older vehicles have only that).
+  function wheelDiameterMm(gearing) {
+    if (!gearing) return null;
+    const tire = parseTireSize(gearing.tire_size);
+    if (tire) return tire.diameter_mm;
+    const circ = Number(gearing.wheel_circumference_m);
+    return circ > 0 ? (circ / Math.PI) * 1000 : null;
+  }
+
   // Enough to translate an RPM (from a power curve) into road speed: gear ratios are
-  // optional per-gear multipliers on top of the fixed primary/final reduction.
+  // optional per-gear multipliers on top of the fixed primary/final reduction. The wheel
+  // is described by its tire size; wheel_circumference_m (what the simulator turns road
+  // speed into RPM with) is always derived from it when it parses, and only kept as
+  // given for older records that have a circumference and no tire size.
   function normalizeGearing(raw) {
     if (!raw || typeof raw !== 'object') return undefined;
     const gearing = {};
     const primary = toPositiveNumberOrUndefined(raw.primary_ratio);
     const final = toPositiveNumberOrUndefined(raw.final_ratio);
     const wheel = toPositiveNumberOrUndefined(raw.wheel_circumference_m);
+    const tire = parseTireSize(raw.tire_size);
     if (primary !== undefined) gearing.primary_ratio = primary;
     if (final !== undefined) gearing.final_ratio = final;
-    if (wheel !== undefined) gearing.wheel_circumference_m = wheel;
+    if (tire) {
+      gearing.tire_size = tire.label;
+      gearing.wheel_circumference_m = Math.PI * tire.diameter_mm / 1000;
+    } else if (wheel !== undefined) {
+      gearing.wheel_circumference_m = wheel;
+    }
     const gearRatios = asArray(raw.gear_ratios)
       .map(toPositiveNumberOrUndefined)
       .filter((n) => n !== undefined);
     if (gearRatios.length) gearing.gear_ratios = gearRatios;
+    // Optional; blank/0 means an instantaneous shift.
+    const shiftMs = toPositiveNumberOrUndefined(raw.shift_time_ms);
+    if (shiftMs !== undefined) gearing.shift_time_ms = shiftMs;
     return Object.keys(gearing).length ? gearing : undefined;
   }
 
@@ -810,6 +855,8 @@
     normalizeMediaRef,
     normalizeNoteLocation,
     normalizePowerCurve,
+    parseTireSize,
+    wheelDiameterMm,
     torqueNmToKw,
     kwToTorqueNm,
     normalizeGearing,

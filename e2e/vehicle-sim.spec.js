@@ -69,7 +69,7 @@ test.describe('vehicle simulation: fit-and-simulate in one click, and adding the
       // own selectable Y channels / files list instead -- more end-to-end anyway.
       const rows = Array.from(document.querySelectorAll('#filesList .file-item'))
         .map((el) => el.textContent || '');
-      return rows.find((t) => t.includes('Racing Line'));
+      return rows.find((t) => t.includes('Racing Line') || t.includes('Sim —'));
     });
     expect(racingLineLog).toBeTruthy();
 
@@ -142,6 +142,6 @@ test.describe('vehicle simulation: fit-and-simulate in one click, and adding the
       return { fileCount: detail.files.length, fileName: detail.files[0].name };
     });
     expect(state.fileCount).toBe(1);
-    expect(state.fileName).toContain('Racing Line');
+    expect(state.fileName).toContain('Sim —');
   });
 });
