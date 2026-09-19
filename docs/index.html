@@ -21,7 +21,6 @@
   <!-- Loads after Leaflet's CSS so our theme overrides (e.g. dark-mode control colors)
        win the cascade on equal specificity, regardless of shorthand/longhand quirks. -->
   <link rel="stylesheet" href="style.css">
-
 </head>
 <body>
   <header>
@@ -363,6 +362,36 @@
               <span class="collapsible-caret" aria-hidden="true"></span>
             </summary>
             <div class="collapsible-action-body">
+              <div class="vehicle-sim-picker">
+                <div class="vehicle-sim-picker-field">
+                  <span class="vehicle-sim-picker-label">Vehicle</span>
+                  <div class="vehicle-sim-picker-row">
+                    <select id="vehicleSimVehicleSelect" aria-label="Vehicle"></select>
+                    <button type="button" id="vehicleSimVehicleEditBtn" class="vehicle-sim-mini-btn" title="Edit this vehicle" aria-label="Edit vehicle" disabled>✎</button>
+                    <button type="button" id="vehicleSimVehicleNewBtn" class="vehicle-sim-mini-btn" title="Add a new vehicle" aria-label="Add vehicle">+</button>
+                  </div>
+                </div>
+                <div class="vehicle-sim-picker-field">
+                  <span class="vehicle-sim-picker-label">Rider</span>
+                  <div class="vehicle-sim-picker-row">
+                    <select id="vehicleSimRiderSelect" aria-label="Rider"></select>
+                    <button type="button" id="vehicleSimRiderEditBtn" class="vehicle-sim-mini-btn" title="Edit this rider" aria-label="Edit rider" disabled>✎</button>
+                    <button type="button" id="vehicleSimRiderNewBtn" class="vehicle-sim-mini-btn" title="Add a new rider" aria-label="Add rider">+</button>
+                  </div>
+                </div>
+                <div id="vehicleSimVehicleHint" class="racing-line-status"></div>
+              </div>
+              <div class="racing-line-weight-controls">
+                <label>Power Model
+                  <select id="vehicleSimPowerModel" aria-label="Power model">
+                    <option value="curve">Engine curve + gearing</option>
+                    <option value="average">Average power (faster)</option>
+                  </select>
+                </label>
+                <label>Drivetrain Efficiency (%)
+                  <input id="vehicleSimDrivetrainEff" type="number" min="50" max="100" step="1" value="95" />
+                </label>
+              </div>
               <div class="racing-line-weight-controls">
                 <label>Max Lateral (g)
                   <input id="vehicleSimMaxLatG" type="number" min="0.1" step="0.05" value="1.0" />
@@ -370,7 +399,7 @@
                 <label>Max Longitudinal (g)
                   <input id="vehicleSimMaxLongG" type="number" min="0.1" step="0.05" value="0.7" />
                 </label>
-                <label>Power (kW)
+                <label>Average Power (kW)
                   <input id="vehicleSimPowerKw" type="number" min="0.1" step="1" value="32" />
                 </label>
                 <label>CdA (m²)
@@ -387,7 +416,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-18d</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-19d</div>
     </section>
 
     <section class="plot">
@@ -492,8 +521,6 @@
 
 
 
-
   <script src="gpbikes-plotter.bundle.min.js"></script>
-
 </body>
 </html>
