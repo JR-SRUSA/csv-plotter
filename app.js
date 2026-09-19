@@ -39,6 +39,15 @@
   const vehicleSimUseElevationInput = document.getElementById('vehicleSimUseElevation');
   const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
   const vehicleSimStatus = document.getElementById('vehicleSimStatus');
+  const vehicleSimVehicleSelect = document.getElementById('vehicleSimVehicleSelect');
+  const vehicleSimVehicleEditBtn = document.getElementById('vehicleSimVehicleEditBtn');
+  const vehicleSimVehicleNewBtn = document.getElementById('vehicleSimVehicleNewBtn');
+  const vehicleSimRiderSelect = document.getElementById('vehicleSimRiderSelect');
+  const vehicleSimRiderEditBtn = document.getElementById('vehicleSimRiderEditBtn');
+  const vehicleSimRiderNewBtn = document.getElementById('vehicleSimRiderNewBtn');
+  const vehicleSimVehicleHint = document.getElementById('vehicleSimVehicleHint');
+  const vehicleSimPowerModelSelect = document.getElementById('vehicleSimPowerModel');
+  const vehicleSimDrivetrainEffInput = document.getElementById('vehicleSimDrivetrainEff');
   const uiPanel7 = document.getElementById('uiPanel7');
   const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
@@ -5431,18 +5440,195 @@
     };
   }
 
+  // ── Simulate Vehicle: vehicle + rider selection ───────────────────────────
+  // The vehicle and rider come from the same stored records the Sessions panel uses (and
+  // are edited with the same popovers -- see SessionsUI.openVehicleEditor/openRiderEditor).
+  // Picking them fills mass/CdA/average power below from the combined bike + rider; those
+  // fields stay editable as overrides, and the vehicle's power curve + gearing feed the
+  // engine-curve power model. Session-specific mass/weight overrides don't apply here --
+  // there is no session in this context, so the base vehicle/rider values are used.
+  const SIM_SELECTION_KEY = 'vehicleSimSelection';
+  let simVehicles = [];
+  let simRiders = [];
+  let simListsLoaded = false;
+
+  function loadSimSelection() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SIM_SELECTION_KEY) || '{}');
+      return { vehicleId: saved.vehicleId || '', riderId: saved.riderId || '' };
+    } catch (e) { return { vehicleId: '', riderId: '' }; }
+  }
+
+  function saveSimSelection() {
+    try {
+      localStorage.setItem(SIM_SELECTION_KEY, JSON.stringify({
+        vehicleId: vehicleSimVehicleSelect ? vehicleSimVehicleSelect.value : '',
+        riderId: vehicleSimRiderSelect ? vehicleSimRiderSelect.value : ''
+      }));
+    } catch (e) { /* storage unavailable -- selection just won't persist */ }
+  }
+
+  function selectedSimVehicle() {
+    const id = vehicleSimVehicleSelect ? vehicleSimVehicleSelect.value : '';
+    return simVehicles.find((v) => v.id === id) || null;
+  }
+
+  function selectedSimRider() {
+    const id = vehicleSimRiderSelect ? vehicleSimRiderSelect.value : '';
+    return simRiders.find((r) => r.id === id) || null;
+  }
+
+  function describeSimVehicle(v) {
+    const internals = window.SessionsUI && window.SessionsUI._internals;
+    if (internals && typeof internals.describeVehicle === 'function') return internals.describeVehicle(v);
+    return [v.make, v.model].filter(Boolean).join(' ') || v.type || 'Vehicle';
+  }
+
+  function fillSimSelect(select, records, describe, emptyLabel, selectedId) {
+    select.innerHTML = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = emptyLabel;
+    select.appendChild(none);
+    records.forEach((rec) => {
+      const opt = document.createElement('option');
+      opt.value = rec.id;
+      opt.textContent = describe(rec);
+      select.appendChild(opt);
+    });
+    select.value = records.some((r) => r.id === selectedId) ? selectedId : '';
+  }
+
+  // Fills mass / CdA / average power from the chosen vehicle + rider. Rider CdA is the
+  // *tucked* delta (the position held for most of a lap's time, i.e. accelerating on
+  // straights); the rider's braking/cornering deltas would need a per-phase drag model the
+  // point-mass sim doesn't have. Fields are only touched when the source value exists, so
+  // a vehicle missing e.g. CdA leaves whatever was typed in.
+  function applySimSelectionToInputs() {
+    const v = selectedSimVehicle();
+    const r = selectedSimRider();
+    if (v && v.mass_kg > 0 && vehicleSimMassInput) {
+      const total = v.mass_kg + (r && r.weight_kg > 0 ? r.weight_kg : 0);
+      vehicleSimMassInput.value = String(Math.round(total * 10) / 10);
+    }
+    if (v && v.cda_m2 > 0 && vehicleSimCdaInput) {
+      const tucked = r && Number.isFinite(r.cda_tucked_m2) ? r.cda_tucked_m2 : 0;
+      vehicleSimCdaInput.value = String(Math.max(0.01, Math.round((v.cda_m2 + tucked) * 1000) / 1000));
+    }
+    if (v && v.avg_power_kw > 0 && vehicleSimPowerKwInput) {
+      vehicleSimPowerKwInput.value = String(v.avg_power_kw);
+    }
+  }
+
+  function getSimEngine() {
+    const v = selectedSimVehicle();
+    if (!v) return null;
+    const effPct = vehicleSimDrivetrainEffInput ? Number(vehicleSimDrivetrainEffInput.value) : 95;
+    return {
+      powerCurve: Array.isArray(v.power_curve) ? v.power_curve : [],
+      gearing: v.gearing || {},
+      efficiency: Number.isFinite(effPct) ? Math.min(1, Math.max(0.5, effPct / 100)) : 0.95
+    };
+  }
+
+  // Typical rolling-wheel diameters (m) by vehicle type, for a sanity check on the stored
+  // circumference. Only types with a narrow, well-known range are checked -- karts and
+  // "other" vary too much to second-guess.
+  const SIM_WHEEL_DIAMETER_RANGE_M = { motorcycle: [0.4, 0.75], car: [0.5, 0.9] };
+
+  // Spells out the gearing numbers actually stored for the vehicle (so a wrong one is
+  // visible without opening the editor) and flags a wheel size that implies an implausible
+  // diameter -- the classic slip being a diameter typed into the circumference field.
+  function describeSimGearing(vehicle, gearing) {
+    const circ = Number(gearing.wheel_circumference_m);
+    const diameter = circ / Math.PI;
+    const ratios = (gearing.gear_ratios || []).map(Number).filter((r) => r > 0);
+    let text = `Wheel: ${circ.toFixed(3)} m circumference (${(diameter * 100).toFixed(0)} cm diameter). `
+      + `${ratios.length} gears, primary ${Number(gearing.primary_ratio) > 0 ? Number(gearing.primary_ratio) : 1}, `
+      + `final ${Number(gearing.final_ratio)}.`;
+    const range = SIM_WHEEL_DIAMETER_RANGE_M[vehicle && vehicle.type];
+    if (range && (diameter < range[0] || diameter > range[1])) {
+      text += ` That is an unusual wheel size for a ${vehicle.type} (expected roughly `
+        + `${Math.round(range[0] * 100)}-${Math.round(range[1] * 100)} cm across) -- check that circumference, not `
+        + 'diameter, was entered.';
+    }
+    return text;
+  }
+
+  function updateSimSelectionState(applyValues) {
+    const v = selectedSimVehicle();
+    const r = selectedSimRider();
+    if (vehicleSimVehicleEditBtn) vehicleSimVehicleEditBtn.disabled = !v;
+    if (vehicleSimRiderEditBtn) vehicleSimRiderEditBtn.disabled = !r;
+    if (applyValues) applySimSelectionToInputs();
+
+    if (!vehicleSimVehicleHint) return;
+    const calc = getRacingLineCalculationsApi();
+    const wantsCurve = !vehicleSimPowerModelSelect || vehicleSimPowerModelSelect.value === 'curve';
+    if (!v) {
+      vehicleSimVehicleHint.textContent = 'Pick a vehicle (and rider) to fill mass and CdA and to use its engine curve; '
+        + 'otherwise the values below are used as typed.';
+    } else if (!wantsCurve) {
+      vehicleSimVehicleHint.textContent = 'Average power mode: one flat power figure, faster to simulate.';
+    } else {
+      const problems = calc && typeof calc.describeEngineProblems === 'function'
+        ? calc.describeEngineProblems(getSimEngine())
+        : [];
+      if (problems.length) {
+        vehicleSimVehicleHint.textContent = `This vehicle is missing ${problems.join(', ')}, so average power will be used. Use ✎ to add it.`;
+      } else {
+        // Showing the top-gear redline speed up front makes a wrong wheel size or ratio
+        // obvious before simulating (it is the ceiling the bike can never exceed).
+        const engine = getSimEngine();
+        const model = calc.buildEngineModel(engine);
+        const redline = model ? ` Top gear hits the redline at ${(model.maxGearSpeed * 3.6).toFixed(0)} km/h.` : '';
+        vehicleSimVehicleHint.textContent = 'Engine curve + gearing ready: the best gear is picked at every point on track. '
+          + describeSimGearing(v, engine.gearing) + redline;
+      }
+    }
+  }
+
+  // Reloads the vehicle/rider lists from storage, keeping the current selection (or, on
+  // the first load, the last one used). `prefer` selects a just-saved record and can ask for
+  // its values to be applied to the inputs.
+  function refreshVehicleSimLists(prefer) {
+    if (!sessionsApi || !vehicleSimVehicleSelect || !vehicleSimRiderSelect) return Promise.resolve();
+    const saved = loadSimSelection();
+    const wantVehicle = (prefer && prefer.vehicleId)
+      || (simListsLoaded ? vehicleSimVehicleSelect.value : saved.vehicleId);
+    const wantRider = (prefer && prefer.riderId)
+      || (simListsLoaded ? vehicleSimRiderSelect.value : saved.riderId);
+    return Promise.all([
+      sessionsApi.VehicleService.listVehicles(),
+      sessionsApi.RiderService.listRiders()
+    ]).then(([vehicles, riders]) => {
+      simVehicles = vehicles || [];
+      simRiders = riders || [];
+      fillSimSelect(vehicleSimVehicleSelect, simVehicles, describeSimVehicle, 'Manual (no vehicle)', wantVehicle);
+      fillSimSelect(vehicleSimRiderSelect, simRiders, (r) => r.name || 'Rider', 'No rider', wantRider);
+      simListsLoaded = true;
+      saveSimSelection();
+      updateSimSelectionState(!!(prefer && prefer.apply));
+    }).catch(() => {});
+  }
+
   function getVehicleSimParams() {
     const num = (input, fallback) => {
       const n = input ? Number(input.value) : NaN;
       return Number.isFinite(n) && n > 0 ? n : fallback;
     };
-    return {
+    const params = {
       maxLatG: num(vehicleSimMaxLatGInput, 1.0),
       maxLongG: num(vehicleSimMaxLongGInput, 0.7),
       powerKw: num(vehicleSimPowerKwInput, 32),
       cda: num(vehicleSimCdaInput, 0.5),
       massKg: num(vehicleSimMassInput, 235)
     };
+    if (vehicleSimPowerModelSelect && vehicleSimPowerModelSelect.value === 'curve') {
+      const engine = getSimEngine();
+      if (engine) params.engine = engine;
+    }
+    return params;
   }
 
   function formatSimLapTime(seconds) {
@@ -5579,6 +5765,20 @@
     const sampled = calc.samplePeriodicBSpline(log.meta.splineControl, n);
     const params = getVehicleSimParams();
 
+    // Engine-curve mode needs a vehicle with a power curve AND gearing (ratios + wheel
+    // circumference). If it isn't complete, say so and simulate with average power rather
+    // than silently doing something different from what was asked.
+    let powerModelNote = '';
+    if (vehicleSimPowerModelSelect && vehicleSimPowerModelSelect.value === 'curve') {
+      const problems = params.engine ? calc.describeEngineProblems(params.engine) : [];
+      if (!params.engine) {
+        powerModelNote = ' Engine-curve mode needs a vehicle -- pick one above; used average power instead.';
+      } else if (problems.length) {
+        delete params.engine;
+        powerModelNote = ` The selected vehicle is missing ${problems.join(', ')}; used average power instead.`;
+      }
+    }
+
     const referenceLog = log.meta.sourceLogId ? logs.find(l => l.id === log.meta.sourceLogId) : null;
     const useElevation = !vehicleSimUseElevationInput || vehicleSimUseElevationInput.checked;
     const gradeDeg = useElevation
@@ -5610,15 +5810,40 @@
       log.meta.units[speedCol] = 'km/h';
       log.meta.units[latAccCol] = 'g';
       log.meta.units[longAccCol] = 'g';
+
+      // Engine-curve mode also yields which gear (and the engine RPM it implies) the
+      // best-gear rule would use at every point -- written as ordinary channels.
+      const extraChannels = [];
+      if (result.gear && result.rpm) {
+        ['Gear', 'RPM'].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
+        for (let i = 0; i < n; i++) {
+          log.data[i].Gear = result.gear[i];
+          log.data[i].RPM = Math.round(result.rpm[i]);
+        }
+        log.meta.units.Gear = '';
+        log.meta.units.RPM = 'rpm';
+        extraChannels.push('Gear', 'RPM');
+      }
       addCalculatedCommonChannels(log.data, log.cols, log.meta);
 
       if (vehicleSimStatus) {
         const gradeNote = !useElevation
           ? ' Elevation/altitude effect disabled -- simulated as flat.'
           : (result.usedGrade ? ' Track grade (Slope/Altitude) factored in.' : ' No Slope/Altitude data found on the source lap -- simulated as flat.');
+        let modelNote = result.usedEngineModel
+          ? ' Engine curve + gearing (best gear at each point).'
+          : (powerModelNote || ' Average power model.');
+        // Pinned against the redline in top gear for a large part of the lap: the bike's
+        // gearing or wheel size is the limit, not the track -- almost always a data-entry
+        // problem (final drive/ratios, or a wheel diameter typed as a circumference).
+        if (result.usedEngineModel && result.revLimitedFraction > 0.2) {
+          modelNote += ` WARNING: rev-limited in top gear at ${(result.redlineSpeed * 3.6).toFixed(0)} km/h for `
+            + `${Math.round(result.revLimitedFraction * 100)}% of the lap -- check the vehicle's gear ratios, `
+            + 'final drive and wheel size (circumference = pi x diameter).';
+        }
         vehicleSimStatus.textContent = `Simulated lap time: ${formatSimLapTime(result.lapTime)} `
-          + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${gradeNote} `
-          + `${speedCol}, ${latAccCol}, ${longAccCol} added to the racing line lap.`;
+          + `(power/drag top speed ${(result.topSpeedFromPower * 3.6).toFixed(0)} km/h).${modelNote}${gradeNote} `
+          + `${[speedCol, latAccCol, longAccCol].concat(extraChannels).join(', ')} added to the racing line lap.`;
       }
     } else if (vehicleSimStatus) {
       vehicleSimStatus.textContent = 'Racing line fitted, but the vehicle simulation failed on it.';
@@ -9646,6 +9871,39 @@
       if (logs.some(l => l.meta && l.meta.racingLine)) simulateVehicle();
     });
   }
+
+  // Vehicle / rider pickers: choosing one fills mass, CdA and average power from it; the
+  // ✎ and + buttons open the very same editor popovers the Sessions panel uses.
+  if (vehicleSimVehicleSelect) {
+    vehicleSimVehicleSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(true); });
+  }
+  if (vehicleSimRiderSelect) {
+    vehicleSimRiderSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(true); });
+  }
+  if (vehicleSimPowerModelSelect) {
+    vehicleSimPowerModelSelect.addEventListener('change', () => updateSimSelectionState(false));
+  }
+  if (vehicleSimDrivetrainEffInput) {
+    vehicleSimDrivetrainEffInput.addEventListener('input', () => updateSimSelectionState(false));
+  }
+  const openSimVehicleEditor = (existing) => {
+    if (!window.SessionsUI) return;
+    window.SessionsUI.openVehicleEditor(
+      (saved) => refreshVehicleSimLists({ vehicleId: saved && saved.id, apply: true }),
+      existing || undefined
+    );
+  };
+  const openSimRiderEditor = (existing) => {
+    if (!window.SessionsUI) return;
+    window.SessionsUI.openRiderEditor(
+      (saved) => refreshVehicleSimLists({ riderId: saved && saved.id, apply: true }),
+      existing || undefined
+    );
+  };
+  if (vehicleSimVehicleNewBtn) vehicleSimVehicleNewBtn.addEventListener('click', () => openSimVehicleEditor(null));
+  if (vehicleSimVehicleEditBtn) vehicleSimVehicleEditBtn.addEventListener('click', () => openSimVehicleEditor(selectedSimVehicle()));
+  if (vehicleSimRiderNewBtn) vehicleSimRiderNewBtn.addEventListener('click', () => openSimRiderEditor(null));
+  if (vehicleSimRiderEditBtn) vehicleSimRiderEditBtn.addEventListener('click', () => openSimRiderEditor(selectedSimRider()));
   if (mapXOffsetInput) mapXOffsetInput.addEventListener('input', ()=> {
     if (!isApplyingAutoOffset) mapOffsetManuallyAdjusted = true;
     updatePlot();
@@ -10488,6 +10746,8 @@
         // attachment that just happened.
         if (logs.length) renderFilesList();
         refreshNoteMarkerCaches();
+        // A vehicle or rider may have just been added/edited in the Sessions panel.
+        refreshVehicleSimLists();
       },
       onPickModeChange: (kind) => {
         // The Sessions panel's own "Pin on Graph"/"Pin on Map" buttons always mean the
@@ -10499,6 +10759,7 @@
       }
     });
     refreshNoteMarkerCaches();
+    refreshVehicleSimLists();
   }
 
   // ── Author Name (User tab) ────────────────────────────────────────────────

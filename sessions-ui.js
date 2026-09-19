@@ -552,8 +552,26 @@
         type: 'text', class: 'session-modal-input', placeholder: 'Gear ratios, comma separated',
         value: Array.isArray(gearing.gear_ratios) ? gearing.gear_ratios.join(', ') : ''
       });
+      // Tyre size can be given either way; circumference (pi x diameter) is what's stored
+      // and what the simulator uses to turn road speed into wheel/engine RPM. Typing one
+      // fills in the other, so entering a diameter where a circumference was expected
+      // (which silently made the engine redline arrive at a third of the real speed) can't
+      // happen by accident.
+      const wheelDiaInput = numberField('Wheel diameter, m');
       const wheelCircInput = numberField('Wheel circumference, m');
-      if (gearing.wheel_circumference_m != null) wheelCircInput.value = gearing.wheel_circumference_m;
+      const roundTo = (n, places) => String(Math.round(n * Math.pow(10, places)) / Math.pow(10, places));
+      if (gearing.wheel_circumference_m != null) {
+        wheelCircInput.value = gearing.wheel_circumference_m;
+        wheelDiaInput.value = roundTo(Number(gearing.wheel_circumference_m) / Math.PI, 4);
+      }
+      wheelDiaInput.addEventListener('input', () => {
+        const d = Number(wheelDiaInput.value);
+        wheelCircInput.value = wheelDiaInput.value !== '' && d > 0 ? roundTo(d * Math.PI, 4) : '';
+      });
+      wheelCircInput.addEventListener('input', () => {
+        const c = Number(wheelCircInput.value);
+        wheelDiaInput.value = wheelCircInput.value !== '' && c > 0 ? roundTo(c / Math.PI, 4) : '';
+      });
       const statusEl = el('div', { class: 'session-modal-status' });
 
       const saveBtn = el('button', {
@@ -605,7 +623,7 @@
           powerCurveInput,
           powerCurveChart,
           el('div', { class: 'session-modal-subheading', text: 'Gearing (optional)' }),
-          el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, wheelCircInput]),
+          el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, wheelDiaInput, wheelCircInput]),
           statusEl,
           el('div', { class: 'session-modal-actions' }, [
             el('button', { type: 'button', class: 'session-modal-cancel', text: 'Cancel', onclick: () => overlay.remove() }),
@@ -1850,6 +1868,8 @@
       viewNote,
       notifyPickCancelled,
       captureFromStream,
+      openVehicleEditor: openAddVehicleModal,
+      openRiderEditor: openAddRiderModal,
       getSelectedSessionId: () => selectedSessionId,
       setSelectedSessionId: (id) => { selectedSessionId = id; }
     };
@@ -1897,6 +1917,14 @@
     // inside the fullscreened element itself, since content outside it isn't painted.
     captureFromStream(stream, container) {
       return instance ? instance.captureFromStream(stream, container) : Promise.resolve(null);
+    },
+    // The same Add/Edit Vehicle and Rider popovers the Sessions panel uses, reused by the
+    // Simulate Vehicle panel so there's one editor, not two. onSaved gets the saved record.
+    openVehicleEditor(onSaved, existingVehicle) {
+      if (instance) instance.openVehicleEditor(onSaved, existingVehicle);
+    },
+    openRiderEditor(onSaved, existingRider) {
+      if (instance) instance.openRiderEditor(onSaved, existingRider);
     },
     getInstance: () => instance,
     // Exposed for tests.

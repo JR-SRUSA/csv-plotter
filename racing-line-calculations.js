@@ -967,6 +967,97 @@
   const AIR_DENSITY_KGM3 = 1.225;
   const VEHICLE_SIM_LAPS_FOR_CONVERGENCE = 3; // passes around the loop so periodic wrap settles
 
+  // ---------------------------------------------------------------------
+  // Engine model: the vehicle's real power curve + gearing, instead of one flat average
+  // power figure. For a given road speed each gear puts the engine at a different RPM
+  // (wheel RPM x primary x gear x final ratio), and so at a different point on the power
+  // curve. Since drive force = power / speed, "the gear with the most acceleration
+  // available" is simply the gear whose RPM lands on the highest point of the curve --
+  // subject to not exceeding the redline (the curve's last RPM). The same lookup also
+  // yields synthetic Gear and RPM channels for the simulated lap.
+  //
+  // engine = {
+  //   powerCurve: [{ rpm, power_kw }, ...],      // engine (crank) power
+  //   gearing: { primary_ratio?, final_ratio, gear_ratios: [...], wheel_circumference_m },
+  //   efficiency?: 0..1                            // drivetrain losses, default 1
+  // }
+  // ---------------------------------------------------------------------
+
+  // Human-readable list of what's missing for an engine model to be buildable (empty when
+  // it's complete). Lets callers explain WHY they're falling back to average power.
+  function describeEngineProblems(engine) {
+    const problems = [];
+    const curve = engine && Array.isArray(engine.powerCurve) ? engine.powerCurve : [];
+    const g = (engine && engine.gearing) || {};
+    if (curve.filter((p) => p && Number.isFinite(p.rpm) && Number.isFinite(p.power_kw)).length < 2) {
+      problems.push('a power curve (at least 2 RPM points)');
+    }
+    if (!Array.isArray(g.gear_ratios) || !g.gear_ratios.some((r) => Number(r) > 0)) problems.push('gear ratios');
+    if (!(Number(g.final_ratio) > 0)) problems.push('a final drive ratio');
+    if (!(Number(g.wheel_circumference_m) > 0)) problems.push('a wheel circumference');
+    return problems;
+  }
+
+  function buildEngineModel(engine) {
+    if (!engine || describeEngineProblems(engine).length) return null;
+    const curve = engine.powerCurve
+      .filter((p) => p && Number.isFinite(p.rpm) && Number.isFinite(p.power_kw))
+      .map((p) => ({ rpm: p.rpm, powerW: Math.max(0, p.power_kw) * 1000 }))
+      .sort((a, b) => a.rpm - b.rpm);
+    const g = engine.gearing;
+    const primary = Number(g.primary_ratio) > 0 ? Number(g.primary_ratio) : 1;
+    const finalRatio = Number(g.final_ratio);
+    const circumference = Number(g.wheel_circumference_m);
+    const efficiency = Number(engine.efficiency) > 0 ? Math.min(1, Number(engine.efficiency)) : 1;
+    const gears = g.gear_ratios
+      .map((r, i) => ({ gear: i + 1, ratio: Number(r) * primary * finalRatio }))
+      .filter((x) => x.ratio > 0);
+    const idleRpm = curve[0].rpm;
+    const redlineRpm = curve[curve.length - 1].rpm;
+
+    // Wheel power = engine torque x total ratio x efficiency / wheel radius, times road speed;
+    // with engine RPM = wheel RPM x total ratio that is simply (engine power at that RPM), so
+    // the curve's power can be read straight off at the gear's own RPM. The one exception is
+    // below the curve's first point, where the clutch has to slip: the engine can't be
+    // turning that slowly, so what reaches the wheel is the first point's *torque* (held
+    // constant) multiplied through the gearing -- which as power means it falls off in
+    // proportion to how far below that RPM the wheels are turning it. (Holding *power*
+    // constant there would overstate low-speed drive force.)
+    const powerAtRpm = (rpm) => {
+      if (rpm <= curve[0].rpm) return curve[0].rpm > 0 ? curve[0].powerW * (rpm / curve[0].rpm) : curve[0].powerW;
+      for (let i = 1; i < curve.length; i++) {
+        if (rpm <= curve[i].rpm) {
+          const a = curve[i - 1];
+          const b = curve[i];
+          const f = b.rpm > a.rpm ? (rpm - a.rpm) / (b.rpm - a.rpm) : 0;
+          return a.powerW + (b.powerW - a.powerW) * f;
+        }
+      }
+      return 0;
+    };
+    const rpmFor = (v, ratio) => (v / circumference) * 60 * ratio;
+
+    // The gear giving the most wheel power at road speed v (m/s). Ties (e.g. launching, when
+    // every gear is below the curve's first point) go to the lowest gear. Past the top
+    // gear's redline nothing is valid: zero power, reported in top gear at redline.
+    function best(v) {
+      let pick = null;
+      for (const { gear, ratio } of gears) {
+        const rpm = rpmFor(v, ratio);
+        if (rpm > redlineRpm * (1 + 1e-9)) continue;
+        const powerW = powerAtRpm(rpm) * efficiency;
+        if (!pick || powerW > pick.powerW) pick = { gear, rpm: Math.max(rpm, idleRpm), powerW };
+      }
+      if (pick) return pick;
+      const top = gears[gears.length - 1];
+      return { gear: top.gear, rpm: redlineRpm, powerW: 0 };
+    }
+
+    // Fastest road speed the top gear allows before hitting the redline.
+    const maxGearSpeed = Math.max(...gears.map((x) => (redlineRpm / 60 / x.ratio) * circumference));
+    return { best, maxGearSpeed, gearCount: gears.length, redlineRpm, idleRpm };
+  }
+
   // `rep`: the periodic B-spline representation being simulated (a live fit's
   // `fit.control`, or one reconstructed for an already-accepted racing-line lap).
   // `sampled`: points along it to simulate at, e.g. `fit.sampled` or a fresh call to
@@ -1024,7 +1115,23 @@
       const frac = Math.min(1, aLatDemand / aLatMax);
       return aLongMax * Math.sqrt(Math.max(0, 1 - frac * frac));
     };
-    const topSpeedFromPower = powerW > 0 ? Math.cbrt(powerW / (0.5 * AIR_DENSITY_KGM3 * cda)) : Infinity;
+    // Wheel power available at road speed v: the engine curve through the best gear when
+    // an engine model was given, otherwise the one flat average-power figure.
+    const engine = buildEngineModel(params.engine);
+    const wheelPowerAt = engine ? (v) => engine.best(v).powerW : () => powerW;
+    const hasPower = engine ? true : powerW > 0;
+
+    let topSpeedFromPower;
+    if (engine) {
+      // Walk up in speed until drive force no longer beats drag (or the redline stops us).
+      topSpeedFromPower = engine.maxGearSpeed;
+      const step = 0.1;
+      for (let v = 1; v <= engine.maxGearSpeed; v += step) {
+        if (wheelPowerAt(v) / (mass * v) - dragDecel(v) <= 0) { topSpeedFromPower = v; break; }
+      }
+    } else {
+      topSpeedFromPower = powerW > 0 ? Math.cbrt(powerW / (0.5 * AIR_DENSITY_KGM3 * cda)) : Infinity;
+    }
 
     const vEnvelope = new Array(n);
     for (let i = 0; i < n; i++) {
@@ -1038,7 +1145,7 @@
         const prev = (i - 1 + n) % n;
         const aLatDemand = vFwd[prev] * vFwd[prev] * kappaAbs[prev];
         const aTraction = tractionAvail(aLatDemand);
-        const aPower = powerW > 0 ? (powerW / (mass * Math.max(1, vFwd[prev]))) : Infinity;
+        const aPower = hasPower ? (wheelPowerAt(vFwd[prev]) / (mass * Math.max(1, vFwd[prev]))) : Infinity;
         const aEngine = Math.min(aTraction, aPower);
         const aNet = aEngine - dragDecel(vFwd[prev]) - gradeAccel(prev);
         const vReach = Math.sqrt(Math.max(0, vFwd[prev] * vFwd[prev] + 2 * aNet * ds[prev]));
@@ -1089,7 +1196,34 @@
     const vAvgClose = Math.max(0.5, (speed[n - 1] + speed[0]) / 2);
     const lapTime = acc + ds[n - 1] / vAvgClose;
 
-    return { speed, ax, ay, time, lapTime, topSpeedFromPower, usedGrade: hasGrade };
+    // Synthetic gear/RPM channels: the gear (and the engine RPM it implies) the best-gear
+    // rule would have the rider in at each point's final speed. Only meaningful with an
+    // engine model -- null otherwise, so callers know not to write the channels at all.
+    let gear = null;
+    let rpm = null;
+    let revLimitedFraction = null;
+    if (engine) {
+      gear = new Array(n);
+      rpm = new Array(n);
+      let atLimit = 0;
+      for (let i = 0; i < n; i++) {
+        const pick = engine.best(speed[i]);
+        gear[i] = pick.gear;
+        rpm[i] = pick.rpm;
+        if (speed[i] >= engine.maxGearSpeed * 0.995) atLimit++;
+      }
+      // Share of the lap spent pinned against the redline in the tallest gear. A little on
+      // the longest straight is normal; most of the lap means the gearing or wheel size
+      // (e.g. a diameter typed where a circumference belongs) is limiting the bike, not
+      // the track, so callers can flag it.
+      revLimitedFraction = atLimit / n;
+    }
+
+    return {
+      speed, ax, ay, time, lapTime, topSpeedFromPower, usedGrade: hasGrade,
+      gear, rpm, usedEngineModel: !!engine,
+      revLimitedFraction, redlineSpeed: engine ? engine.maxGearSpeed : null
+    };
   }
 
   window.RacingLineCalculations = {
@@ -1098,6 +1232,8 @@
     evalPeriodicBSpline,
     computePeriodicBSplineRadiusAtT,
     samplePeriodicBSpline,
-    simulateVehicleSpeed
+    simulateVehicleSpeed,
+    buildEngineModel,
+    describeEngineProblems
   };
 })();

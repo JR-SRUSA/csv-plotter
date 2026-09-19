@@ -1,0 +1,7 @@
+We still have a UI issue when pasting in the torque curve, now the graph displays fine, but the number input textarea now gets vertically squished when values are entered.
+
+For the "simulate" button/ menu, can we add the Vehicle dropdown/ editor here (same popover we use to edit in the session area, reuse this code)? 
+I would also like to use the actual motor curve with gearing and tire size to determine the acceleration available at each point on track (you'll need to pick the gear with greatest acceleration capability) instead of just the average power (although maybe we have an "average power" sim option as well, for faster sims?)
+The simulate vehicle can use the CdA and mass from the combined bike/ rider as well. (We will need rider selection in the sim area as well.)
+
+Using the actual motor curve will allow us to generate syntheic RPM and Gear data for the simulation as well (please make those outputs)

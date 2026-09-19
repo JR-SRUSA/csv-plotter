@@ -340,6 +340,15 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .racing-line-weight-controls input[type=number]{grid-column:2 / 3;justify-self:end;width:70px;padding:2px 4px;font-size:12px;border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);background:var(--bg-surface)}
 .vehicle-sim-controls{padding-top:6px;border-top:1px dashed var(--border-dashed);display:flex;flex-direction:column;gap:10px}
 .vehicle-sim-controls button{width:100%}
+.racing-line-weight-controls select{grid-column:2 / 3;justify-self:end;max-width:170px;font-size:12px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;color:var(--text-secondary);background:var(--bg-surface)}
+.vehicle-sim-picker{display:flex;flex-direction:column;gap:6px;padding:6px;border:1px dashed var(--border);border-radius:4px;background:var(--bg-subtle)}
+.vehicle-sim-picker-field{display:flex;flex-direction:column;gap:2px}
+.vehicle-sim-picker-label{font-size:12px;color:var(--text-secondary)}
+.vehicle-sim-picker-row{display:flex;gap:4px;align-items:center}
+.vehicle-sim-picker-row select{flex:1;min-width:0;font-size:12px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;color:var(--text-primary);background:var(--bg-surface)}
+.racing-line-controls .vehicle-sim-picker .vehicle-sim-mini-btn{width:auto;flex:0 0 auto;min-width:28px;padding:3px 7px;font-size:13px;line-height:1.2;border-radius:4px;cursor:pointer;border:1px solid var(--border-dashed);background:var(--bg-surface);color:var(--text-primary)}
+.vehicle-sim-mini-btn:hover:not(:disabled){background:var(--bg-hover)}
+.vehicle-sim-mini-btn:disabled{opacity:.45;cursor:default}
 
 /* Button-with-caret "details" pattern: the summary looks like a normal button, but
    the action button and the caret are separate click targets. The caret toggles the
@@ -787,10 +796,14 @@ body.map-fullscreen-open{overflow:hidden}
 .session-delete-btn{padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .session-delete-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 
-.session-modal{position:fixed;inset:0;z-index:1700;display:flex;align-items:center;justify-content:center;padding:18px}
+.session-modal{position:fixed;inset:0;z-index:2200;display:flex;align-items:center;justify-content:center;padding:18px}
 .session-modal[hidden]{display:none}
 .session-modal-backdrop{position:absolute;inset:0;background:var(--overlay-bg)}
 .session-modal-dialog{position:relative;z-index:1;width:min(420px,100%);max-height:min(86vh,720px);overflow-y:auto;display:flex;flex-direction:column;gap:5px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 16px 42px var(--shadow-xl);padding:12px 14px}
+/* The dialog is a flex column with a max-height and overflow-y:auto. Without this, flexbox
+   squeezes every direct child (textareas, charts, fields) to fit that max-height instead of
+   letting the dialog scroll, e.g. crushing a multi-line textarea to a single line. */
+.session-modal-dialog > *{flex-shrink:0}
 .session-modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:2px}
 .session-modal-title{margin:0;font-size:14px;font-weight:600;color:var(--text-primary)}
 .session-modal-close{background:none;border:none;cursor:pointer;font-size:17px;line-height:1;color:var(--text-secondary);padding:0 3px}
@@ -812,7 +825,7 @@ body.map-fullscreen-open{overflow:hidden}
 .session-modal-cancel:hover{background:var(--bg-hover)}
 .session-modal-save:disabled{opacity:.6;cursor:default}
 
-.session-capture-overlay{position:fixed;inset:0;z-index:1800;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}
+.session-capture-overlay{position:fixed;inset:0;z-index:2300;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}
 .session-capture-dialog{display:flex;flex-direction:column;gap:8px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 16px 42px var(--shadow-xl);padding:12px}
 .session-capture-video{width:min(460px,80vw);max-height:60vh;background:#000;border-radius:4px}
 .session-capture-actions{display:flex;justify-content:center;align-items:center;gap:18px}
@@ -826,7 +839,7 @@ body.map-fullscreen-open{overflow:hidden}
 .session-capture-cancel .icon-btn-glyph svg,.session-capture-switch .icon-btn-glyph svg{width:22px;height:22px}
 
 /* ── Note viewer overlay (reached from a map marker click) ─────────────────── */
-.session-note-view-overlay{position:fixed;inset:0;z-index:1750;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}
+.session-note-view-overlay{position:fixed;inset:0;z-index:2250;display:flex;align-items:center;justify-content:center;background:var(--overlay-bg);padding:18px}
 .session-note-view-dialog{width:min(360px,100%);max-height:min(80vh,600px);overflow-y:auto;display:flex;flex-direction:column;gap:6px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 16px 42px var(--shadow-xl);padding:12px 14px}
 .session-note-view-header{display:flex;align-items:center;gap:6px}
 .session-note-view-close{margin-left:auto;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;color:var(--text-secondary);padding:0 3px}
