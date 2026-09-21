@@ -42,6 +42,9 @@
   const vehicleSimNameInput = document.getElementById('vehicleSimName');
   const vehicleSimNotesInput = document.getElementById('vehicleSimNotes');
   const vehicleSimRenameBtn = document.getElementById('vehicleSimRenameBtn');
+  const vehicleSimClassRadios = Array.from(document.querySelectorAll('input[name="vehicleSimClass"]'));
+  const vehicleSimInfoBtn = document.getElementById('vehicleSimInfoBtn');
+  const vehicleSimLoggedBtn = document.getElementById('vehicleSimLoggedBtn');
   const vehicleSimVehicleSelect = document.getElementById('vehicleSimVehicleSelect');
   const vehicleSimVehicleEditBtn = document.getElementById('vehicleSimVehicleEditBtn');
   const vehicleSimVehicleNewBtn = document.getElementById('vehicleSimVehicleNewBtn');
@@ -3033,7 +3036,9 @@
     populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
-    applySavedImporterConfigToLog(file.name, newLog.id);
+    // Any simulated channels saved for this file are restored once its importer config (which
+    // can rebuild the rows) has been applied.
+    applySavedImporterConfigToLog(file.name, newLog.id).then(() => applyLinkedSimChannels(newLog.id));
     // Re-checks for graph-pinned notes belonging to this (or any) newly-loaded file,
     // rather than relying solely on the one-time startup call -- if that first call
     // ever missed for any reason (a slow/cold IndexedDB open, say), a note's marker
@@ -3047,7 +3052,7 @@
   // persisted alongside it in IndexedDB from a previous session, reapply it automatically
   // so reloading a stored file doesn't require redoing the mapping every time.
   function applySavedImporterConfigToLog(fileName, logId) {
-    getFileEntryByName(fileName).then((entry) => {
+    return getFileEntryByName(fileName).then((entry) => {
       const saved = entry && entry.importerConfig;
       if (!saved || !saved.decoder) return;
       if (reprocessLogWithDecoder(logId, saved.decoder, saved)) renderFilesList();
@@ -5481,17 +5486,29 @@
   function loadSimSelection() {
     try {
       const saved = JSON.parse(localStorage.getItem(SIM_SELECTION_KEY) || '{}');
-      return { vehicleId: saved.vehicleId || '', riderId: saved.riderId || '' };
-    } catch (e) { return { vehicleId: '', riderId: '' }; }
+      return { vehicleId: saved.vehicleId || '', riderId: saved.riderId || '', vehicleClass: saved.vehicleClass === 'car' ? 'car' : 'motorcycle' };
+    } catch (e) { return { vehicleId: '', riderId: '', vehicleClass: 'motorcycle' }; }
   }
 
   function saveSimSelection() {
     try {
       localStorage.setItem(SIM_SELECTION_KEY, JSON.stringify({
         vehicleId: vehicleSimVehicleSelect ? vehicleSimVehicleSelect.value : '',
-        riderId: vehicleSimRiderSelect ? vehicleSimRiderSelect.value : ''
+        riderId: vehicleSimRiderSelect ? vehicleSimRiderSelect.value : '',
+        vehicleClass: getSimClass()
       }));
     } catch (e) { /* storage unavailable -- selection just won't persist */ }
+  }
+
+  // Motorcycle (default) or car. Motorcycles lean, so they get the required lean angle
+  // channels and the lean-adjusted rolling radius; cars get neither.
+  function getSimClass() {
+    const checked = vehicleSimClassRadios.find((r) => r.checked);
+    return checked && checked.value === 'car' ? 'car' : 'motorcycle';
+  }
+
+  function setSimClass(value) {
+    vehicleSimClassRadios.forEach((r) => { r.checked = r.value === value; });
   }
 
   function selectedSimVehicle() {
@@ -5546,15 +5563,27 @@
     }
   }
 
+  function simTreadRadiusM(gearing) {
+    if (getSimClass() !== 'motorcycle') return 0;
+    const model = window.SessionsModel;
+    const tire = model && gearing && gearing.tire_size ? model.parseTireSize(gearing.tire_size) : null;
+    return tire ? tire.width_mm / 2000 : 0;
+  }
+
   function getSimEngine() {
     const v = selectedSimVehicle();
     if (!v) return null;
     const effPct = vehicleSimDrivetrainEffInput ? Number(vehicleSimDrivetrainEffInput.value) : 95;
-    return {
+    const engine = {
       powerCurve: Array.isArray(v.power_curve) ? v.power_curve : [],
       gearing: v.gearing || {},
       efficiency: Number.isFinite(effPct) ? Math.min(1, Math.max(0.5, effPct / 100)) : 0.95
     };
+    // The tread's crown radius is estimated as half the tire width, so it needs a tire size
+    // (a bare circumference has no width). Motorcycles only.
+    const tread = simTreadRadiusM(engine.gearing);
+    if (tread) engine.treadRadiusM = tread;
+    return engine;
   }
 
   // Typical overall wheel diameters (mm) by vehicle type, for a sanity check on the stored
@@ -5610,8 +5639,12 @@
         const engine = getSimEngine();
         const model = calc.buildEngineModel(engine);
         const redline = model ? ` Top gear hits the redline at ${(model.maxGearSpeed * 3.6).toFixed(0)} km/h.` : '';
+        const tread = simTreadRadiusM(engine.gearing);
+        const leanNote = getSimClass() !== 'motorcycle' ? ''
+          : (tread ? ` RPM is lean-adjusted (tread radius ${Math.round(tread * 1000)} mm).`
+            : ' No tire size, so RPM is not lean-adjusted.');
         vehicleSimVehicleHint.textContent = 'Engine curve + gearing ready: the best gear is picked at every point on track. '
-          + describeSimGearing(v, engine.gearing) + redline;
+          + describeSimGearing(v, engine.gearing) + redline + leanNote;
       }
     }
   }
@@ -5843,27 +5876,28 @@
       // best-gear rule would use at every point -- written as ordinary channels.
       const extraChannels = [];
       // Required lean angle = atan(lateral accel [g]), signed like the lateral accel.
-      if (result.leanDeg) {
+      const isMoto = getSimClass() === 'motorcycle';
+      if (isMoto && result.leanDeg) {
         if (!log.cols.includes('Required Lean Angle')) log.cols.push('Required Lean Angle');
         for (let i = 0; i < n; i++) log.data[i]['Required Lean Angle'] = result.leanDeg[i];
         log.meta.units['Required Lean Angle'] = 'deg';
         extraChannels.push('Required Lean Angle');
       }
-      if (result.leanRateDegS) {
+      if (isMoto && result.leanRateDegS) {
         if (!log.cols.includes('Required Lean Angle Rate')) log.cols.push('Required Lean Angle Rate');
         for (let i = 0; i < n; i++) log.data[i]['Required Lean Angle Rate'] = result.leanRateDegS[i];
         log.meta.units['Required Lean Angle Rate'] = 'deg/s';
         extraChannels.push('Required Lean Angle Rate');
       }
       if (result.gear && result.rpm) {
-        ['Gear', 'RPM'].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
+        [SIM_GEAR_COL, SIM_RPM_COL].forEach((col) => { if (!log.cols.includes(col)) log.cols.push(col); });
         for (let i = 0; i < n; i++) {
-          log.data[i].Gear = result.gear[i];
-          log.data[i].RPM = Math.round(result.rpm[i]);
+          log.data[i][SIM_GEAR_COL] = result.gear[i];
+          log.data[i][SIM_RPM_COL] = Math.round(result.rpm[i]);
         }
-        log.meta.units.Gear = '';
-        log.meta.units.RPM = 'rpm';
-        extraChannels.push('Gear', 'RPM');
+        log.meta.units[SIM_GEAR_COL] = '';
+        log.meta.units[SIM_RPM_COL] = 'rpm';
+        extraChannels.push(SIM_GEAR_COL, SIM_RPM_COL);
       }
       addCalculatedCommonChannels(log.data, log.cols, log.meta);
 
@@ -5896,7 +5930,279 @@
     populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect(); if (binnedPlotAxisSelect) populateAxisChannelSelect(binnedPlotAxisSelect);
     renderLapsList();
     updatePlot();
+    if (result) ensureSimMapXY(log);
     if (result) saveSimulation(log, !!rerun);
+  }
+
+  // ── Simulate Vehicle: what is computed, and on what assumptions ───────────
+  function openSimInfoModal() {
+    const moto = getSimClass() === 'motorcycle';
+    const curve = !vehicleSimPowerModelSelect || vehicleSimPowerModelSelect.value === 'curve';
+    const engine = curve ? getSimEngine() : null;
+    const calc = getRacingLineCalculationsApi();
+    const engineReady = !!(engine && calc && calc.describeEngineProblems(engine).length === 0);
+    const tread = engine ? simTreadRadiusM(engine.gearing) : 0;
+
+    const channel = (on, name, text) => '<li class="' + (on ? '' : 'sim-info-off') + '"><strong>' + name + '</strong>'
+      + (on ? '' : ' (not computed with the current settings)') + ' -- ' + text + '</li>';
+    const html = [
+      '<h4>Channels the simulation writes (on the simulated lap)</h4><ul>',
+      channel(true, 'Speed', 'the fastest speed the grip, power and drag limits allow at each point (forward/backward pass over the racing line).'),
+      channel(true, 'LatAcc / LongAcc', "lateral and longitudinal acceleration in g, derived from that speed profile and the line's curvature."),
+      channel(true, 'Lap Time', 'elapsed time from the start/finish line.'),
+      channel(moto, 'Required Lean Angle', 'arctan(lateral g), in degrees, signed like LatAcc. It is the lean of the bike + rider centre of mass.'),
+      channel(moto, 'Required Lean Angle Rate', 'how fast that lean has to change, deg/s.'),
+      channel(engineReady, 'Gear (sim)', 'the gear giving the most wheel power at that speed (subject to the shift-time rule below).'),
+      channel(engineReady, 'RPM (sim)', 'engine RPM in that gear from road speed, gearing and tire size' + (moto ? ', corrected for lean.' : '.')),
+      '</ul>',
+      '<h4>Logged data</h4><ul>',
+      "<li><strong>RPM (sim)</strong>, <strong>Gear (sim)</strong>" + (moto ? ', <strong>Required Lean Angle</strong> and <strong>Required Lean Angle Rate</strong>' : '') + " can be added to real laps with <em>Simulate RPM, Gear &amp; Lean for Logged Data</em>: the same gear rule, RPM maths and lean formulas, driven by the logged speed" + (moto ? ' and lateral g (for the lean correction)' : '') + ". They use the same channel names as the simulated lap so the two overlay, never overwrite the log's own RPM/Gear, and exist only in the loaded data (re-run after reloading).</li>",
+      '</ul>',
+      '<h4>Assumptions</h4><ul>',
+      '<li>Grip is a friction circle: Max Lateral / Max Longitudinal (g) set the envelope; all speeds are limited by it, by power and by air drag (CdA, mass, drivetrain efficiency).</li>',
+      '<li>Mass and CdA come from the vehicle plus rider when picked (rider CdA only if the vehicle has one).</li>',
+      "<li>Engine-curve mode: wheel power is the engine curve at the RPM the gear implies, times drivetrain efficiency. Below the curve's first RPM the clutch slips (torque held). Above the last RPM (redline) there is no drive.</li>",
+      '<li>Shift time (vehicle gearing): a downshift is only made if the time it gains beats two shifts of lost drive (down + back up); upshifts are instant.</li>',
+      '<li>Tire size gives the overall wheel diameter (nominal, unloaded -- no growth or squash). Overall diameter = 2 x width x aspect + rim.</li>',
+      moto
+        ? "<li>Lean and RPM: leaned over, the bike rolls on the tire's side, so the rolling radius is (R - r) + r cos(lean), with r the tread crown radius = tire width / 2"
+          + (tread ? ' (' + Math.round(tread * 1000) + ' mm for this tire)' : ' (needs a tire size on the vehicle -- without one RPM is not lean-adjusted)')
+          + ". Less radius = more RPM at the same speed. The lean used is the <em>required</em> lean angle above; the frame's own lean and rider hang-off are not modelled.</li>"
+        : '<li>Car class: no lean channels and no lean correction.</li>',
+      '<li>Track grade from the source lap (Slope/Altitude) is included when the elevation option is on; otherwise the track is flat.</li>',
+      '</ul>'
+    ].join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'session-modal';
+    const close = () => overlay.remove();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'session-modal-backdrop';
+    backdrop.addEventListener('click', close);
+    const dialog = document.createElement('div');
+    dialog.className = 'session-modal-dialog sim-info-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', 'About the simulation');
+    const header = document.createElement('div');
+    header.className = 'session-modal-header';
+    const title = document.createElement('h3');
+    title.className = 'session-modal-title';
+    title.textContent = 'About the simulation (' + (moto ? 'motorcycle' : 'car') + ')';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'session-modal-close';
+    closeBtn.textContent = '✕';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.addEventListener('click', close);
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    const body = document.createElement('div');
+    body.className = 'sim-info-body';
+    body.innerHTML = html;
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    overlay.appendChild(backdrop);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+  }
+
+  // Map X / Map Y on the simulated lap, like the GPS logs have. Normally they come from the
+  // same X/Y <-> Lat/Lng code the real logs use (see updateGpBikesDerivedLatLon: PosX/PosY ->
+  // Derived Latitude/Longitude, then buildDerivedXY back to Map X/Y, which then follow the
+  // map offsets). If no map origin could be resolved that never ran, so the racing line's own
+  // X/Y -- already in the map's frame -- are used directly.
+  function ensureSimMapXY(log) {
+    if (!log || log.cols.includes(DERIVED_MAP_X_COL)) return;
+    const nativeCols = getNativeXYCols(log);
+    if (!nativeCols) return;
+    [DERIVED_MAP_X_COL, DERIVED_MAP_Y_COL].forEach((c) => { if (!log.cols.includes(c)) log.cols.push(c); });
+    log.meta.units[DERIVED_MAP_X_COL] = 'm';
+    log.meta.units[DERIVED_MAP_Y_COL] = 'm';
+    log.data.forEach((row) => {
+      row[DERIVED_MAP_X_COL] = row[nativeCols.xCol];
+      row[DERIVED_MAP_Y_COL] = row[nativeCols.yCol];
+    });
+    populateYSelect();
+    populateXCustomSelect();
+  }
+
+  // The same channel names on a simulated lap and on logged data, so they overlay directly.
+  const SIM_RPM_COL = 'RPM (sim)';
+  const SIM_GEAR_COL = 'Gear (sim)';
+  const SIM_LEAN_COL = 'Required Lean Angle';
+  const SIM_LEAN_RATE_COL = 'Required Lean Angle Rate';
+
+  // ── Simulated channels for logged data: saved as a linked file ────────────
+  // The derived channels only exist in the loaded log, so they are also written to a second
+  // stored file (one per source log, same sessions/vehicle/rider) that is re-applied whenever
+  // the source log is loaded again. It is keyed to the source by name and by row, and is
+  // skipped by every "load a stored file" path since it is not a log itself.
+  const SIM_CHANNEL_UNITS = {
+    'RPM (sim)': 'rpm', 'Gear (sim)': '', 'Required Lean Angle': 'deg', 'Required Lean Angle Rate': 'deg/s'
+  };
+
+  function simChannelsFileName(sourceName) {
+    return String(sourceName) + ' - sim channels.csv';
+  }
+
+  function isSimChannelsRecord(record) {
+    return !!(record && record.metadata && record.metadata.sim_channels_for);
+  }
+
+  function saveLoggedSimChannels(log, cols, vehicle, rider, settings) {
+    if (!sessionsApi || !sessionsFiles || !cols.length) return Promise.resolve(null);
+    return sessionsFiles.getFileByName(log.name).then((source) => {
+      if (!source) return null; // the source was never stored, so there is nothing to link to
+      const header = ['Row'].concat(cols);
+      const lines = [header.map(csvEscapeValue).join(',')];
+      log.data.forEach((row, i) => {
+        lines.push([i].concat(cols.map((c) => row[c])).map(csvEscapeValue).join(','));
+      });
+      const text = lines.join('\n');
+      const name = simChannelsFileName(log.name);
+      return sessionsFiles.storeFile(name, text, computeFileHash(text), {}).then((record) => sessionsFiles.updateFileLinks(record.id, {
+        vehicle_id: vehicle ? vehicle.id : '',
+        rider_id: rider ? rider.id : '',
+        metadata: Object.assign({}, record.metadata, {
+          simulated: true,
+          sim_channels_for: source.id,
+          source_name: log.name,
+          settings
+        })
+      })).then((record) => Promise.all((source.session_ids || []).map(
+        (sessionId) => sessionsApi.SessionService.addFileToSession(sessionId, record.id)
+      )).then(() => record));
+    }).then((record) => {
+      if (record) { renderStoredFilesList(); renderPickerList(); if (window.SessionsUI) window.SessionsUI.renderPanel(); }
+      return record;
+    });
+  }
+
+  // Re-applies a saved simulated-channels file to a freshly loaded log, if the rows line up.
+  function applyLinkedSimChannels(logId) {
+    if (!sessionsFiles) return Promise.resolve();
+    const log = logs.find((l) => l.id === logId);
+    if (!log || (log.meta && log.meta.synthetic)) return Promise.resolve();
+    return sessionsFiles.getFileByName(simChannelsFileName(log.name)).then((record) => {
+      if (!record || !record.text || !isSimChannelsRecord(record)) return;
+      const parsed = Papa.parse(record.text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+      const rows = parsed.data || [];
+      if (rows.length !== log.data.length) {
+        console.warn('Saved simulated channels for ' + log.name + ' do not match its rows; not applied.');
+        return;
+      }
+      const cols = (parsed.meta.fields || []).filter((c) => c !== 'Row');
+      if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+      cols.forEach((c) => {
+        if (!log.cols.includes(c)) log.cols.push(c);
+        log.meta.units[c] = SIM_CHANNEL_UNITS[c] != null ? SIM_CHANNEL_UNITS[c] : '';
+        rows.forEach((r, i) => { log.data[i][c] = (r[c] === '' || r[c] === undefined) ? null : r[c]; });
+      });
+      populateYSelect();
+      populateXCustomSelect();
+      populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+      updatePlot();
+    }).catch(() => {});
+  }
+
+  // Adds RPM (sim) / Gear (sim) to the selected real (non-simulated) logs from their
+  // speed and lateral acceleration, with the chosen vehicle's gearing and tire.
+  function simulateRpmGearForLoggedData() {
+    const say = (text) => { if (vehicleSimStatus) vehicleSimStatus.textContent = text; };
+    const calc = getRacingLineCalculationsApi();
+    const moto = getSimClass() === 'motorcycle';
+    const engine = getSimEngine();
+    const problems = engine ? calc.describeEngineProblems(engine) : ['a vehicle'];
+    // Lean angle only needs the lateral g, so a motorcycle still gets it without an engine.
+    if (problems.length && !moto) {
+      say(engine ? 'This vehicle is missing ' + problems.join(', ') + '; cannot simulate RPM and gear.'
+        : 'Pick a vehicle with a power curve and gearing first.');
+      return;
+    }
+    const targets = getSelectedFiles().filter((l) => !(l.meta && l.meta.synthetic));
+    if (!targets.length) { say('Load a real log and select it first.'); return; }
+
+    const num = (input, fallback) => {
+      const n = input ? Number(input.value) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+    const ctx = { massKg: num(vehicleSimMassInput, 235), cda: num(vehicleSimCdaInput, 0.5) };
+    let done = 0;
+    const added = new Set();
+    const processed = [];
+    targets.forEach((log) => {
+      const speedCol = resolveChannelForLog('Speed', log);
+      if (!speedCol || !log.cols.includes(speedCol)) return;
+      const unit = String((log.meta.units && log.meta.units[speedCol]) || '').toLowerCase();
+      const toMs = /mph/.test(unit) ? 0.44704 : (/m\/s/.test(unit) ? 1 : 1 / 3.6);
+      const speedMs = log.data.map((row) => { const v = Number(row[speedCol]); return Number.isFinite(v) ? v * toMs : NaN; });
+      let lat = null;
+      if (moto) {
+        const latCol = resolveChannelForLog(COMMON_LAT_ACC_CHANNEL, log);
+        if (latCol && log.cols.includes(latCol)) {
+          const latUnit = String((log.meta.units && log.meta.units[latCol]) || '').toLowerCase();
+          const toG = /m\/s/.test(latUnit) ? 1 / 9.81 : 1;
+          lat = log.data.map((row) => { const a = Number(row[latCol]); return Number.isFinite(a) ? a * toG : NaN; });
+        }
+      }
+      if (!log.meta.units || typeof log.meta.units !== 'object') log.meta.units = {};
+      const put = (col, unit, values) => {
+        if (!log.cols.includes(col)) log.cols.push(col);
+        log.meta.units[col] = unit;
+        log.data.forEach((row, i) => { row[col] = values[i]; });
+        added.add(col);
+      };
+      let did = false;
+      const logCols = [];
+      if (!problems.length) {
+        const res = calc.computeEngineRpmGear(engine, speedMs, lat, ctx);
+        if (res) {
+          put(SIM_RPM_COL, 'rpm', res.rpm.map((r) => (r == null ? null : Math.round(r))));
+          put(SIM_GEAR_COL, '', res.gear);
+          logCols.push(SIM_RPM_COL, SIM_GEAR_COL);
+          did = true;
+        }
+      }
+      if (moto && lat) {
+        // Time within the lap (falls back to a Time column) for the rate of change.
+        const lapTime = Array.isArray(log.meta.lapTime) ? log.meta.lapTime.map(Number) : null;
+        const timeCol = resolveChannelForLog('Time', log);
+        const timeS = lapTime && lapTime.every(Number.isFinite)
+          ? lapTime
+          : (timeCol && log.cols.includes(timeCol) ? log.data.map((row) => Number(row[timeCol])) : null);
+        const leanRes = calc.computeLeanFromLatAcc(lat, timeS, log.meta.lapNum);
+        if (leanRes) {
+          put(SIM_LEAN_COL, 'deg', leanRes.leanDeg);
+          put(SIM_LEAN_RATE_COL, 'deg/s', leanRes.leanRateDegS);
+          logCols.push(SIM_LEAN_COL, SIM_LEAN_RATE_COL);
+          did = true;
+        }
+      }
+      if (did) { done++; processed.push({ log, cols: logCols }); }
+    });
+    if (!done) { say('None of the selected logs has the Speed / lateral acceleration channels needed.'); return; }
+    say('Added ' + Array.from(added).join(', ') + ' to ' + done + ' log' + (done === 1 ? '' : 's')
+      + (moto && engine && engine.treadRadiusM && !problems.length ? ' (RPM lean-adjusted from lateral g).' : '.')
+      + (problems.length ? ' RPM and gear need a vehicle with a power curve and gearing.' : ''));
+    const settings = {
+      vehicleClass: moto ? 'motorcycle' : 'car',
+      treadRadiusM: engine && engine.treadRadiusM ? engine.treadRadiusM : null,
+      massKg: ctx.massKg,
+      cda: ctx.cda
+    };
+    Promise.all(processed.map((p) => saveLoggedSimChannels(p.log, p.cols, selectedSimVehicle(), selectedSimRider(), settings)))
+      .then((records) => {
+        const saved = records.filter(Boolean).length;
+        if (saved && vehicleSimStatus) {
+          vehicleSimStatus.textContent += ' Saved as linked file' + (saved === 1 ? '' : 's') + ' (re-applied when the log is loaded again).';
+        }
+      })
+      .catch((err) => console.error('Could not save the simulated channels:', err));
+    populateYSelect();
+    populateXCustomSelect();
+    populateMapColorSelect(); populateColorAxisSelect(); populateDataFilterChannelSelect();
+    updatePlot();
   }
 
   // ── Simulate Vehicle: saving each run ─────────────────────────────────────
@@ -6575,7 +6881,7 @@
   }
 
   function getDerivedMapLogs(selFiles) {
-    return selFiles.filter(l => Array.isArray(l.cols) && l.cols.includes(DERIVED_MAP_X_COL) && l.cols.includes(DERIVED_MAP_Y_COL));
+    return selFiles.filter(l => Array.isArray(l.cols) && l.cols.includes(DERIVED_MAP_X_COL) && l.cols.includes(DERIVED_MAP_Y_COL) && !(l.meta && l.meta.racingLine));
   }
 
   function getNativeXYLogs(selFiles) {
@@ -6714,6 +7020,30 @@
         row[DERIVED_LAT_COL] = ll ? ll.lat : null;
         row[DERIVED_LON_COL] = ll ? ll.lon : null;
       });
+
+      // A simulated lap only has racing-line X/Y; give it Map X/Y the way GPS logs get them:
+      // lat/lng -> local meters about the same origin, then the current map offsets.
+      if (log.meta && log.meta.racingLine && typeof window.MapCoordinateUtils.buildDerivedXY === 'function') {
+        const base = window.MapCoordinateUtils.buildDerivedXY(
+          log.data.map((r) => r[DERIVED_LAT_COL]),
+          log.data.map((r) => r[DERIVED_LON_COL]),
+          origin
+        );
+        if (base) {
+          log.meta.mapDerivedXY = base;
+          [DERIVED_MAP_X_COL, DERIVED_MAP_Y_COL].forEach((c) => {
+            if (!log.cols.includes(c)) { log.cols.push(c); addedCols = true; }
+          });
+          log.meta.units[DERIVED_MAP_X_COL] = 'm';
+          log.meta.units[DERIVED_MAP_Y_COL] = 'm';
+          log.data.forEach((row, i) => {
+            const x0 = Number(base.x[i]);
+            const y0 = Number(base.y[i]);
+            row[DERIVED_MAP_X_COL] = Number.isFinite(x0) ? x0 + offsets.x : null;
+            row[DERIVED_MAP_Y_COL] = Number.isFinite(y0) ? y0 + offsets.y : null;
+          });
+        }
+      }
     });
 
     return addedCols;
@@ -6722,7 +7052,7 @@
   function getFirstDerivedMapOrigin(selFiles) {
     const candidates = Array.isArray(selFiles) && selFiles.length > 0 ? selFiles : logs;
     for (const log of candidates) {
-      const origin = log && log.meta && log.meta.mapDerivedXY;
+      const origin = log && log.meta && !log.meta.racingLine && log.meta.mapDerivedXY;
       if (!origin) continue;
       if (Number.isFinite(origin.originLat) && Number.isFinite(origin.originLon)) {
         return { originLat: origin.originLat, originLon: origin.originLon };
@@ -10034,8 +10364,18 @@
 
   // Vehicle / rider pickers: choosing one fills mass, CdA and average power from it; the
   // ✎ and + buttons open the very same editor popovers the Sessions panel uses.
+  setSimClass(loadSimSelection().vehicleClass);
+  vehicleSimClassRadios.forEach((r) => r.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(false); }));
+  if (vehicleSimInfoBtn) vehicleSimInfoBtn.addEventListener('click', openSimInfoModal);
+  if (vehicleSimLoggedBtn) vehicleSimLoggedBtn.addEventListener('click', simulateRpmGearForLoggedData);
   if (vehicleSimVehicleSelect) {
-    vehicleSimVehicleSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(true); });
+    vehicleSimVehicleSelect.addEventListener('change', () => {
+      // A car or motorcycle picks its own class (kart/other leave the current choice).
+      const picked = selectedSimVehicle();
+      if (picked && (picked.type === 'car' || picked.type === 'motorcycle')) setSimClass(picked.type);
+      saveSimSelection();
+      updateSimSelectionState(true);
+    });
   }
   if (vehicleSimRiderSelect) {
     vehicleSimRiderSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(true); });
@@ -11385,7 +11725,7 @@
       if (entries.length === 0) return;
       const alreadyLoaded = new Set(logs.map(l => l.name));
       entries.forEach((entry) => {
-        if (alreadyLoaded.has(entry.name)) return;
+        if (alreadyLoaded.has(entry.name) || isSimChannelsRecord(entry)) return;
         const blob = new Blob([entry.text], { type: 'text/plain' });
         const file = new File([blob], entry.name, { type: 'text/plain' });
         parseFile(file, /* skipStore */ true);
@@ -11430,7 +11770,7 @@
     return Promise.all(fileIds.map((id) => sessionsFiles.getFile(id))).then((records) => {
       let loadedCount = 0;
       records.forEach((record) => {
-        if (!record || !record.text || alreadyLoaded.has(record.name)) return;
+        if (!record || !record.text || alreadyLoaded.has(record.name) || isSimChannelsRecord(record)) return;
         const blob = new Blob([record.text], { type: 'text/plain' });
         const file = new File([blob], record.name, { type: 'text/plain' });
         parseFile(file, /* skipStore */ true);
@@ -11447,7 +11787,9 @@
     const sortBy = pickUploadedSortSelect ? pickUploadedSortSelect.value : 'date';
     const filter = pickUploadedSearch ? pickUploadedSearch.value.trim().toLowerCase() : '';
 
-    getAllFilesFromDB().then((entries) => {
+    getAllFilesFromDB().then((allEntries) => {
+      // Saved simulated-channel files ride along with their source log; they aren't logs.
+      const entries = allEntries.filter((e) => !isSimChannelsRecord(e));
       pickUploadedList.innerHTML = '';
       if (entries.length === 0) {
         const empty = document.createElement('div');
@@ -11710,7 +12052,7 @@
         if (!entry.name || typeof entry.text !== 'string') return Promise.resolve();
         return storeFileInDB(entry.name, entry.text).then(() => {
           const alreadyLoaded = new Set(logs.map(l => l.name));
-          if (!alreadyLoaded.has(entry.name)) {
+          if (!alreadyLoaded.has(entry.name) && !String(entry.name).endsWith(" - sim channels.csv")) {
             const blob = new Blob([entry.text], { type: 'text/plain' });
             const fileObj = new File([blob], entry.name, { type: 'text/plain' });
             parseFile(fileObj, /* skipStore */ true);

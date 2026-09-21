@@ -324,3 +324,72 @@ test('shift time lengthens (never shortens) the simulated lap, and 0 leaves it u
   assert.ok(slow.lapTime >= none.lapTime - 1e-9);
   assert.equal(slow.gear.length, 160);
 });
+
+test('leaning shrinks the rolling radius, raising RPM at the same road speed (tread radius = half the tire width)', () => {
+  const R = GEARING.wheel_circumference_m / (2 * Math.PI);
+  const r = 0.07;
+  const mk = (tread) => calc.buildEngineModel({
+    powerCurve: shapedCurve, gearing: GEARING, efficiency: 1, treadRadiusM: tread
+  });
+  const tire = mk(r);
+  const plain = mk(0);
+  const v = 25;
+  const upright = tire.best(v, null, 0).rpm;
+  assert.equal(upright, plain.best(v, null, 0).rpm, 'no lean, no change');
+  assert.equal(plain.best(v, null, 0.9).rpm, upright, 'no tread radius, no lean effect');
+  for (const deg of [15, 30, 50]) {
+    const lean = (deg * Math.PI) / 180;
+    const expected = upright * R / ((R - r) + r * Math.cos(lean));
+    const leaned = tire.best(v, null, lean);
+    // Gear can differ once RPM shifts, so compare the same gear directly.
+    const sameGear = tire.best(v, null, lean).gear === tire.best(v, null, 0).gear;
+    if (sameGear) assert.ok(Math.abs(leaned.rpm - expected) < 1e-6, `rpm at ${deg} deg`);
+    assert.ok(leaned.rpm >= upright - 1e-9);
+  }
+  // ~50 degrees of lean on the R3's 140 mm tire is roughly +8-9% RPM.
+  const ratio = R / ((R - r) + r * Math.cos((50 * Math.PI) / 180));
+  assert.ok(ratio > 1.07 && ratio < 1.10, `ratio ${ratio}`);
+});
+
+test('the simulated RPM in corners is higher with the tread radius set, straights are unchanged', () => {
+  const rep = circleRep(60, 40); // one long constant corner
+  const sampled = sampleAt(rep, 120);
+  const run = (tread) => calc.simulateVehicleSpeed(rep, sampled, Object.assign({
+    engine: { powerCurve: shapedCurve, gearing: GEARING, efficiency: 0.95, treadRadiusM: tread }
+  }, BASE), null);
+  const withTread = run(0.07);
+  const without = run(0);
+  const meanRpm = (r) => r.rpm.reduce((a, b) => a + b, 0) / r.rpm.length;
+  assert.ok(meanRpm(withTread) > meanRpm(without) * 1.02);
+  assert.ok(withTread.lapTime >= 0 && Math.abs(withTread.lapTime - without.lapTime) / without.lapTime < 0.05);
+});
+
+test('computeEngineRpmGear gives RPM and gear for logged speed, with a lean correction from lateral g', () => {
+  const engine = { powerCurve: shapedCurve, gearing: GEARING, efficiency: 0.95, treadRadiusM: 0.07 };
+  const speed = [10, 15, 20, 25, 30, 30];
+  const straight = calc.computeEngineRpmGear(engine, speed, null, { massKg: 250, cda: 0.4 });
+  const leaning = calc.computeEngineRpmGear(engine, speed, [0, 0, 0, 0, 1.2, 1.2], { massKg: 250, cda: 0.4 });
+  assert.equal(straight.rpm.length, 6);
+  assert.ok(straight.gear.every((g) => g >= 1 && g <= 6));
+  for (let i = 0; i < 4; i++) assert.equal(leaning.rpm[i], straight.rpm[i]);
+  assert.ok(leaning.rpm[4] > straight.rpm[4], 'leaned samples turn faster');
+  assert.equal(calc.computeEngineRpmGear({ powerCurve: [], gearing: {} }, speed, null, {}), null);
+  const gaps = calc.computeEngineRpmGear(engine, [10, NaN, 20], null, {});
+  assert.equal(gaps.rpm[1], null);
+});
+
+test('computeLeanFromLatAcc: lean = atan(lat g), rate is dLean/dt within a lap only', () => {
+  const lat = [0, 0.5, 1, 1, 0.5, 0];
+  const t = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
+  const res = calc.computeLeanFromLatAcc(lat, t, [1, 1, 1, 2, 2, 2]);
+  assert.ok(Math.abs(res.leanDeg[2] - 45) < 1e-9);
+  assert.ok(Math.abs(res.leanDeg[1] - (Math.atan(0.5) * 180 / Math.PI)) < 1e-9);
+  assert.ok(Math.abs(res.leanRateDegS[1] - (45 - 0) / 0.2) < 1e-9);
+  assert.strictEqual(res.leanRateDegS[0], null);
+  assert.strictEqual(res.leanRateDegS[2], null, 'a difference never spans two laps');
+  assert.strictEqual(res.leanRateDegS[5], null);
+  const noTime = calc.computeLeanFromLatAcc([0.1, NaN, 0.3], null, null);
+  assert.strictEqual(noTime.leanDeg[1], null);
+  assert.ok(noTime.leanRateDegS.every((r) => r === null));
+  assert.strictEqual(calc.computeLeanFromLatAcc(null, null, null), null);
+});

@@ -152,14 +152,14 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await page.selectOption('#vehicleSimRiderSelect', { label: 'Rider One' });
     await simulate(page);
     await expect(page.locator('#vehicleSimStatus')).toContainText('Engine curve + gearing');
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Gear, RPM');
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Gear (sim), RPM (sim)');
 
-    const gears = await racingLineChannelValues(page, 'Gear');
+    const gears = await racingLineChannelValues(page, 'Gear (sim)');
     expect(gears).not.toBeNull();
     expect(gears.length).toBeGreaterThan(10);
     gears.forEach((g) => { expect(Number.isInteger(g)).toBe(true); expect(g).toBeGreaterThanOrEqual(1); expect(g).toBeLessThanOrEqual(6); });
 
-    const rpm = await racingLineChannelValues(page, 'RPM');
+    const rpm = await racingLineChannelValues(page, 'RPM (sim)');
     expect(rpm).not.toBeNull();
     // Never above the curve's redline, and always a real engine speed.
     rpm.forEach((r) => { expect(r).toBeGreaterThan(0); expect(r).toBeLessThanOrEqual(12500); });
@@ -207,9 +207,9 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     // The reported symptom: pinned at one speed (~68 km/h) in top gear, near redline RPM.
     const speed = await racingLineChannelValues(page, 'Speed');
     expect(Math.max(...speed)).toBeLessThan(70);
-    const gears = await racingLineChannelValues(page, 'Gear');
+    const gears = await racingLineChannelValues(page, 'Gear (sim)');
     expect(gears.filter((g) => g === 6).length / gears.length).toBeGreaterThan(0.5);
-    const rpm = await racingLineChannelValues(page, 'RPM');
+    const rpm = await racingLineChannelValues(page, 'RPM (sim)');
     expect(Math.max(...rpm)).toBeGreaterThan(16000);
   });
 
@@ -218,7 +218,7 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     const changes = async (model) => {
       await pickVehicle(page, model);
       await simulate(page);
-      const gears = await racingLineChannelValues(page, 'Gear');
+      const gears = await racingLineChannelValues(page, 'Gear (sim)');
       let n = 0;
       for (let i = 1; i < gears.length; i++) if (gears[i] !== gears[i - 1]) n++;
       return n;
@@ -247,9 +247,9 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     const speed = await racingLineChannelValues(page, 'Speed');
     expect(Math.max(...speed)).toBeGreaterThan(120);
     // Real gear choices: it uses several gears, and never runs past the curve's redline.
-    const gears = await racingLineChannelValues(page, 'Gear');
+    const gears = await racingLineChannelValues(page, 'Gear (sim)');
     expect(new Set(gears).size).toBeGreaterThan(2);
-    const rpm = await racingLineChannelValues(page, 'RPM');
+    const rpm = await racingLineChannelValues(page, 'RPM (sim)');
     expect(Math.max(...rpm)).toBeLessThanOrEqual(16163);
   });
 
@@ -260,8 +260,8 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await simulate(page);
     await expect(page.locator('#vehicleSimStatus')).toContainText('missing');
     await expect(page.locator('#vehicleSimStatus')).toContainText('used average power instead');
-    expect(await racingLineChannelValues(page, 'Gear')).toBeNull();
-    expect(await racingLineChannelValues(page, 'RPM')).toBeNull();
+    expect(await racingLineChannelValues(page, 'Gear (sim)')).toBeNull();
+    expect(await racingLineChannelValues(page, 'RPM (sim)')).toBeNull();
   });
 
   test('average power mode simulates without Gear/RPM channels', async ({ page }) => {
@@ -271,8 +271,8 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await page.selectOption('#vehicleSimPowerModel', 'average');
     await simulate(page);
     await expect(page.locator('#vehicleSimStatus')).toContainText('Average power model');
-    expect(await racingLineChannelValues(page, 'Gear')).toBeNull();
-    expect(await racingLineChannelValues(page, 'RPM')).toBeNull();
+    expect(await racingLineChannelValues(page, 'Gear (sim)')).toBeNull();
+    expect(await racingLineChannelValues(page, 'RPM (sim)')).toBeNull();
   });
 
   test('curve mode with no vehicle chosen explains it needs one', async ({ page }) => {

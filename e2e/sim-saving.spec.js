@@ -200,3 +200,109 @@ test.describe('mobile fixes', () => {
     })).toBeLessThan(1500);
   });
 });
+
+test.describe('linked simulated-channel files and the remembered session', () => {
+  test.beforeEach(async ({ page }) => { await seed(page); });
+
+  test('logged-data channels are saved as a linked file, in the same session, and re-applied on reload', async ({ page }) => {
+    await loadSampleFile(page, PITT_LAP);
+    // Attach the real log to the session first (as a user would).
+    await page.evaluate(() => window.SessionsUI.renderPanel());
+    await page.locator('.file-add-to-session-btn').first().click();
+    await page.locator('.session-modal-save').click();
+    await expect.poll(async () => (await storedFiles(page)).find((f) => !f.simulated && f.session_ids.length === 1)).toBeTruthy();
+
+    await page.evaluate(() => { document.getElementById('vehicleSimDetails').open = true; });
+    await page.locator('#vehicleSimLoggedBtn').click(); // motorcycle, no vehicle: lean channels only
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Saved as linked file');
+
+    const linked = (await storedFiles(page)).find((f) => f.name.endsWith(' - sim channels.csv'));
+    expect(linked).toBeTruthy();
+    expect(linked.simulated).toBe(true);
+    const source = (await storedFiles(page)).find((f) => f.name.startsWith('PiBoSo'));
+    expect(linked.session_ids).toEqual(source.session_ids); // same session as its source
+    expect(linked.text.split('\n')[0]).toBe('Row,Required Lean Angle,Required Lean Angle Rate');
+
+    // Reload and load the source log again: the channels come back by themselves.
+    await page.reload();
+    await loadSampleFile(page, PITT_LAP);
+    await expect.poll(() => page.evaluate(() => Array.from(document.getElementById('ySelect').options).map((o) => o.value)))
+      .toContain('Required Lean Angle');
+
+    // The linked file is not offered as a log to load.
+    await page.locator('#pickUploadedDataBtn').click();
+    await expect(page.locator('#pickUploadedList')).not.toContainText('sim channels');
+  });
+
+  test('the selected session is remembered across a reload', async ({ page }) => {
+    await page.evaluate(async () => {
+      const api = window.SessionsServices.createServices();
+      await api.SessionService.createSession({ name: 'Practice B', start_time: new Date(Date.now() + 3600e3).toISOString() });
+    });
+    await page.reload();
+    await page.evaluate(() => { document.getElementById('sessionsPanel').open = true; });
+    await expect(page.locator('#sessionsPanelSelect')).toBeVisible();
+    const other = await page.locator('#sessionsPanelSelect option').evaluateAll((opts) => {
+      const cur = document.getElementById('sessionsPanelSelect').value;
+      return opts.map((o) => o.value).find((v) => v !== cur);
+    });
+    await page.selectOption('#sessionsPanelSelect', other);
+    await page.reload();
+    await page.evaluate(() => { document.getElementById('sessionsPanel').open = true; });
+    await expect(page.locator('#sessionsPanelSelect')).toHaveValue(other);
+  });
+});
+
+test.describe('New Session from the Sessions panel', () => {
+  test.beforeEach(async ({ page }) => { await seed(page); });
+
+  test('uses the same session modal as Add to Session (no browser prompt), with vehicle, rider, tags and note', async ({ page }) => {
+    let prompted = false;
+    page.on('dialog', (d) => { prompted = true; d.dismiss(); });
+    await page.evaluate(() => { document.getElementById('sessionsPanel').open = true; });
+    await page.locator('.sessions-new-btn').click();
+
+    const dialog = page.locator('.session-modal-dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('.session-modal-title')).toHaveText('New Session');
+    await expect(dialog.locator('.session-modal-save')).toHaveText('Create Session');
+    // No files / existing-session picker in create mode; the shared fields are all there.
+    await expect(dialog.locator('#addToSessionSelect')).toBeHidden();
+    for (const id of ['#addToSessionNewName', '#addToSessionNewLocation', '#addToSessionVehicle', '#addToSessionRider', '#addToSessionTags', '#addToSessionNote']) {
+      await expect(dialog.locator(id)).toBeVisible();
+    }
+
+    // A name is required.
+    await dialog.locator('.session-modal-save').click();
+    await expect(dialog.locator('.session-modal-status')).toContainText('name');
+
+    await page.fill('#addToSessionNewName', 'Sunday Race');
+    await page.fill('#addToSessionNewLocation', 'Pittsburgh');
+    const bike = await page.locator('#addToSessionVehicle option', { hasText: 'Bike' }).getAttribute('value');
+    await page.selectOption('#addToSessionVehicle', bike);
+    await page.fill('#addToSessionTags', 'race, dry');
+    await page.fill('#addToSessionNote', 'Cold morning');
+    await dialog.locator('.session-modal-save').click();
+    await expect(dialog).toBeHidden();
+    expect(prompted).toBe(false);
+
+    const created = await page.evaluate(async () => {
+      const api = window.SessionsServices.createServices();
+      const sessions = await api.SessionService.listSessions();
+      const s = sessions.find((x) => x.name === 'Sunday Race');
+      const detail = await api.SessionService.getSessionDetail(s.id);
+      return { location: s.location, tags: s.tags, vehicles: detail.vehicles.length, notes: detail.notes.map((n) => n.content) };
+    });
+    expect(created.location).toBe('Pittsburgh');
+    expect(created.tags).toEqual(['race', 'dry']);
+    expect(created.vehicles).toBe(1);
+    expect(created.notes).toEqual(['Cold morning']);
+    await expect(page.locator('#sessionsPanelSelect')).toContainText('Sunday Race');
+
+    // The Add to Session modal still works afterwards (mode is reset).
+    await loadSampleFile(page, PITT_LAP);
+    await page.locator('.file-add-to-session-btn').first().click();
+    await expect(page.locator('.session-modal-dialog .session-modal-title')).toHaveText('Add to Session');
+    await expect(page.locator('#addToSessionSelect')).toBeVisible();
+  });
+});
