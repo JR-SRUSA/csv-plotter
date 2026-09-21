@@ -16,3 +16,5 @@ A couple of bugs on mobile:
     The "Map Type" icon has disappeared from the map (both mobile and Desktop)
 
 When a new sim is added, the title formatting gets a bit messed up, it shows in a very tall skinny column, not like the other data. Sometimes on data load this seems to happen too.
+
+Tire profile - use the width of the tire as the diameter, assume the tire is one arc (ex, 140/70R17 would have a CL radius of 70mm). We can now calculate Frame lean angle (using tire profile and required lean angle) This can then be used to adjust the RPM with the frame lean angle.

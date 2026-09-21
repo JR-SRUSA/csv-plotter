@@ -93,7 +93,19 @@
     // Leaflet map. Passed null to disarm.
     const onPickModeChange = typeof opts.onPickModeChange === 'function' ? opts.onPickModeChange : () => {};
 
-    let selectedSessionId = null;
+    // The session selected in the panel is remembered across reloads: it is also the one new
+    // simulations and notes are filed under, so forgetting it (and falling back to the first
+    // session in the list) made work look like it had lost its session.
+    const SELECTED_SESSION_KEY = 'sessionsPanelSelectedId';
+    let selectedSessionId = (() => {
+      try { return localStorage.getItem(SELECTED_SESSION_KEY) || null; } catch (e) { return null; }
+    })();
+    function rememberSelectedSession() {
+      try {
+        if (selectedSessionId) localStorage.setItem(SELECTED_SESSION_KEY, selectedSessionId);
+        else localStorage.removeItem(SELECTED_SESSION_KEY);
+      } catch (e) { /* storage unavailable -- just not remembered */ }
+    }
     // '__all__' shows every session; '' shows only sessions with no event; anything else
     // is an Event.id. Purely a display filter -- it never reassigns a session's event_id.
     let eventFilterId = '__all__';
@@ -181,6 +193,8 @@
       const fileListEl = el('div', { class: 'session-modal-files' });
       const statusEl = el('div', { class: 'session-modal-status', 'aria-live': 'polite' });
 
+      const titleEl = el('h3', { class: 'session-modal-title', text: 'Add to Session' });
+      const sessionLabel = el('label', { class: 'session-modal-label', text: 'Session' });
       const saveBtn = el('button', { type: 'button', class: 'session-modal-save', text: 'Add to Session' });
       const cancelBtn = el('button', { type: 'button', class: 'session-modal-cancel', text: 'Cancel' });
 
@@ -190,11 +204,11 @@
         'aria-label': 'Add to session'
       }, [
         el('div', { class: 'session-modal-header' }, [
-          el('h3', { class: 'session-modal-title', text: 'Add to Session' }),
+          titleEl,
           el('button', { type: 'button', class: 'session-modal-close', text: '✕', 'aria-label': 'Close' })
         ]),
         fileListEl,
-        el('label', { class: 'session-modal-label', text: 'Session' }),
+        sessionLabel,
         sessionSelect,
         newSessionFields,
         el('label', { class: 'session-modal-label', text: 'Vehicle' }),
@@ -222,7 +236,8 @@
       document.body.appendChild(root);
       return {
         root, sessionSelect, newSessionFields, newNameInput, newLocationInput,
-        vehicleSelect, riderSelect, tagsInput, noteInput, fileListEl, statusEl, saveBtn
+        vehicleSelect, riderSelect, tagsInput, noteInput, fileListEl, statusEl, saveBtn,
+        titleEl, sessionLabel, dialog
       };
     }
 
@@ -235,6 +250,55 @@
       if (!modal) return;
       modal.statusEl.textContent = message || '';
       modal.statusEl.classList.toggle('is-error', !!isError);
+    }
+
+    // The same modal serves two jobs: attaching files to a session (default) and creating a
+    // bare session from the Sessions panel's New Session button ('create'), so both look and
+    // behave alike -- name, location, vehicle, rider, tags and a first note.
+    function applyModalMode(ui, mode) {
+      const creating = mode === 'create';
+      ui.titleEl.textContent = creating ? 'New Session' : 'Add to Session';
+      ui.saveBtn.textContent = creating ? 'Create Session' : 'Add to Session';
+      ui.dialog.setAttribute('aria-label', creating ? 'New session' : 'Add to session');
+      ui.fileListEl.hidden = creating;
+      ui.sessionLabel.hidden = creating;
+      ui.sessionSelect.hidden = creating;
+    }
+
+    function fillVehicleRiderSelects(ui, vehicles, riders) {
+      ui.vehicleSelect.innerHTML = '';
+      ui.vehicleSelect.appendChild(option('', 'No vehicle', true));
+      vehicles.forEach((v) => ui.vehicleSelect.appendChild(option(v.id, describeVehicle(v))));
+      ui.vehicleSelect.appendChild(option('__new_vehicle__', '+ Add new vehicle…'));
+
+      ui.riderSelect.innerHTML = '';
+      ui.riderSelect.appendChild(option('', 'No rider', true));
+      riders.forEach((r) => ui.riderSelect.appendChild(option(r.id, r.name)));
+      ui.riderSelect.appendChild(option('__new_rider__', '+ Add new rider…'));
+    }
+
+    /** Opens the modal to create a new session (used by the Sessions panel). */
+    function openNewSession() {
+      const ui = ensureModal();
+      modalState = { files: [], mode: 'create' };
+      applyModalMode(ui, 'create');
+      ui.sessionSelect.value = '__new__';
+      ui.newSessionFields.hidden = false;
+      ui.newNameInput.value = '';
+      ui.newLocationInput.value = '';
+      ui.tagsInput.value = '';
+      ui.noteInput.value = '';
+      setModalStatus('');
+      ui.saveBtn.disabled = false;
+      return Promise.all([
+        VehicleService.listVehicles({ sortBy: 'make' }),
+        RiderService.listRiders({ sortBy: 'name' })
+      ]).then((results) => {
+        fillVehicleRiderSelects(ui, results[0] || [], results[1] || []);
+        ui.root.hidden = false;
+        ui.newNameInput.focus();
+        return null;
+      });
     }
 
     function closeModal() {
@@ -253,6 +317,7 @@
       if (!list.length) return Promise.resolve(null);
       const ui = ensureModal();
       modalState = { files: list };
+      applyModalMode(ui, 'files');
 
       ui.fileListEl.innerHTML = '';
       ui.fileListEl.appendChild(el('div', {
@@ -288,15 +353,7 @@
         // With no sessions yet, land straight on the create fields.
         ui.newSessionFields.hidden = ui.sessionSelect.value !== '__new__';
 
-        ui.vehicleSelect.innerHTML = '';
-        ui.vehicleSelect.appendChild(option('', 'No vehicle', true));
-        vehicles.forEach((v) => ui.vehicleSelect.appendChild(option(v.id, describeVehicle(v))));
-        ui.vehicleSelect.appendChild(option('__new_vehicle__', '+ Add new vehicle…'));
-
-        ui.riderSelect.innerHTML = '';
-        ui.riderSelect.appendChild(option('', 'No rider', true));
-        riders.forEach((r) => ui.riderSelect.appendChild(option(r.id, r.name)));
-        ui.riderSelect.appendChild(option('__new_rider__', '+ Add new rider…'));
+        fillVehicleRiderSelects(ui, vehicles, riders);
 
         // Prefill vehicle/rider from what the log's own header said, when it matches
         // something already on file -- saves re-picking for every file from an event.
@@ -334,6 +391,7 @@
 
     function submitModal() {
       const ui = ensureModal();
+      if (modalState.mode === 'create') return submitNewSession(ui);
       const files = modalState.files || [];
       if (!files.length) return closeModal();
 
@@ -405,6 +463,52 @@
           ui.saveBtn.disabled = false;
           setModalStatus(err && err.message ? err.message : 'Could not attach the file.', true);
         });
+    }
+
+    function submitNewSession(ui) {
+      const name = String(ui.newNameInput.value || '').trim();
+      if (!name) {
+        setModalStatus('Give the new session a name.', true);
+        return null;
+      }
+      ui.saveBtn.disabled = true;
+      setModalStatus('Saving…');
+      const vehicleId = ui.vehicleSelect.value || '';
+      const riderId = ui.riderSelect.value || '';
+      const tags = parseTagInput(ui.tagsInput.value);
+      const noteText = String(ui.noteInput.value || '').trim();
+
+      return SessionService.createSession({
+        name,
+        location: String(ui.newLocationInput.value || '').trim() || undefined,
+        start_time: Model.nowIso(),
+        tags: tags.length ? tags : undefined
+      }).then((session) => {
+        let chain = Promise.resolve();
+        if (vehicleId) chain = chain.then(() => SessionService.addVehicleToSession(session.id, vehicleId));
+        if (riderId) chain = chain.then(() => SessionService.addRiderToSession(session.id, riderId));
+        if (noteText) {
+          chain = chain.then(() => NoteService.createNote({
+            session_ids: [session.id],
+            vehicle_id: vehicleId || undefined,
+            rider_id: riderId || undefined,
+            type: defaultNoteTypeForSession(session),
+            content: noteText,
+            tags
+          }));
+        }
+        return chain.then(() => session);
+      }).then((session) => {
+        selectedSessionId = session.id;
+        ui.saveBtn.disabled = false;
+        closeModal();
+        renderPanel();
+        onChanged();
+        return session;
+      }).catch((err) => {
+        ui.saveBtn.disabled = false;
+        setModalStatus(err && err.message ? err.message : 'Could not create the session.', true);
+      });
     }
 
     function resolveTargetSession(ui) {
@@ -1079,6 +1183,7 @@
           if (!selectedSessionId || !sessions.some((s) => s.id === selectedSessionId)) {
             selectedSessionId = sessions[0].id;
           }
+          rememberSelectedSession();
           // Still grouped by event even when the filter is "All Events", so browsing by
           // event remains the picker's shape rather than just a flat list.
           visibleGroups.forEach((group) => {
@@ -1118,16 +1223,7 @@
     }
 
     function createSessionInline() {
-      const name = window.prompt('Session name');
-      if (name == null) return;
-      const trimmed = String(name).trim();
-      if (!trimmed) return;
-      SessionService.createSession({ name: trimmed, start_time: Model.nowIso() })
-        .then((session) => {
-          selectedSessionId = session.id;
-          renderPanel();
-          onChanged();
-        });
+      openNewSession();
     }
 
     // Async because the Vehicles/Riders sections need each one's effective mass/weight
@@ -1879,6 +1975,7 @@
 
     return {
       openAddToSession,
+      openNewSession,
       renderPanel,
       closeModal,
       beginNoteAtLocation,

@@ -914,3 +914,20 @@ body.map-fullscreen-open{overflow:hidden}
 /* ── Note-pin marker hover highlight, on the map ─────────────────────────────────────
    Plain CSS :hover on the marker's own divIcon badge. */
 .note-map-marker-icon:hover{background:var(--accent-active-bg);border-color:var(--accent-active-text);transform:scale(1.15)}
+
+/* Simulate panel: vehicle class radios + the (?) explainer, save fields, extra buttons. */
+.vehicle-sim-class-row{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px;margin-bottom:8px;font-size:13px}
+.vehicle-sim-class-row label{display:inline-flex;align-items:center;gap:4px}
+.racing-line-controls .vehicle-sim-class-row .vehicle-sim-mini-btn{width:26px;height:26px;padding:0;margin-left:auto;border-radius:50%;font-weight:700;font-size:13px;cursor:pointer;border:1px solid var(--border-dashed);background:var(--bg-surface);color:var(--text-primary)}
+.vehicle-sim-save-fields{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.vehicle-sim-save-fields label{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--text-secondary)}
+.vehicle-sim-save-fields input,.vehicle-sim-save-fields textarea{width:100%;box-sizing:border-box;font-size:13px}
+.racing-line-controls .vehicle-sim-rename-btn{width:auto;align-self:flex-start;margin-top:8px;padding:5px 10px;font-size:12px;border-radius:4px;cursor:pointer;border:1px solid var(--border-dashed);background:var(--bg-surface);color:var(--text-primary)}
+.racing-line-controls .vehicle-sim-save-fields .vehicle-sim-rename-btn{margin-top:0}
+.vehicle-sim-rename-btn:disabled{opacity:.45;cursor:default}
+.sim-info-dialog{max-width:min(560px,94vw)}
+.sim-info-body{font-size:13px;line-height:1.45;overflow-y:auto}
+.sim-info-body h4{margin:12px 0 4px;font-size:13px}
+.sim-info-body ul{margin:0;padding-left:18px}
+.sim-info-body li{margin:2px 0}
+.sim-info-off{opacity:.6}

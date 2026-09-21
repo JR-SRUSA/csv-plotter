@@ -366,6 +366,12 @@
               <span class="collapsible-caret" aria-hidden="true"></span>
             </summary>
             <div class="collapsible-action-body">
+              <div class="vehicle-sim-class-row" role="radiogroup" aria-label="Vehicle class">
+                <span class="vehicle-sim-picker-label">Vehicle Class</span>
+                <label><input type="radio" name="vehicleSimClass" value="motorcycle" checked /> Motorcycle</label>
+                <label><input type="radio" name="vehicleSimClass" value="car" /> Car</label>
+                <button type="button" id="vehicleSimInfoBtn" class="vehicle-sim-mini-btn" title="What is calculated, and the assumptions" aria-label="About the simulated channels and assumptions">?</button>
+              </div>
               <div class="vehicle-sim-picker">
                 <div class="vehicle-sim-picker-field">
                   <span class="vehicle-sim-picker-label">Vehicle</span>
@@ -414,6 +420,7 @@
                 </label>
               </div>
               <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
+              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle and its rate to the selected logged laps, from their speed and lateral g, using the chosen vehicle's gearing">Simulate RPM, Gear &amp; Lean for Logged Data</button>
               <div class="vehicle-sim-save-fields">
                 <label>Sim Name (optional)
                   <input id="vehicleSimName" type="text" placeholder="Auto: track, vehicle and time" autocomplete="off" />
@@ -429,7 +436,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-19k</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-21f</div>
     </section>
 
     <section class="plot">
