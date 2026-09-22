@@ -27,7 +27,7 @@ test('setLocalUserName renames the local user, creating one first if needed', as
 
   // Blank input falls back to the original default rather than storing an empty name.
   const blanked = await services.UserService.setLocalUserName('   ');
-  assert.equal(blanked.name, 'This device');
+  assert.equal(blanked.name, 'Anonymous User');
 
   const session = await services.SessionService.createSession({ name: 'FP1' });
   const note = await services.NoteService.createNote({ session_ids: [session.id], content: 'x' });

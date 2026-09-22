@@ -348,6 +348,13 @@
           <div id="storedFilesStatus" class="settings-io-status" aria-live="polite"></div>
 
           <hr class="settings-divider" />
+          <p class="settings-io-hint">Browsers can clear this storage under space pressure or after a period of inactivity. Asking for permanent storage makes that less likely (not a guarantee) -- Download All Data above is still the reliable backup.</p>
+          <div class="storage-persist-row">
+            <button id="requestPersistBtn" type="button">Keep My Data (Request Permanent Storage)</button>
+            <div id="storagePersistStatus" class="settings-io-status" aria-live="polite"></div>
+          </div>
+
+          <hr class="settings-divider" />
           <p class="settings-io-hint">Theme, panel sizes, math channels, data filters, and track corner/start-finish overrides.</p>
           <div class="settings-io-controls">
             <button id="downloadSettingsBtn" type="button">Download Settings</button>
@@ -436,7 +443,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-21f</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-22b</div>
     </section>
 
     <section class="plot">

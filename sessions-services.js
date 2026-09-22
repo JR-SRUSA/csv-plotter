@@ -58,14 +58,14 @@
       setLocalUserName(name) {
         const trimmed = String(name == null ? '' : name).trim();
         return UserService.ensureLocalUser().then((user) => (
-          UserService.updateUser(user.id, { name: trimmed || 'This device' })
+          UserService.updateUser(user.id, { name: trimmed || Model.DEFAULT_LOCAL_USER_NAME })
         ));
       },
 
       createLocalUser(name, role) {
         return storage.create('users', {
           id: Model.newLocalUserId(),
-          name: name || 'This device',
+          name: name || Model.DEFAULT_LOCAL_USER_NAME,
           role: role || 'local'
         });
       },
@@ -91,7 +91,7 @@
             // (e.g. restored from a backup), else mint one.
             return storage.list('users', { where: { role: 'local' } }).then((locals) => {
               if (locals && locals.length) return locals[0];
-              return UserService.createLocalUser('This device', 'local');
+              return UserService.createLocalUser(Model.DEFAULT_LOCAL_USER_NAME, 'local');
             }).then((user) => UserService.setCurrentUser(user.id).then(() => user));
           })
           .catch((err) => {

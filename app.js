@@ -71,6 +71,8 @@
   const dataBackupFileInput = document.getElementById('dataBackupFileInput');
   const deleteAllStoredFilesBtn = document.getElementById('deleteAllStoredFilesBtn');
   const storedFilesStatus = document.getElementById('storedFilesStatus');
+  const requestPersistBtn = document.getElementById('requestPersistBtn');
+  const storagePersistStatus = document.getElementById('storagePersistStatus');
   const pickUploadedDataBtn = document.getElementById('pickUploadedDataBtn');
   const pickUploadedModal = document.getElementById('pickUploadedModal');
   const pickUploadedCloseBtn = document.getElementById('pickUploadedCloseBtn');
@@ -11275,7 +11277,7 @@
       if (value === lastSavedAuthorName) return;
       lastSavedAuthorName = value;
       sessionsApi.UserService.setLocalUserName(value).then((user) => {
-        authorNameInput.value = user.name; // reflects the "This device" fallback if left blank
+        authorNameInput.value = user.name; // reflects the "Anonymous User" fallback if left blank
         lastSavedAuthorName = user.name;
         if (authorNameStatus) authorNameStatus.textContent = 'Saved.';
         renderSessionsPanel(); // the note composer's author list shows this name
@@ -11629,6 +11631,7 @@
     ).then(() => {
       renderStoredFilesList();
       renderPickerList();
+      maybeAutoRequestStoragePersistence();
     }).catch(() => { /* storage failure -- continue silently */ });
   }
 
@@ -11675,6 +11678,95 @@
     if (!storedFilesStatus) return;
     storedFilesStatus.textContent = message;
     storedFilesStatus.classList.toggle('is-error', !!isError);
+  }
+
+  // ── Persistent storage ──────────────────────────────────────────────────
+  // Browsers treat IndexedDB/localStorage as "best-effort" by default: Safari can drop
+  // a site's storage after about a week of no visits, and Chrome/Edge can evict it under
+  // disk pressure. navigator.storage.persist() asks the browser to exempt this origin
+  // from that -- it's a request, not a guarantee (Chrome/Edge decide silently by
+  // engagement heuristics; Firefox shows the user a prompt; Safari 15.2+ supports it but
+  // is stricter for a site that isn't added to the home screen). Download All Data
+  // remains the reliable backup regardless of whether this is granted.
+  const STORAGE_PERSIST_ASKED_KEY = 'storagePersistAsked';
+
+  function formatStorageBytes(n) {
+    if (!Number.isFinite(n)) return '';
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = n / 1024;
+    let i = 0;
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+    return `${value.toFixed(value < 10 ? 1 : 0)} ${units[i]}`;
+  }
+
+  // Reads and displays the current persisted/estimate state. Returns a promise of
+  // whether storage is persisted (null if the API isn't available).
+  function refreshStoragePersistence() {
+    if (!storagePersistStatus) return Promise.resolve(null);
+    const storage = navigator.storage;
+    if (!storage || typeof storage.persisted !== 'function') {
+      storagePersistStatus.textContent = 'Permanent storage is not supported in this browser -- use Download All Data above for backups.';
+      storagePersistStatus.classList.remove('is-error');
+      if (requestPersistBtn) requestPersistBtn.hidden = true;
+      return Promise.resolve(null);
+    }
+    return storage.persisted().then((granted) => {
+      const estimateP = typeof storage.estimate === 'function' ? storage.estimate().catch(() => null) : Promise.resolve(null);
+      return estimateP.then((estimate) => {
+        const usedText = estimate && Number.isFinite(estimate.usage) ? ` (${formatStorageBytes(estimate.usage)} used)` : '';
+        if (granted) {
+          storagePersistStatus.textContent = `Permanent storage: granted${usedText}. The browser should not clear this data automatically.`;
+          storagePersistStatus.classList.remove('is-error');
+          if (requestPersistBtn) requestPersistBtn.hidden = true;
+        } else {
+          storagePersistStatus.textContent = `Permanent storage: not granted${usedText}. The browser may clear this data when it needs `
+            + 'space or after a period of no use -- use Download All Data above to keep a copy.';
+          storagePersistStatus.classList.remove('is-error');
+          if (requestPersistBtn) requestPersistBtn.hidden = false;
+        }
+        return granted;
+      });
+    }).catch(() => null);
+  }
+
+  // Asks the browser to persist this origin's storage, then refreshes the status. Used
+  // by both the manual button and the one-time auto-request after the first file is
+  // stored (see storeFileInDB).
+  function requestStoragePersistence() {
+    const storage = navigator.storage;
+    if (!storage || typeof storage.persist !== 'function') return Promise.resolve(false);
+    if (requestPersistBtn) requestPersistBtn.disabled = true;
+    return storage.persist().then((granted) => {
+      if (requestPersistBtn) requestPersistBtn.disabled = false;
+      // Granted: let refreshStoragePersistence show the normal "granted" status (and hide
+      // the button). Declined: show the decline note directly -- refreshing here would
+      // just overwrite it with the plain "not granted" text refreshStoragePersistence
+      // already showed before this request was ever made.
+      if (granted) return refreshStoragePersistence().then(() => granted);
+      if (storagePersistStatus) {
+        storagePersistStatus.textContent = 'The browser declined the request -- it usually grants this once you use the site regularly, '
+          + 'or if you install or bookmark it. Use Download All Data above to keep a copy meanwhile.';
+        storagePersistStatus.classList.add('is-error');
+      }
+      if (requestPersistBtn) requestPersistBtn.hidden = false;
+      return granted;
+    }).catch(() => {
+      if (requestPersistBtn) requestPersistBtn.disabled = false;
+      return false;
+    });
+  }
+
+  // Fires once, right after the first file this session is actually stored -- a
+  // user-driven moment (rather than on page load) so a Firefox permission prompt isn't a
+  // surprise on every visit. The button in the User panel covers manual retries after
+  // that (e.g. once the browser's engagement heuristics have had a chance to warm up).
+  function maybeAutoRequestStoragePersistence() {
+    let already = true;
+    try { already = localStorage.getItem(STORAGE_PERSIST_ASKED_KEY) === '1'; } catch (e) { /* assume asked */ }
+    if (already) return;
+    try { localStorage.setItem(STORAGE_PERSIST_ASKED_KEY, '1'); } catch (e) { /* best effort */ }
+    requestStoragePersistence();
   }
 
   function renderStoredFilesList() {
@@ -12170,8 +12262,10 @@
       setStoredFilesStatus('All stored files deleted.');
     });
   }
+  if (requestPersistBtn) requestPersistBtn.addEventListener('click', requestStoragePersistence);
 
   renderStoredFilesList();
+  refreshStoragePersistence();
   renderSessionsPanel();
 
   if (xCustomSelect) {

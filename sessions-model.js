@@ -14,6 +14,12 @@
   // sessions-storage.js. Mirrored into appMetadata and every export bundle.
   const SCHEMA_VERSION = '1.0';
 
+  // The one place the default display name for a device-local user (no login, so no real
+  // name) is spelled out. sessions-services.js's UserService is the only other file that
+  // reads it -- everything else with a user's name gets it from a User record, never from
+  // this default directly.
+  const DEFAULT_LOCAL_USER_NAME = 'Anonymous User';
+
   // Prefixes keep raw IDs readable in exported JSON and in devtools ("session_3f2a..."
   // beats a bare UUID when eyeballing a bundle).
   const ID_PREFIXES = {
@@ -832,6 +838,7 @@
 
   const api = {
     SCHEMA_VERSION,
+    DEFAULT_LOCAL_USER_NAME,
     ID_PREFIXES,
     NOTE_TYPES,
     NOTE_ICON_SVG,
