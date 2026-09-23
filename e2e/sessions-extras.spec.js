@@ -215,7 +215,7 @@ test.describe('sessions: notes with a location, CTA styling, add vehicle/rider',
     await panel.locator('.session-section-add-btn', { hasText: '+ Rider' }).click();
     const dialog = page.locator('.session-modal-dialog[aria-label="Add rider"]');
     await expect(dialog).toBeVisible();
-    await expect(dialog.locator('.session-modal-hint')).toContainText('ADDED to the vehicle');
+    await expect(dialog.locator('.session-modal-hint').first()).toContainText('ADDED to the vehicle');
 
     await dialog.locator('input[placeholder="Name"]').fill('Jo Mercer');
     await dialog.locator('input[placeholder="Weight, kg (optional)"]').fill('68');

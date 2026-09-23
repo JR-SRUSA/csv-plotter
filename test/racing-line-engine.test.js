@@ -393,3 +393,182 @@ test('computeLeanFromLatAcc: lean = atan(lat g), rate is dLean/dt within a lap o
   assert.ok(noTime.leanRateDegS.every((r) => r === null));
   assert.strictEqual(calc.computeLeanFromLatAcc(null, null, null), null);
 });
+
+test('computeTireAeroDecel: aero decel matches 0.5*rho*CdA*v^2/(mass*g), tire = ax + aero (+grade)', () => {
+  const mass = 250, cda = 0.4;
+  const rho = 1.225, g = 9.81;
+  const speeds = [0, 10, 20, 30];
+  const ax = [0, 0, 0, 0]; // coasting: measured accel is purely "minus aero" already netted in
+  const res = calc.computeTireAeroDecel(speeds, ax, { massKg: mass, cda });
+  speeds.forEach((v, i) => {
+    const expectedAero = (0.5 * rho * cda * v * v) / mass / g;
+    assert.ok(Math.abs(res.aeroDecelG[i] - expectedAero) < 1e-9, `aero at v=${v}`);
+    // ax=0 here means "no net accel measured", so tire = 0 + aero -- i.e. the tires must be
+    // pushing exactly hard enough to cancel drag and hold a steady speed.
+    assert.ok(Math.abs(res.tireAccelG[i] - expectedAero) < 1e-9, `tire at v=${v}`);
+  });
+
+  // Coasting with the engine disengaged: ax == -aero exactly (drag is the only force) ->
+  // the tires' own net contribution comes back as zero.
+  const aeroOnly = speeds.map((v) => -((0.5 * rho * cda * v * v) / mass / g));
+  const coasting = calc.computeTireAeroDecel(speeds, aeroOnly, { massKg: mass, cda });
+  coasting.tireAccelG.forEach((t) => assert.ok(Math.abs(t) < 1e-9));
+
+  // A positive (uphill) grade assists braking -- for the SAME measured deceleration,
+  // gravity is doing part of the work, so the tires' own recovered contribution is a
+  // smaller braking effort (a less negative number) than on the flat.
+  const withGrade = calc.computeTireAeroDecel([20], [-0.5], { massKg: mass, cda, gradeDeg: [10] });
+  const flat = calc.computeTireAeroDecel([20], [-0.5], { massKg: mass, cda });
+  assert.ok(withGrade.tireAccelG[0] > flat.tireAccelG[0]);
+  assert.ok(Math.abs(withGrade.tireAccelG[0] - (flat.tireAccelG[0] + Math.sin(10 * Math.PI / 180))) < 1e-9);
+
+  assert.strictEqual(calc.computeTireAeroDecel(null, [1], {}), null);
+  assert.strictEqual(calc.computeTireAeroDecel([1], null, {}), null);
+  const gaps = calc.computeTireAeroDecel([10, NaN], [0.1, 0.1], {});
+  assert.strictEqual(gaps.aeroDecelG[1], null);
+  assert.strictEqual(gaps.tireAccelG[1], null);
+});
+
+test('computeTireAeroDecel: decomposing a hand-built braking event (matching the simulator\'s own accounting) recovers the tire-only limit', () => {
+  // Mirrors simulateVehicleSpeed's backward pass exactly: aBrakeTotal = aTraction + drag +
+  // grade, i.e. measured ax = -aBrakeTotal. Built by hand here (rather than running a full
+  // lap simulation) since a real braking *zone* needs a track with varying curvature --
+  // more than this decomposition math itself needs to be exercised.
+  const mass = 220, cda = 0.6, maxLongG = 0.7;
+  const g = 9.81, rho = 1.225;
+  const speeds = [40, 30, 20, 10, 0];
+  const axG = speeds.map((v) => {
+    const dragDecelG = (0.5 * rho * cda * v * v) / mass / g;
+    return -(maxLongG + dragDecelG); // tires pinned at the limit the whole way down
+  });
+  const decomposed = calc.computeTireAeroDecel(speeds, axG, { massKg: mass, cda });
+  decomposed.tireAccelG.forEach((t, i) => {
+    assert.ok(Math.abs(t - -maxLongG) < 1e-9, `row ${i}: recovered tire g ${t}`);
+  });
+  // The raw measured deceleration is always more than the tire-only limit, by however much
+  // drag contributed at that speed (biggest gap at the highest speed).
+  assert.ok(Math.abs(axG[0]) > maxLongG + 0.05);
+  assert.ok(Math.abs(axG[axG.length - 1]) - maxLongG < 1e-6); // at v=0, drag is 0 too
+});
+
+test('computeTireAeroDecel exposes the slope share and whether grade was actually used', () => {
+  const flat = calc.computeTireAeroDecel([20, 20], [0, 0], { massKg: 220, cda: 0.5 });
+  assert.strictEqual(flat.hasGrade, false);
+  assert.ok(flat.slopeDecelG.every((s) => s === 0));
+
+  const uphill = calc.computeTireAeroDecel([20, 20], [0, 0], { massKg: 220, cda: 0.5, gradeDeg: [10, -10] });
+  assert.strictEqual(uphill.hasGrade, true);
+  assert.ok(Math.abs(uphill.slopeDecelG[0] - Math.sin(10 * Math.PI / 180)) < 1e-9);
+  assert.ok(Math.abs(uphill.slopeDecelG[1] - Math.sin(-10 * Math.PI / 180)) < 1e-9);
+  // tireAccelG already folds slopeDecelG in -- exposing it separately shouldn't change that.
+  uphill.tireAccelG.forEach((t, i) => {
+    assert.ok(Math.abs(t - (0 + uphill.aeroDecelG[i] + uphill.slopeDecelG[i])) < 1e-9);
+  });
+});
+
+test('computeWheelLoads: static split matches (L-p)/L and p/L with zero accel', () => {
+  const geom = { massKg: 200, cgHeightM: 0.55, cgPositionM: 0.8, wheelbaseM: 1.4 };
+  const res = calc.computeWheelLoads([0, 0, 0], null, null, geom);
+  const expectedFront = 200 * (1.4 - 0.8) / 1.4;
+  const expectedRear = 200 * 0.8 / 1.4;
+  res.frontKg.forEach((f) => assert.ok(Math.abs(f - expectedFront) < 1e-9));
+  res.rearKg.forEach((r) => assert.ok(Math.abs(r - expectedRear) < 1e-9));
+  assert.ok(Math.abs(res.staticFrontKg - expectedFront) < 1e-9);
+  assert.ok(Math.abs(expectedFront + expectedRear - geom.massKg) < 1e-9, 'front + rear = total mass');
+});
+
+test('computeWheelLoads: accelerating shifts load to the rear, braking to the front, by mass*axG*hCg/L', () => {
+  const geom = { massKg: 200, cgHeightM: 0.55, cgPositionM: 0.8, wheelbaseM: 1.4 };
+  const flat = calc.computeWheelLoads([0], null, null, geom);
+  const accelerating = calc.computeWheelLoads([0.5], null, null, geom); // 0.5 g
+  const braking = calc.computeWheelLoads([-0.5], null, null, geom);
+  const expectedShift = 200 * 0.5 * 0.55 / 1.4;
+  assert.ok(Math.abs((flat.frontKg[0] - accelerating.frontKg[0]) - expectedShift) < 1e-9);
+  assert.ok(Math.abs((braking.frontKg[0] - flat.frontKg[0]) - expectedShift) < 1e-9);
+  assert.ok(Math.abs((accelerating.rearKg[0] - flat.rearKg[0]) - expectedShift) < 1e-9);
+  // Total load is conserved -- weight transfer only redistributes it.
+  assert.ok(Math.abs((accelerating.frontKg[0] + accelerating.rearKg[0]) - geom.massKg) < 1e-9);
+  assert.ok(Math.abs((braking.frontKg[0] + braking.rearKg[0]) - geom.massKg) < 1e-9);
+});
+
+test('computeWheelLoads: aero pitching term cancels exactly when the CoP sits at the same height as the CG', () => {
+  // Pure-drag coasting: the vehicle's whole measured decel comes from aero alone. If CoP
+  // and CG are at the same height, the two competing effects (inertial nose-dive from
+  // decelerating, and the aero moment) exactly cancel back to the plain static split --
+  // see the comment on computeWheelLoads for why.
+  const geom = { massKg: 200, cgHeightM: 0.6, cgPositionM: 0.8, wheelbaseM: 1.4, copHeightM: 0.6 };
+  const aeroDecelG = [0.2];
+  const axG = [-0.2]; // deceleration entirely attributable to aero drag
+  const res = calc.computeWheelLoads(axG, aeroDecelG, null, geom);
+  const staticFront = 200 * (1.4 - 0.8) / 1.4;
+  assert.ok(Math.abs(res.frontKg[0] - staticFront) < 1e-9, `front ${res.frontKg[0]} vs static ${staticFront}`);
+
+  // With the CoP higher than the CG, the aero term no longer fully cancels -- the front
+  // ends up lighter than the static split (drag pitches the nose up / squats the rear).
+  const higherCop = calc.computeWheelLoads(axG, aeroDecelG, null, Object.assign({}, geom, { copHeightM: 1.0 }));
+  assert.ok(higherCop.frontKg[0] < staticFront);
+});
+
+test('computeWheelLoads: lean shrinks the effective CG height (cos(lean)), reducing the weight-transfer magnitude', () => {
+  const geom = { massKg: 200, cgHeightM: 0.6, cgPositionM: 0.8, wheelbaseM: 1.4 };
+  const upright = calc.computeWheelLoads([0.5], null, [0], geom);
+  const leaned = calc.computeWheelLoads([0.5], null, [50], geom); // 50 degrees of lean
+  const staticFront = 200 * (1.4 - 0.8) / 1.4;
+  const uprightShift = staticFront - upright.frontKg[0];
+  const leanedShift = staticFront - leaned.frontKg[0];
+  assert.ok(leanedShift > 0 && leanedShift < uprightShift, `leaned shift ${leanedShift} vs upright ${uprightShift}`);
+  assert.ok(Math.abs(leanedShift - uprightShift * Math.cos(50 * Math.PI / 180)) < 1e-9);
+});
+
+test('computeWheelLoads returns null unless mass, cgHeightM, cgPositionM and wheelbaseM are all present', () => {
+  assert.strictEqual(calc.computeWheelLoads([0], null, null, {}), null);
+  assert.strictEqual(calc.computeWheelLoads([0], null, null, { massKg: 200 }), null);
+  assert.strictEqual(calc.computeWheelLoads(null, null, null, { massKg: 200, cgHeightM: 0.5, cgPositionM: 0.8, wheelbaseM: 1.4 }), null);
+  assert.ok(calc.computeWheelLoads([0], null, null, { massKg: 200, cgHeightM: 0.5, cgPositionM: 0.8, wheelbaseM: 1.4 }));
+});
+
+test('computeRiderCgDeltas picks tucked/braking/hangoff by ax sign and lean threshold', () => {
+  const rider = {
+    cg_height_delta_tucked_m: -0.05, cg_position_delta_tucked_m: 0.01,
+    cg_height_delta_braking_m: 0.08, cg_position_delta_braking_m: -0.02,
+    cg_height_delta_hangoff_m: -0.12, cg_position_delta_hangoff_m: 0.03
+  };
+  const axG = [0.3, -0.3, 0.1, -0.1];
+  const leanDeg = [0, 0, 20, -20]; // last two past the 15 deg hang-off threshold
+  const res = calc.computeRiderCgDeltas(axG, leanDeg, rider);
+  assert.ok(Math.abs(res.heightDeltaM[0] - -0.05) < 1e-9, 'accelerating, no lean -> tucked');
+  assert.ok(Math.abs(res.heightDeltaM[1] - 0.08) < 1e-9, 'braking, no lean -> braking');
+  assert.ok(Math.abs(res.heightDeltaM[2] - -0.12) < 1e-9, 'past lean threshold -> hangoff regardless of ax sign');
+  assert.ok(Math.abs(res.heightDeltaM[3] - -0.12) < 1e-9, 'negative lean magnitude still counts as hangoff');
+  assert.ok(Math.abs(res.positionDeltaM[0] - 0.01) < 1e-9);
+  assert.ok(Math.abs(res.positionDeltaM[1] - -0.02) < 1e-9);
+
+  assert.strictEqual(calc.computeRiderCgDeltas(axG, leanDeg, null), null);
+  assert.strictEqual(calc.computeRiderCgDeltas(axG, leanDeg, {}), null, 'a rider with no deltas at all changes nothing');
+  assert.strictEqual(calc.computeRiderCgDeltas(null, leanDeg, rider), null);
+});
+
+test('computeWheelLoads applies per-sample rider CG deltas (height and position, so the static split can vary too)', () => {
+  const geom = { massKg: 200, cgHeightM: 0.6, cgPositionM: 0.8, wheelbaseM: 1.4 };
+  const flat = calc.computeWheelLoads([0, 0], null, null, geom);
+
+  const withDelta = calc.computeWheelLoads([0, 0], null, null, Object.assign({}, geom, {
+    cgHeightDeltaM: [0.1, 0.1], // ax = 0 so height delta alone doesn't move mech term, but...
+    cgPositionDeltaM: [0.1, -0.1] // ...position delta shifts the static split itself
+  }));
+  const staticWithPlus = 200 * (1.4 - 0.9) / 1.4; // p = 0.8 + 0.1
+  const staticWithMinus = 200 * (1.4 - 0.7) / 1.4; // p = 0.8 - 0.1
+  assert.ok(Math.abs(withDelta.frontKg[0] - staticWithPlus) < 1e-9);
+  assert.ok(Math.abs(withDelta.frontKg[1] - staticWithMinus) < 1e-9);
+  assert.notStrictEqual(withDelta.frontKg[0], flat.frontKg[0]);
+
+  // A height delta changes the weight-transfer magnitude once there's some accel to transfer.
+  const accelFlat = calc.computeWheelLoads([0.4], null, null, geom);
+  const accelRaised = calc.computeWheelLoads([0.4], null, null, Object.assign({}, geom, { cgHeightDeltaM: [0.2] }));
+  const shiftFlat = geom.massKg * 0.8 / 1.4 - accelFlat.rearKg[0] + (geom.massKg * 0.8 / 1.4); // just sanity, recompute directly below
+  void shiftFlat;
+  const mechFlat = 200 * 0.4 * 0.6 / 1.4;
+  const mechRaised = 200 * 0.4 * 0.8 / 1.4; // hCg 0.6 + 0.2 delta
+  assert.ok(Math.abs((accelFlat.frontKg[0] - (200 * (1.4 - 0.8) / 1.4)) - -mechFlat) < 1e-9);
+  assert.ok(Math.abs((accelRaised.frontKg[0] - (200 * (1.4 - 0.8) / 1.4)) - -mechRaised) < 1e-9);
+});

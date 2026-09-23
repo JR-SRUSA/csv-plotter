@@ -111,25 +111,25 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     expect(await page.locator('#vehicleSimRiderSelect option').allInnerTexts()).toContain('Rider One');
   });
 
-  test('picking a vehicle and rider fills mass and CdA from the combined bike + rider', async ({ page }) => {
+  test('picking a vehicle and rider sources mass and CdA from the combined bike + rider', async ({ page }) => {
     await loadSampleFile(page);
     await openSimPanel(page);
+    const hint = page.locator('#vehicleSimVehicleHint');
     await pickVehicle(page, 'Full');
-    await expect(page.locator('#vehicleSimMass')).toHaveValue('190');
-    await expect(page.locator('#vehicleSimCda')).toHaveValue('0.3');
-    await expect(page.locator('#vehicleSimPowerKw')).toHaveValue('40');
+    await expect(hint).toContainText('190.0 kg');
+    await expect(hint).toContainText('CdA 0.30');
+    await expect(hint).toContainText('40 kW avg');
 
     await page.selectOption('#vehicleSimRiderSelect', { label: 'Rider One' });
-    await expect(page.locator('#vehicleSimMass')).toHaveValue('265'); // 190 + 75
-    await expect(page.locator('#vehicleSimCda')).toHaveValue('0.4'); // 0.30 + 0.10 tucked
+    await expect(hint).toContainText('265.0 kg'); // 190 + 75
+    await expect(hint).toContainText('CdA 0.40'); // 0.30 + 0.10 tucked
   });
 
-  test('a rider alone does not overwrite typed values (no vehicle to add to)', async ({ page }) => {
+  test('with no vehicle picked, a rider alone leaves the generic default mass (nothing to add it to)', async ({ page }) => {
     await loadSampleFile(page);
     await openSimPanel(page);
-    await page.fill('#vehicleSimMass', '300');
     await page.selectOption('#vehicleSimRiderSelect', { label: 'Rider One' });
-    await expect(page.locator('#vehicleSimMass')).toHaveValue('300');
+    await expect(page.locator('#vehicleSimVehicleHint')).toContainText('235.0 kg');
   });
 
   test('the hint says whether the vehicle can drive the engine-curve model, and what is missing', async ({ page }) => {

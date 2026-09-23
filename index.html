@@ -362,6 +362,15 @@
             <input type="file" id="settingsFileInput" accept=".json,application/json" hidden />
           </div>
           <div id="settingsIoStatus" class="settings-io-status" aria-live="polite"></div>
+
+          <hr class="settings-divider" />
+          <p class="settings-io-hint">Your saved vehicles and riders, as a standalone file -- to share a setup, or back it up separately from a full "Download All Data". Every vehicle/rider in the file is added as a new entry (existing ones are never overwritten). They're also already included in Download All Data above.</p>
+          <div class="settings-io-controls">
+            <button id="downloadVehiclesRidersBtn" type="button">Download Vehicles &amp; Riders</button>
+            <button id="uploadVehiclesRidersBtn" type="button">Upload Vehicles &amp; Riders</button>
+            <input type="file" id="vehiclesRidersFileInput" accept=".json,application/json" hidden />
+          </div>
+          <div id="vehiclesRidersIoStatus" class="settings-io-status" aria-live="polite"></div>
         </div>
       </details>
 
@@ -405,29 +414,9 @@
                     <option value="average">Average power (faster)</option>
                   </select>
                 </label>
-                <label>Drivetrain Efficiency (%)
-                  <input id="vehicleSimDrivetrainEff" type="number" min="50" max="100" step="1" value="95" />
-                </label>
-              </div>
-              <div class="racing-line-weight-controls">
-                <label>Max Lateral (g)
-                  <input id="vehicleSimMaxLatG" type="number" min="0.1" step="0.05" value="1.0" />
-                </label>
-                <label>Max Longitudinal (g)
-                  <input id="vehicleSimMaxLongG" type="number" min="0.1" step="0.05" value="0.7" />
-                </label>
-                <label>Average Power (kW)
-                  <input id="vehicleSimPowerKw" type="number" min="0.1" step="1" value="32" />
-                </label>
-                <label>CdA (m²)
-                  <input id="vehicleSimCda" type="number" min="0.01" step="0.01" value="0.5" />
-                </label>
-                <label>Mass (kg)
-                  <input id="vehicleSimMass" type="number" min="1" step="1" value="235" />
-                </label>
               </div>
               <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
-              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle and its rate to the selected logged laps, from their speed and lateral g, using the chosen vehicle's gearing">Simulate RPM, Gear &amp; Lean for Logged Data</button>
+              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle and its rate, and Tire/Aero Decel to the selected logged laps, from their speed and lateral/longitudinal g, using the chosen vehicle's gearing and mass/CdA">Simulate RPM, Gear, Lean &amp; Decel for Logged Data</button>
               <div class="vehicle-sim-save-fields">
                 <label>Sim Name (optional)
                   <input id="vehicleSimName" type="text" placeholder="Auto: track, vehicle and time" autocomplete="off" />
@@ -443,7 +432,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-22b</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-22h</div>
     </section>
 
     <section class="plot">
@@ -467,6 +456,12 @@
               <option value="secondOrderResponse">2nd-Order Step Response</option>
               <option value="ellipse">Ellipse</option>
               <option value="formula">Typed Formula</option>
+            </select>
+          </label>
+          <label id="selectionFitSlopeUnitsRow" class="selection-stats-fit-slope-units-row" hidden>Slope Units
+            <select id="selectionFitSlopeUnitsSelect">
+              <option value="auto">Auto (Y / X units)</option>
+              <option value="g">g (avg accel/decel)</option>
             </select>
           </label>
           <div id="selectionFitEquationRow" class="selection-stats-fit-equation"></div>

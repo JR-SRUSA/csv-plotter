@@ -31,11 +31,6 @@
   const cornerEditorMergeLeftBtn = document.getElementById('cornerEditorMergeLeft');
   const cornerEditorMergeRightBtn = document.getElementById('cornerEditorMergeRight');
   const cornerEditorResetBtn = document.getElementById('cornerEditorResetBtn');
-  const vehicleSimMaxLatGInput = document.getElementById('vehicleSimMaxLatG');
-  const vehicleSimMaxLongGInput = document.getElementById('vehicleSimMaxLongG');
-  const vehicleSimPowerKwInput = document.getElementById('vehicleSimPowerKw');
-  const vehicleSimCdaInput = document.getElementById('vehicleSimCda');
-  const vehicleSimMassInput = document.getElementById('vehicleSimMass');
   const vehicleSimUseElevationInput = document.getElementById('vehicleSimUseElevation');
   const vehicleSimulateBtn = document.getElementById('vehicleSimulateBtn');
   const vehicleSimStatus = document.getElementById('vehicleSimStatus');
@@ -53,7 +48,6 @@
   const vehicleSimRiderNewBtn = document.getElementById('vehicleSimRiderNewBtn');
   const vehicleSimVehicleHint = document.getElementById('vehicleSimVehicleHint');
   const vehicleSimPowerModelSelect = document.getElementById('vehicleSimPowerModel');
-  const vehicleSimDrivetrainEffInput = document.getElementById('vehicleSimDrivetrainEff');
   const uiPanel7 = document.getElementById('uiPanel7');
   const appVersionLabel = document.getElementById('appVersionLabel');
   const clearBtn = document.getElementById('clearBtn');
@@ -62,6 +56,10 @@
   const uploadSettingsBtn = document.getElementById('uploadSettingsBtn');
   const settingsFileInput = document.getElementById('settingsFileInput');
   const settingsIoStatus = document.getElementById('settingsIoStatus');
+  const downloadVehiclesRidersBtn = document.getElementById('downloadVehiclesRidersBtn');
+  const uploadVehiclesRidersBtn = document.getElementById('uploadVehiclesRidersBtn');
+  const vehiclesRidersFileInput = document.getElementById('vehiclesRidersFileInput');
+  const vehiclesRidersIoStatus = document.getElementById('vehiclesRidersIoStatus');
   const authorNameInput = document.getElementById('authorNameInput');
   const authorNameStatus = document.getElementById('authorNameStatus');
   const storedFilesList = document.getElementById('storedFilesList');
@@ -152,6 +150,8 @@
   const selectionStatsClose = document.getElementById('selectionStatsClose');
   const selectionStatsHeader = document.getElementById('selectionStatsHeader');
   const selectionFitTypeSelect = document.getElementById('selectionFitTypeSelect');
+  const selectionFitSlopeUnitsRow = document.getElementById('selectionFitSlopeUnitsRow');
+  const selectionFitSlopeUnitsSelect = document.getElementById('selectionFitSlopeUnitsSelect');
   const selectionFitEquationRow = document.getElementById('selectionFitEquationRow');
   const selectionFitFormulaRow = document.getElementById('selectionFitFormulaRow');
   const selectionFitFormulaInput = document.getElementById('selectionFitFormulaInput');
@@ -410,7 +410,9 @@
   const IMPORTER_CUSTOM_STANDARD_CHANNELS_STORAGE_KEY = 'importerCustomStandardChannels';
   const SELECTION_FIT_TYPE_STORAGE_KEY = 'selectionFitType';
   const SELECTION_FIT_FORMULA_STORAGE_KEY = 'selectionFitFormula';
+  const SELECTION_FIT_SLOPE_UNITS_STORAGE_KEY = 'selectionFitSlopeUnits';
   const DEFAULT_SELECTION_FIT_TYPE = 'linear';
+  const DEFAULT_SELECTION_FIT_SLOPE_UNITS = 'auto'; // 'auto' (Y-unit / X-unit) or 'g' (speed-vs-time only)
   const DEFAULT_SELECTION_FIT_FORMULA = 'p0*sin(p1*t + p2) + p3';
   const SELECTION_FIT_TYPE_OPTIONS = new Set(['linear', 'sinusoidal', 'sineExponential', 'exponential', 'firstOrderResponse', 'secondOrderResponse', 'ellipse', 'formula']);
   const IMPORTER_BUILTIN_STANDARD_CHANNELS = [
@@ -532,6 +534,7 @@
   let selectModeActive = false; // true while the box/lasso select tool is the active drag mode
   let selectionFitType = DEFAULT_SELECTION_FIT_TYPE;
   let selectionFitFormula = DEFAULT_SELECTION_FIT_FORMULA;
+  let selectionFitSlopeUnits = DEFAULT_SELECTION_FIT_SLOPE_UNITS;
   let selectionFitLastPoints = [];
   const SELECTION_FFT_ENABLED_STORAGE_KEY = 'selectionFftEnabled';
   let selectionFftEnabled = false;
@@ -959,8 +962,14 @@
       const x = Number(p.x), y = Number(p.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       let g = groups.get(p.curveNumber);
-      if (!g) { g = {trace, xs: [], ys: []}; groups.set(p.curveNumber, g); }
+      if (!g) { g = {trace, xs: [], ys: [], rowKeys: []}; groups.set(p.curveNumber, g); }
       g.xs.push(x); g.ys.push(y);
+      // Each trace's customdata carries a rowKey (see rowKey/updatePlot) identifying the
+      // exact log row a point came from -- kept alongside x/y so a linear fit can look up
+      // that row's own logged Time later (see loggedTimeSecondsForRowKey), regardless of
+      // what's actually plotted on the x-axis right now.
+      const idx = Number.isInteger(p.pointIndex) ? p.pointIndex : p.pointNumber;
+      g.rowKeys.push((Array.isArray(trace.customdata) && Number.isInteger(idx)) ? (trace.customdata[idx] != null ? trace.customdata[idx] : null) : null);
     });
     return groups;
   }
@@ -1087,6 +1096,80 @@
     };
   }
 
+  // Recognized speed-unit spellings -> conversion factor to m/s. Matches the equivalent
+  // conversions used elsewhere in the app for computed acceleration channels (see the
+  // racing-line/vehicle-sim code); kept separate here since this one feeds the *linear
+  // fit's* optional "slope in g" display rather than a channel of its own. Returns null
+  // for anything not recognized as a speed unit, rather than guessing.
+  function speedUnitToMps(unit) {
+    const u = String(unit || '').trim().toLowerCase();
+    if (!u) return null;
+    if (u.includes('km/h') || u === 'kph') return 1 / 3.6;
+    if (u.includes('mph')) return 0.44704;
+    if (u.includes('m/s') || u.includes('mps')) return 1;
+    return null;
+  }
+
+  const SELECTION_FIT_GRAVITY_MS2 = 9.81; // matches the g-conversion used elsewhere (e.g. LatAcc/LongAcc)
+
+  // Reverses rowKey(fileId, lap, rowIndex) (see rowKey/updatePlot, which stamps every main
+  // channel trace's customdata with these) back to the actual log row. This is how the
+  // linear fit's "g" slope option finds a selected point's real logged Time even when the
+  // selection was made with something else (e.g. Distance) on the x-axis -- every row has
+  // its own Time value whatever's currently plotted.
+  function resolveLogRowFromRowKey(key) {
+    if (key == null) return null;
+    const parts = String(key).split('|');
+    if (parts.length < 3) return null;
+    const rowIndex = Number(parts[parts.length - 1]);
+    const lap = Number(parts[parts.length - 2]);
+    if (!Number.isFinite(rowIndex) || !Number.isFinite(lap)) return null;
+    const fileId = parts.slice(0, parts.length - 2).join('|');
+    const log = logs.find((l) => l.id === fileId);
+    if (!log || !Array.isArray(log.data) || rowIndex < 0 || rowIndex >= log.data.length) return null;
+    return { log, rowIndex };
+  }
+
+  // The row's own logged elapsed time in seconds, independent of the plot's x-axis mode.
+  function loggedTimeSecondsForRowKey(key) {
+    const ref = resolveLogRowFromRowKey(key);
+    if (!ref) return null;
+    const timeCol = resolveChannelForLog('Time', ref.log);
+    if (!timeCol || !ref.log.cols.includes(timeCol)) return null;
+    const unit = (ref.log.meta.units && ref.log.meta.units[timeCol]) || '';
+    return parseTimeLikeSeconds(ref.log.data[ref.rowIndex][timeCol], unit);
+  }
+
+  // A linear fit's slope is only meaningfully "g's" when Y is a recognized speed -- it's
+  // then an average acceleration/deceleration, just re-expressed relative to gravity
+  // instead of raw m/s^2. Rather than reusing the already-plotted x (which might be
+  // Distance, or any other channel), this looks up each selected point's own logged Time
+  // and fits speed vs THAT, so the reading is correct whatever's on the x-axis. Returns
+  // null (rather than a misleading number) when Y isn't a speed unit, or fewer than 2 of
+  // the selected rows have a resolvable logged Time (e.g. a file with no Time channel).
+  function computeSlopeGravities(g, yUnit) {
+    const mpsPerUnit = speedUnitToMps(yUnit);
+    if (mpsPerUnit == null) return null;
+    const times = [];
+    const speeds = [];
+    g.rowKeys.forEach((key, i) => {
+      const t = loggedTimeSecondsForRowKey(key);
+      if (t != null && Number.isFinite(t)) { times.push(t); speeds.push(g.ys[i]); }
+    });
+    if (times.length < 2) return null;
+    const fit = window.FitFunctions.computeLinearFit(times, speeds);
+    if (!fit) return null;
+    return (fit.slope * mpsPerUnit) / SELECTION_FIT_GRAVITY_MS2;
+  }
+
+  // "km/h/s" style label for a linear fit's default (auto) slope units -- whichever of
+  // Y/X unit is actually known, falling back to the same 'x'/'y' placeholders the other
+  // fit types use (see e.g. the sinusoidal φ line) when a unit isn't known at all.
+  function buildAutoSlopeUnitLabel(yUnit, xUnit) {
+    if (!yUnit && !xUnit) return '';
+    return `${yUnit || 'y'}/${xUnit || 'x'}`;
+  }
+
   function buildSelectionFitDetails(fitType, g, xMin, xMax, yMin, yMax, fitLineColor, typedFormulaResult) {
     const detailLines = [];
     const xaxis = g.trace.xaxis || 'x';
@@ -1200,9 +1283,30 @@
       return out;
     }
     const fit = window.FitFunctions.computeLinearFit(g.xs, g.ys);
-    detailLines.push(fit ? `slope: ${formatStatValue(fit.slope)}` : 'slope: n/a');
-    detailLines.push(fit ? `R²: ${fit.r2.toFixed(3)}` : 'R²: n/a');
-    if (!fit) return out;
+    if (!fit) {
+      detailLines.push('slope: n/a');
+      detailLines.push('R²: n/a');
+      return out;
+    }
+    // Default (auto): slope shown in its native Y-unit / X-unit, e.g. "km/h/s" for speed
+    // vs time or "km/h/m" for speed vs distance -- whatever the two axes actually are. The
+    // "g" option re-fits speed against each point's own logged Time (see
+    // computeSlopeGravities), so it works no matter what's plotted on the x-axis -- a
+    // selection made with Distance on the x-axis still gets a real average
+    // acceleration/deceleration, not just a note saying it can't be done.
+    const yUnit = getUnitForChannel(g.trace.meta.channel) || '';
+    const xUnit = mainPlotXAxisUnit || '';
+    const autoLabel = buildAutoSlopeUnitLabel(yUnit, xUnit);
+    const autoSlopeText = `${formatStatValue(fit.slope)}${autoLabel ? ' ' + autoLabel : ''}`;
+    if (selectionFitSlopeUnits === 'g') {
+      const gValue = computeSlopeGravities(g, yUnit);
+      detailLines.push(gValue != null
+        ? `slope: ${formatStatValue(gValue)} g`
+        : `slope: ${autoSlopeText} (g needs a speed channel and a logged Time column)`);
+    } else {
+      detailLines.push(`slope: ${autoSlopeText}`);
+    }
+    detailLines.push(`R²: ${fit.r2.toFixed(3)}`);
     out.shape = {
       type: 'line',
       xref: xaxis,
@@ -1262,8 +1366,18 @@
     });
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      panel.style.left = (e.clientX - ox) + 'px';
-      panel.style.top = (e.clientY - oy) + 'px';
+      // Clamped so the header can never be dragged fully off-screen -- top never goes
+      // negative, and at least a sliver of the panel's width always stays reachable
+      // horizontally -- otherwise a panel dragged toward an edge (more likely now that
+      // it can grow taller, e.g. an extra fit-options row) can end up with nothing left
+      // on screen to grab it back with.
+      const minVisiblePx = 40;
+      const maxLeft = Math.max(0, window.innerWidth - minVisiblePx);
+      const minLeft = minVisiblePx - panel.offsetWidth;
+      const left = Math.min(maxLeft, Math.max(minLeft, e.clientX - ox));
+      const top = Math.max(0, e.clientY - oy);
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
     });
     document.addEventListener('mouseup', () => { dragging = false; });
   }
@@ -1399,6 +1513,8 @@
     const isFormula = selectionFitType === 'formula';
     if (selectionFitTypeSelect) selectionFitTypeSelect.value = selectionFitType;
     if (selectionFitEquationRow) selectionFitEquationRow.textContent = SELECTION_FIT_EQUATIONS[selectionFitType] || '';
+    if (selectionFitSlopeUnitsRow) selectionFitSlopeUnitsRow.hidden = selectionFitType !== 'linear';
+    if (selectionFitSlopeUnitsSelect) selectionFitSlopeUnitsSelect.value = selectionFitSlopeUnits;
     if (selectionFitFormulaRow) selectionFitFormulaRow.hidden = !isFormula;
     if (selectionFitFormulaHint) selectionFitFormulaHint.hidden = !isFormula;
     if (selectionFitFormulaInput && !selectionFitFormulaInput.value) {
@@ -1416,6 +1532,10 @@
       const savedFormula = localStorage.getItem(SELECTION_FIT_FORMULA_STORAGE_KEY);
       if (typeof savedFormula === 'string' && savedFormula.trim()) selectionFitFormula = savedFormula;
     } catch {}
+    try {
+      const savedSlopeUnits = localStorage.getItem(SELECTION_FIT_SLOPE_UNITS_STORAGE_KEY);
+      if (savedSlopeUnits === 'g' || savedSlopeUnits === 'auto') selectionFitSlopeUnits = savedSlopeUnits;
+    } catch {}
     if (selectionFitFormulaInput) selectionFitFormulaInput.value = selectionFitFormula;
     syncSelectionFitControlsUi();
     if (selectionFitTypeSelect) {
@@ -1424,6 +1544,13 @@
         if (selectionFitType !== 'sinusoidal' && selectionFitType !== 'sineExponential') selectionSinFitForcedFreqHz = null;
         syncSelectionFitControlsUi();
         try { localStorage.setItem(SELECTION_FIT_TYPE_STORAGE_KEY, selectionFitType); } catch {}
+        if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
+      });
+    }
+    if (selectionFitSlopeUnitsSelect) {
+      selectionFitSlopeUnitsSelect.addEventListener('change', () => {
+        selectionFitSlopeUnits = selectionFitSlopeUnitsSelect.value === 'g' ? 'g' : 'auto';
+        try { localStorage.setItem(SELECTION_FIT_SLOPE_UNITS_STORAGE_KEY, selectionFitSlopeUnits); } catch {}
         if (selectionFitLastPoints.length > 0) applySelectionFit(selectionFitLastPoints);
       });
     }
@@ -5544,25 +5671,31 @@
     select.value = records.some((r) => r.id === selectedId) ? selectedId : '';
   }
 
-  // Fills mass / CdA / average power from the chosen vehicle + rider. Rider CdA is the
-  // *tucked* delta (the position held for most of a lap's time, i.e. accelerating on
-  // straights); the rider's braking/cornering deltas would need a per-phase drag model the
-  // point-mass sim doesn't have. Fields are only touched when the source value exists, so
-  // a vehicle missing e.g. CdA leaves whatever was typed in.
-  function applySimSelectionToInputs() {
+  // Generic fallbacks when no vehicle is picked -- previously the default values typed
+  // into the (now removed) Simulate panel fields.
+  const SIM_DEFAULT_PARAMS = { maxLatG: 1.0, maxLongG: 0.7, powerKw: 32, cda: 0.5, massKg: 235, efficiencyPct: 95 };
+
+  // The single source of truth for the numbers a simulation run actually uses: from the
+  // selected vehicle (+ rider, for mass and CdA) when one is picked, else the generic
+  // defaults above. Mass and CdA used to be editable Simulate panel fields the vehicle
+  // picker filled in; they're vehicle/rider properties now, so there's nothing left to
+  // fill in or override here. Rider CdA is the *tucked* delta (the position held for most
+  // of a lap's time, i.e. accelerating on straights); the rider's braking/cornering deltas
+  // would need a per-phase drag model the point-mass sim doesn't have.
+  function computeEffectiveSimParams() {
     const v = selectedSimVehicle();
     const r = selectedSimRider();
-    if (v && v.mass_kg > 0 && vehicleSimMassInput) {
-      const total = v.mass_kg + (r && r.weight_kg > 0 ? r.weight_kg : 0);
-      vehicleSimMassInput.value = String(Math.round(total * 10) / 10);
-    }
-    if (v && v.cda_m2 > 0 && vehicleSimCdaInput) {
-      const tucked = r && Number.isFinite(r.cda_tucked_m2) ? r.cda_tucked_m2 : 0;
-      vehicleSimCdaInput.value = String(Math.max(0.01, Math.round((v.cda_m2 + tucked) * 1000) / 1000));
-    }
-    if (v && v.avg_power_kw > 0 && vehicleSimPowerKwInput) {
-      vehicleSimPowerKwInput.value = String(v.avg_power_kw);
-    }
+    const massKg = (v && v.mass_kg > 0)
+      ? v.mass_kg + (r && r.weight_kg > 0 ? r.weight_kg : 0)
+      : SIM_DEFAULT_PARAMS.massKg;
+    const tucked = r && Number.isFinite(r.cda_tucked_m2) ? r.cda_tucked_m2 : 0;
+    const cda = (v && v.cda_m2 > 0) ? Math.max(0.01, v.cda_m2 + tucked) : SIM_DEFAULT_PARAMS.cda;
+    const powerKw = (v && v.avg_power_kw > 0) ? v.avg_power_kw : SIM_DEFAULT_PARAMS.powerKw;
+    const maxLatG = (v && v.max_lat_g > 0) ? v.max_lat_g : SIM_DEFAULT_PARAMS.maxLatG;
+    const maxLongG = (v && v.max_long_g > 0) ? v.max_long_g : SIM_DEFAULT_PARAMS.maxLongG;
+    const effRaw = v && v.gearing && Number(v.gearing.efficiency_pct);
+    const efficiencyPct = effRaw > 0 ? effRaw : SIM_DEFAULT_PARAMS.efficiencyPct;
+    return { massKg, cda, powerKw, maxLatG, maxLongG, efficiencyPct };
   }
 
   function simTreadRadiusM(gearing) {
@@ -5575,7 +5708,7 @@
   function getSimEngine() {
     const v = selectedSimVehicle();
     if (!v) return null;
-    const effPct = vehicleSimDrivetrainEffInput ? Number(vehicleSimDrivetrainEffInput.value) : 95;
+    const effPct = computeEffectiveSimParams().efficiencyPct;
     const engine = {
       powerCurve: Array.isArray(v.power_curve) ? v.power_curve : [],
       gearing: v.gearing || {},
@@ -5614,27 +5747,36 @@
     return text;
   }
 
-  function updateSimSelectionState(applyValues) {
+  // One line summarizing the numbers a run will actually use -- mass, CdA, power/engine,
+  // grip limits -- since there's no longer an editable field showing them directly.
+  function describeEffectiveSimParams(v) {
+    const p = computeEffectiveSimParams();
+    const source = v ? 'from ' + describeSimVehicle(v) + (selectedSimRider() ? ' + rider' : '') : 'generic defaults (no vehicle picked)';
+    return `Using ${p.massKg.toFixed(1)} kg, CdA ${p.cda.toFixed(2)} m², ${p.powerKw.toFixed(0)} kW avg, `
+      + `${p.maxLatG.toFixed(2)}g lat / ${p.maxLongG.toFixed(2)}g long -- ${source}.`;
+  }
+
+  function updateSimSelectionState() {
     const v = selectedSimVehicle();
     const r = selectedSimRider();
     if (vehicleSimVehicleEditBtn) vehicleSimVehicleEditBtn.disabled = !v;
     if (vehicleSimRiderEditBtn) vehicleSimRiderEditBtn.disabled = !r;
-    if (applyValues) applySimSelectionToInputs();
 
     if (!vehicleSimVehicleHint) return;
     const calc = getRacingLineCalculationsApi();
     const wantsCurve = !vehicleSimPowerModelSelect || vehicleSimPowerModelSelect.value === 'curve';
+    const paramsLine = describeEffectiveSimParams(v);
     if (!v) {
-      vehicleSimVehicleHint.textContent = 'Pick a vehicle (and rider) to fill mass and CdA and to use its engine curve; '
-        + 'otherwise the values below are used as typed.';
+      vehicleSimVehicleHint.textContent = 'Pick a vehicle (and rider) for its own mass/CdA/power/grip and engine curve. ' + paramsLine;
     } else if (!wantsCurve) {
-      vehicleSimVehicleHint.textContent = 'Average power mode: one flat power figure, faster to simulate.';
+      vehicleSimVehicleHint.textContent = 'Average power mode: one flat power figure, faster to simulate. ' + paramsLine;
     } else {
       const problems = calc && typeof calc.describeEngineProblems === 'function'
         ? calc.describeEngineProblems(getSimEngine())
         : [];
       if (problems.length) {
-        vehicleSimVehicleHint.textContent = `This vehicle is missing ${problems.join(', ')}, so average power will be used. Use ✎ to add it.`;
+        vehicleSimVehicleHint.textContent = `This vehicle is missing ${problems.join(', ')}, so average power will be used. `
+          + `Use ✎ to add it. ${paramsLine}`;
       } else {
         // Showing the top-gear redline speed up front makes a wrong wheel size or ratio
         // obvious before simulating (it is the ceiling the bike can never exceed).
@@ -5646,14 +5788,13 @@
           : (tread ? ` RPM is lean-adjusted (tread radius ${Math.round(tread * 1000)} mm).`
             : ' No tire size, so RPM is not lean-adjusted.');
         vehicleSimVehicleHint.textContent = 'Engine curve + gearing ready: the best gear is picked at every point on track. '
-          + describeSimGearing(v, engine.gearing) + redline + leanNote;
+          + describeSimGearing(v, engine.gearing) + redline + leanNote + ' ' + paramsLine;
       }
     }
   }
 
   // Reloads the vehicle/rider lists from storage, keeping the current selection (or, on
-  // the first load, the last one used). `prefer` selects a just-saved record and can ask for
-  // its values to be applied to the inputs.
+  // the first load, the last one used). `prefer` selects a just-saved record.
   function refreshVehicleSimLists(prefer) {
     if (!sessionsApi || !vehicleSimVehicleSelect || !vehicleSimRiderSelect) return Promise.resolve();
     const saved = loadSimSelection();
@@ -5671,26 +5812,25 @@
       fillSimSelect(vehicleSimRiderSelect, simRiders, (r) => r.name || 'Rider', 'No rider', wantRider);
       simListsLoaded = true;
       saveSimSelection();
-      updateSimSelectionState(!!(prefer && prefer.apply));
+      updateSimSelectionState();
     }).catch(() => {});
   }
 
   function getVehicleSimParams() {
-    const num = (input, fallback) => {
-      const n = input ? Number(input.value) : NaN;
-      return Number.isFinite(n) && n > 0 ? n : fallback;
-    };
+    const effective = computeEffectiveSimParams();
     const params = {
-      maxLatG: num(vehicleSimMaxLatGInput, 1.0),
-      maxLongG: num(vehicleSimMaxLongGInput, 0.7),
-      powerKw: num(vehicleSimPowerKwInput, 32),
-      cda: num(vehicleSimCdaInput, 0.5),
-      massKg: num(vehicleSimMassInput, 235)
+      maxLatG: effective.maxLatG,
+      maxLongG: effective.maxLongG,
+      powerKw: effective.powerKw,
+      cda: effective.cda,
+      massKg: effective.massKg
     };
     if (vehicleSimPowerModelSelect && vehicleSimPowerModelSelect.value === 'curve') {
       const engine = getSimEngine();
       if (engine) params.engine = engine;
     }
+    const geom = getVehicleWeightTransferGeom(selectedSimVehicle(), params.massKg, selectedSimRider());
+    if (geom) params.geom = geom;
     return params;
   }
 
@@ -5901,6 +6041,26 @@
         log.meta.units[SIM_RPM_COL] = 'rpm';
         extraChannels.push(SIM_GEAR_COL, SIM_RPM_COL);
       }
+
+      // Aero/Slope/Tire breakdown of the simulated lap's own LongAcc, and the wheel/axle
+      // loads that (plus the vehicle's weight-transfer geometry, if given) implies -- same
+      // channel names and units as the logged-data path, so a simulated and a real lap
+      // overlay directly on these too.
+      const putChannel = (col, unit, values) => {
+        if (!log.cols.includes(col)) log.cols.push(col);
+        log.meta.units[col] = unit;
+        for (let i = 0; i < n; i++) log.data[i][col] = values[i];
+        extraChannels.push(col);
+      };
+      if (result.aeroDecelG) {
+        putChannel(SIM_AERO_COL, 'g', result.aeroDecelG);
+        putChannel(SIM_TIRE_COL, 'g', result.tireAccelG);
+        if (result.hasSlopeDecel) putChannel(SIM_SLOPE_COL, 'g', result.slopeDecelG);
+      }
+      if (result.wheelLoads) {
+        putChannel(frontLoadColName(isMoto), 'kg', result.wheelLoads.frontKg);
+        putChannel(rearLoadColName(isMoto), 'kg', result.wheelLoads.rearKg);
+      }
       addCalculatedCommonChannels(log.data, log.cols, log.meta);
 
       if (vehicleSimStatus) {
@@ -5940,10 +6100,15 @@
   function openSimInfoModal() {
     const moto = getSimClass() === 'motorcycle';
     const curve = !vehicleSimPowerModelSelect || vehicleSimPowerModelSelect.value === 'curve';
+    const vehicleForInfo = selectedSimVehicle();
     const engine = curve ? getSimEngine() : null;
     const calc = getRacingLineCalculationsApi();
     const engineReady = !!(engine && calc && calc.describeEngineProblems(engine).length === 0);
     const tread = engine ? simTreadRadiusM(engine.gearing) : 0;
+    const geomForInfo = getVehicleWeightTransferGeom(vehicleForInfo, 1);
+    const loadsReady = !!(geomForInfo && geomForInfo.cgHeightM > 0 && geomForInfo.cgPositionM > 0 && geomForInfo.wheelbaseM > 0);
+    const aeroLoadReady = loadsReady && geomForInfo.copHeightM > 0;
+    const loadLabel = (moto ? 'Wheel' : 'Axle') + ' Load (sim)';
 
     const channel = (on, name, text) => '<li class="' + (on ? '' : 'sim-info-off') + '"><strong>' + name + '</strong>'
       + (on ? '' : ' (not computed with the current settings)') + ' -- ' + text + '</li>';
@@ -5956,22 +6121,32 @@
       channel(moto, 'Required Lean Angle Rate', 'how fast that lean has to change, deg/s.'),
       channel(engineReady, 'Gear (sim)', 'the gear giving the most wheel power at that speed (subject to the shift-time rule below).'),
       channel(engineReady, 'RPM (sim)', 'engine RPM in that gear from road speed, gearing and tire size' + (moto ? ', corrected for lean.' : '.')),
+      channel(true, 'Aero Decel (sim)', 'the deceleration aerodynamic drag alone causes at that speed, from Mass and CdA -- always positive.'),
+      channel(true, 'Slope Decel (sim)', "gravity's own share, from the source lap's track grade -- 0 on a flat track or with the elevation option off."),
+      channel(true, 'Tire Longitudinal Grip (sim)', 'LongAcc with Aero and Slope Decel added back in: the net grip the tires alone are using, positive (driving) or negative (braking).'),
+      channel(loadsReady, 'Front/Rear ' + loadLabel, 'longitudinal weight transfer (plus an aero pitching share, if CoP height is set) applied to the static split, in kg -- see Assumptions.'),
       '</ul>',
       '<h4>Logged data</h4><ul>',
-      "<li><strong>RPM (sim)</strong>, <strong>Gear (sim)</strong>" + (moto ? ', <strong>Required Lean Angle</strong> and <strong>Required Lean Angle Rate</strong>' : '') + " can be added to real laps with <em>Simulate RPM, Gear &amp; Lean for Logged Data</em>: the same gear rule, RPM maths and lean formulas, driven by the logged speed" + (moto ? ' and lateral g (for the lean correction)' : '') + ". They use the same channel names as the simulated lap so the two overlay, never overwrite the log's own RPM/Gear, and exist only in the loaded data (re-run after reloading).</li>",
+      "<li><strong>RPM (sim)</strong>, <strong>Gear (sim)</strong>" + (moto ? ', <strong>Required Lean Angle</strong>, <strong>Required Lean Angle Rate</strong>' : '') + ", <strong>Aero Decel (sim)</strong>, <strong>Slope Decel (sim)</strong>, <strong>Tire Longitudinal Grip (sim)</strong> and <strong>Front/Rear " + loadLabel + "</strong> can be added to real laps with <em>Simulate RPM, Gear, Lean &amp; Decel for Logged Data</em>, computed from the logged Speed, LongAcc" + (moto ? ' and LatAcc' : '') + " -- each one only where it applies, so e.g. Aero/Tire Decel (Speed + LongAcc + a Mass/CdA) are added even with no vehicle picked, or on a car, while the Load channels need a vehicle with the Weight Transfer fields filled in. They use the same channel names as the simulated lap so the two overlay, and never overwrite the log's own channels. If the log is a stored file, they're also saved as a small linked file (same sessions/vehicle/rider) and re-applied automatically next time it's loaded.</li>",
       '</ul>',
       '<h4>Assumptions</h4><ul>',
+      "<li>Mass, CdA, Average Power and Max Lateral/Longitudinal grip all come from the picked vehicle (mass and CdA add the rider's own weight and tucked-position CdA delta when a rider is picked too). With no vehicle picked, generic defaults are used instead (1.0g / 0.7g / 32 kW / 0.5 m² / 235 kg). A \"Basic\" vehicle carries just these five and nothing else -- no gearing, power curve or weight-transfer geometry.</li>",
       '<li>Grip is a friction circle: Max Lateral / Max Longitudinal (g) set the envelope; all speeds are limited by it, by power and by air drag (CdA, mass, drivetrain efficiency).</li>',
-      '<li>Mass and CdA come from the vehicle plus rider when picked (rider CdA only if the vehicle has one).</li>',
-      "<li>Engine-curve mode: wheel power is the engine curve at the RPM the gear implies, times drivetrain efficiency. Below the curve's first RPM the clutch slips (torque held). Above the last RPM (redline) there is no drive.</li>",
+      "<li>Tire Longitudinal Grip = LongAcc + Aero Decel + Slope Decel -- adding drag (and grade, if included) back into the measured/simulated LongAcc recovers the tires' own net contribution, in EITHER direction: positive means net driving grip, negative means net braking grip. This is why a hard stop can measure noticeably more deceleration than the vehicle's actual tire/brake limit at high speed -- aero drag (and an uphill grade) are real and stack on top of it, but aren't limited by tire grip. On logged data, grade reads the log's own Slope channel directly (no smoothing); an Altitude-only log is treated as flat.</li>",
+      "<li>Engine-curve mode: wheel power is the engine curve at the RPM the gear implies, times drivetrain efficiency (set on the vehicle's Gearing section, default 95%). Below the curve's first RPM the clutch slips (torque held). Above the last RPM (redline) there is no drive.</li>",
       '<li>Shift time (vehicle gearing): a downshift is only made if the time it gains beats two shifts of lost drive (down + back up); upshifts are instant.</li>',
       '<li>Tire size gives the overall wheel diameter (nominal, unloaded -- no growth or squash). Overall diameter = 2 x width x aspect + rim.</li>',
       moto
         ? "<li>Lean and RPM: leaned over, the bike rolls on the tire's side, so the rolling radius is (R - r) + r cos(lean), with r the tread crown radius = tire width / 2"
           + (tread ? ' (' + Math.round(tread * 1000) + ' mm for this tire)' : ' (needs a tire size on the vehicle -- without one RPM is not lean-adjusted)')
-          + ". Less radius = more RPM at the same speed. The lean used is the <em>required</em> lean angle above; the frame's own lean and rider hang-off are not modelled.</li>"
+          + '. Less radius = more RPM at the same speed. The lean used is the <em>required</em> lean angle above; the frame\'s own lean is not modelled.</li>'
         : '<li>Car class: no lean channels and no lean correction.</li>',
       '<li>Track grade from the source lap (Slope/Altitude) is included when the elevation option is on; otherwise the track is flat.</li>',
+      "<li>Rider weight-transfer position (Rider editor's \"Weight Transfer\" fields, all optional): a rider's saved CG height/position deltas are added to the vehicle's own CG height/position, picked automatically at each point -- hanging off past 15&deg; of lean, otherwise braking (LongAcc &lt; 0) or tucked. A rider's hang-off lateral displacement is stored but not used in any calculation yet (this app only computes front/rear or left/right axle totals, not a left/right split).</li>",
+      "<li>Weight transfer (Vehicle editor's \"Weight Transfer\" fields, all optional): Front/Rear " + loadLabel + " = the static split (from CG position, measured from the front axle, over wheelbase) minus/plus two shares -- Mass x LongAcc x CG height / wheelbase (accelerating shifts load to the rear, braking to the front), and, only when Center of Pressure height is also set, Mass x Aero Decel x CoP height / wheelbase (drag pitches the nose up, squatting the rear, more so the further CoP sits from CG height -- the two exactly cancel if they're equal)."
+        + (moto ? " For a leaning motorcycle, the CG's effective height shrinks with lean like an inverted pendulum (height x cos(lean)), so the weight-transfer share shrinks the same way; rider hang-off is not modelled." : '')
+        + (loadsReady ? (aeroLoadReady ? ' Ready for this vehicle, including the aero share.' : ' Ready for this vehicle (no Center of Pressure height set, so no aero share).') : ' This vehicle is missing CG height, CG position and/or wheelbase, so no Load channels are produced yet.')
+        + '</li>',
       '</ul>'
     ].join('');
 
@@ -6034,6 +6209,31 @@
   const SIM_GEAR_COL = 'Gear (sim)';
   const SIM_LEAN_COL = 'Required Lean Angle';
   const SIM_LEAN_RATE_COL = 'Required Lean Angle Rate';
+  const SIM_AERO_COL = 'Aero Decel (sim)';
+  const SIM_SLOPE_COL = 'Slope Decel (sim)';
+  const SIM_TIRE_COL = 'Tire Longitudinal Grip (sim)';
+  // Motorcycles get per-wheel loads; four-wheel vehicles get per-axle loads (same physics,
+  // just the terminology racers actually use for each).
+  function frontLoadColName(moto) { return moto ? 'Front Wheel Load (sim)' : 'Front Axle Load (sim)'; }
+  function rearLoadColName(moto) { return moto ? 'Rear Wheel Load (sim)' : 'Rear Axle Load (sim)'; }
+
+  // The vehicle's weight-transfer geometry (see the Vehicle editor's "Weight Transfer"
+  // fields), or null if no vehicle is selected -- computeWheelLoads itself tolerates any
+  // of these being missing/invalid and simply returns null, so callers just pass this
+  // straight through.
+  function getVehicleWeightTransferGeom(vehicle, massKg, rider) {
+    if (!vehicle) return null;
+    return {
+      massKg,
+      cgHeightM: vehicle.cg_height_m,
+      cgPositionM: vehicle.cg_position_m,
+      wheelbaseM: vehicle.wheelbase_m,
+      copHeightM: vehicle.cop_height_m,
+      // Consumed directly by simulateVehicleSpeed (via computeRiderCgDeltas); the logged-
+      // data path builds the same per-sample deltas itself (see simulateRpmGearForLoggedData).
+      rider: rider || null
+    };
+  }
 
   // ── Simulated channels for logged data: saved as a linked file ────────────
   // The derived channels only exist in the loaded log, so they are also written to a second
@@ -6041,7 +6241,10 @@
   // the source log is loaded again. It is keyed to the source by name and by row, and is
   // skipped by every "load a stored file" path since it is not a log itself.
   const SIM_CHANNEL_UNITS = {
-    'RPM (sim)': 'rpm', 'Gear (sim)': '', 'Required Lean Angle': 'deg', 'Required Lean Angle Rate': 'deg/s'
+    'RPM (sim)': 'rpm', 'Gear (sim)': '', 'Required Lean Angle': 'deg', 'Required Lean Angle Rate': 'deg/s',
+    'Aero Decel (sim)': 'g', 'Slope Decel (sim)': 'g', 'Tire Longitudinal Grip (sim)': 'g',
+    'Front Wheel Load (sim)': 'kg', 'Rear Wheel Load (sim)': 'kg',
+    'Front Axle Load (sim)': 'kg', 'Rear Axle Load (sim)': 'kg'
   };
 
   function simChannelsFileName(sourceName) {
@@ -6108,28 +6311,36 @@
     }).catch(() => {});
   }
 
-  // Adds RPM (sim) / Gear (sim) to the selected real (non-simulated) logs from their
-  // speed and lateral acceleration, with the chosen vehicle's gearing and tire.
+  // Raw per-row logged Slope (when the format has one and it actually carries data), for
+  // the Tire/Aero Decel channels below -- no smoothing, since this is a direct row-by-row
+  // decomposition rather than a curve fit (compare buildGradeDegForSampled, which smooths
+  // for exactly that reason). A log with only Altitude (no Slope) is treated as flat --
+  // differentiating raw altitude is the noisy path buildGradeDegForSampled exists to avoid,
+  // not worth redoing for this simpler feature.
+  function resolveGradeDegSeriesForLog(log) {
+    const allRows = log.data.map((_, i) => i);
+    const slopeCol = resolveAvailableChannel('Slope', log, allRows);
+    if (!slopeCol) return null;
+    return log.data.map((row) => { const v = Number(row[slopeCol]); return Number.isFinite(v) ? v : 0; });
+  }
+
+  // Adds RPM (sim) / Gear (sim) / lean / Tire & Aero Decel to the selected real
+  // (non-simulated) logs from their speed and lateral/longitudinal acceleration, with the
+  // chosen vehicle's gearing, tire and mass/CdA. Each of these is independent: a car with
+  // no vehicle picked still gets Tire/Aero Decel from the generic default Mass/CdA (see
+  // computeEffectiveSimParams), a motorcycle still gets lean from lateral g alone, and
+  // RPM/Gear need a full engine.
   function simulateRpmGearForLoggedData() {
     const say = (text) => { if (vehicleSimStatus) vehicleSimStatus.textContent = text; };
     const calc = getRacingLineCalculationsApi();
     const moto = getSimClass() === 'motorcycle';
     const engine = getSimEngine();
     const problems = engine ? calc.describeEngineProblems(engine) : ['a vehicle'];
-    // Lean angle only needs the lateral g, so a motorcycle still gets it without an engine.
-    if (problems.length && !moto) {
-      say(engine ? 'This vehicle is missing ' + problems.join(', ') + '; cannot simulate RPM and gear.'
-        : 'Pick a vehicle with a power curve and gearing first.');
-      return;
-    }
     const targets = getSelectedFiles().filter((l) => !(l.meta && l.meta.synthetic));
     if (!targets.length) { say('Load a real log and select it first.'); return; }
 
-    const num = (input, fallback) => {
-      const n = input ? Number(input.value) : NaN;
-      return Number.isFinite(n) && n > 0 ? n : fallback;
-    };
-    const ctx = { massKg: num(vehicleSimMassInput, 235), cda: num(vehicleSimCdaInput, 0.5) };
+    const effective = computeEffectiveSimParams();
+    const ctx = { massKg: effective.massKg, cda: effective.cda };
     let done = 0;
     const added = new Set();
     const processed = [];
@@ -6157,6 +6368,7 @@
       };
       let did = false;
       const logCols = [];
+      let leanDegArr = null; // shared with the wheel-load block below, motorcycle only
       if (!problems.length) {
         const res = calc.computeEngineRpmGear(engine, speedMs, lat, ctx);
         if (res) {
@@ -6175,18 +6387,65 @@
           : (timeCol && log.cols.includes(timeCol) ? log.data.map((row) => Number(row[timeCol])) : null);
         const leanRes = calc.computeLeanFromLatAcc(lat, timeS, log.meta.lapNum);
         if (leanRes) {
+          leanDegArr = leanRes.leanDeg;
           put(SIM_LEAN_COL, 'deg', leanRes.leanDeg);
           put(SIM_LEAN_RATE_COL, 'deg/s', leanRes.leanRateDegS);
           logCols.push(SIM_LEAN_COL, SIM_LEAN_RATE_COL);
           did = true;
         }
       }
+      // Aero/Slope/Tire decomposition only needs Speed, LongAcc and a mass/CdA -- no engine
+      // or gearing, so this runs for a car or a motorcycle, with or without a vehicle
+      // picked (the Mass/CdA fields always have a value, vehicle-filled or typed). Grade
+      // only factors in when "Include Elevation/Altitude Effect" is on and the log has a
+      // logged Slope channel; otherwise the track is treated as flat, same as the sim.
+      const longCol = resolveChannelForLog(COMMON_LONG_ACC_CHANNEL, log);
+      if (longCol && log.cols.includes(longCol)) {
+        const longUnit = String((log.meta.units && log.meta.units[longCol]) || '').toLowerCase();
+        const toG2 = /m\/s/.test(longUnit) ? 1 / 9.81 : 1;
+        const longG = log.data.map((row) => { const a = Number(row[longCol]); return Number.isFinite(a) ? a * toG2 : NaN; });
+        const useElevation = !vehicleSimUseElevationInput || vehicleSimUseElevationInput.checked;
+        const gradeDeg = useElevation ? resolveGradeDegSeriesForLog(log) : null;
+        const decomposed = calc.computeTireAeroDecel(speedMs, longG, { massKg: ctx.massKg, cda: ctx.cda, gradeDeg });
+        if (decomposed) {
+          put(SIM_AERO_COL, 'g', decomposed.aeroDecelG);
+          put(SIM_TIRE_COL, 'g', decomposed.tireAccelG);
+          logCols.push(SIM_AERO_COL, SIM_TIRE_COL);
+          if (decomposed.hasGrade) {
+            put(SIM_SLOPE_COL, 'g', decomposed.slopeDecelG);
+            logCols.push(SIM_SLOPE_COL);
+          }
+          did = true;
+
+          // Front/Rear wheel or axle loads: needs the vehicle's weight-transfer geometry
+          // (CG height/position, wheelbase -- CoP height only adds the aero term on top),
+          // so unlike Aero/Tire/Slope Decel this does need a vehicle picked.
+          const geom = getVehicleWeightTransferGeom(selectedSimVehicle(), ctx.massKg);
+          let loads = null;
+          if (geom) {
+            const riderCg = calc.computeRiderCgDeltas(longG, moto ? leanDegArr : null, selectedSimRider());
+            const geomWithRider = riderCg
+              ? Object.assign({}, geom, { cgHeightDeltaM: riderCg.heightDeltaM, cgPositionDeltaM: riderCg.positionDeltaM })
+              : geom;
+            loads = calc.computeWheelLoads(longG, decomposed.aeroDecelG, moto ? leanDegArr : null, geomWithRider);
+          }
+          if (loads) {
+            const frontCol = frontLoadColName(moto);
+            const rearCol = rearLoadColName(moto);
+            put(frontCol, 'kg', loads.frontKg);
+            put(rearCol, 'kg', loads.rearKg);
+            logCols.push(frontCol, rearCol);
+          }
+        }
+      }
       if (did) { done++; processed.push({ log, cols: logCols }); }
     });
-    if (!done) { say('None of the selected logs has the Speed / lateral acceleration channels needed.'); return; }
+    if (!done) { say('None of the selected logs has the Speed / LongAcc / LatAcc channels needed.'); return; }
+    const loadsAdded = Array.from(added).some((c) => / Load \(sim\)$/.test(c));
     say('Added ' + Array.from(added).join(', ') + ' to ' + done + ' log' + (done === 1 ? '' : 's')
       + (moto && engine && engine.treadRadiusM && !problems.length ? ' (RPM lean-adjusted from lateral g).' : '.')
-      + (problems.length ? ' RPM and gear need a vehicle with a power curve and gearing.' : ''));
+      + (problems.length ? ' RPM and gear need a vehicle with a power curve and gearing.' : '')
+      + (selectedSimVehicle() && !loadsAdded ? ' Wheel/axle loads need CG height, CG position and wheelbase on the vehicle.' : ''));
     const settings = {
       vehicleClass: moto ? 'motorcycle' : 'car',
       treadRadiusM: engine && engine.treadRadiusM ? engine.treadRadiusM : null,
@@ -10364,10 +10623,11 @@
     });
   }
 
-  // Vehicle / rider pickers: choosing one fills mass, CdA and average power from it; the
-  // ✎ and + buttons open the very same editor popovers the Sessions panel uses.
+  // Vehicle / rider pickers: choosing one sources mass, CdA, average power and grip
+  // limits from it (see computeEffectiveSimParams); the ✎ and + buttons open the very
+  // same editor popovers the Sessions panel uses.
   setSimClass(loadSimSelection().vehicleClass);
-  vehicleSimClassRadios.forEach((r) => r.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(false); }));
+  vehicleSimClassRadios.forEach((r) => r.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(); }));
   if (vehicleSimInfoBtn) vehicleSimInfoBtn.addEventListener('click', openSimInfoModal);
   if (vehicleSimLoggedBtn) vehicleSimLoggedBtn.addEventListener('click', simulateRpmGearForLoggedData);
   if (vehicleSimVehicleSelect) {
@@ -10376,29 +10636,26 @@
       const picked = selectedSimVehicle();
       if (picked && (picked.type === 'car' || picked.type === 'motorcycle')) setSimClass(picked.type);
       saveSimSelection();
-      updateSimSelectionState(true);
+      updateSimSelectionState();
     });
   }
   if (vehicleSimRiderSelect) {
-    vehicleSimRiderSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(true); });
+    vehicleSimRiderSelect.addEventListener('change', () => { saveSimSelection(); updateSimSelectionState(); });
   }
   if (vehicleSimPowerModelSelect) {
-    vehicleSimPowerModelSelect.addEventListener('change', () => updateSimSelectionState(false));
-  }
-  if (vehicleSimDrivetrainEffInput) {
-    vehicleSimDrivetrainEffInput.addEventListener('input', () => updateSimSelectionState(false));
+    vehicleSimPowerModelSelect.addEventListener('change', () => updateSimSelectionState());
   }
   const openSimVehicleEditor = (existing) => {
     if (!window.SessionsUI) return;
     window.SessionsUI.openVehicleEditor(
-      (saved) => refreshVehicleSimLists({ vehicleId: saved && saved.id, apply: true }),
+      (saved) => refreshVehicleSimLists({ vehicleId: saved && saved.id }),
       existing || undefined
     );
   };
   const openSimRiderEditor = (existing) => {
     if (!window.SessionsUI) return;
     window.SessionsUI.openRiderEditor(
-      (saved) => refreshVehicleSimLists({ riderId: saved && saved.id, apply: true }),
+      (saved) => refreshVehicleSimLists({ riderId: saved && saved.id }),
       existing || undefined
     );
   };
@@ -11216,6 +11473,100 @@
       const file = settingsFileInput.files && settingsFileInput.files[0];
       settingsFileInput.value = ''; // allow re-selecting the same file back-to-back
       if (file) importSettingsFromFile(file);
+    });
+  }
+
+  // ── Vehicles & Riders: standalone JSON import/export ──────────────────────
+  // Separate from Download All Data (which already includes the full sessions bundle,
+  // vehicles/riders included) -- this is the "share just my garage" path: a plain,
+  // human-readable file with only vehicles and riders, importable as new entries on
+  // another browser/profile without touching anything else there.
+  function setVehiclesRidersIoStatus(message, isError) {
+    if (!vehiclesRidersIoStatus) return;
+    vehiclesRidersIoStatus.textContent = message;
+    vehiclesRidersIoStatus.classList.toggle('is-error', !!isError);
+  }
+
+  function stripRecordForExport(record) {
+    const copy = Object.assign({}, record);
+    delete copy.id;
+    delete copy.created_at;
+    delete copy.updated_at;
+    return copy;
+  }
+
+  function downloadVehiclesRidersJson() {
+    if (!sessionsApi) { setVehiclesRidersIoStatus('Sessions storage is not available.', true); return; }
+    Promise.all([
+      sessionsApi.VehicleService.listVehicles(),
+      sessionsApi.RiderService.listRiders()
+    ]).then(([vehicles, riders]) => {
+      if (!vehicles.length && !riders.length) {
+        setVehiclesRidersIoStatus('No vehicles or riders to download yet.', true);
+        return;
+      }
+      const payload = {
+        app: 'csv-plotter-vehicles-riders',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        vehicles: vehicles.map(stripRecordForExport),
+        riders: riders.map(stripRecordForExport)
+      };
+      triggerJsonDownload(JSON.stringify(payload, null, 2), 'csv-plotter-vehicles-riders');
+      setVehiclesRidersIoStatus(`Downloaded ${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} `
+        + `and ${riders.length} rider${riders.length === 1 ? '' : 's'}.`);
+    }).catch(() => setVehiclesRidersIoStatus('Could not read vehicles/riders from storage.', true));
+  }
+
+  // Every vehicle/rider in the file is added as a brand-new record (a fresh id is minted
+  // by the normal create path) -- never matched against or merged into an existing one,
+  // so importing the same file twice makes duplicates. That mirrors "import a shared
+  // setup" semantics; "restore my own backup" (which reinstates the same records instead
+  // of duplicating them) is what Upload Backup / Download All Data is for.
+  function importVehiclesRidersFromFile(file) {
+    if (!sessionsApi) { setVehiclesRidersIoStatus('Sessions storage is not available.', true); return; }
+    if (typeof file.text !== 'function') { setVehiclesRidersIoStatus('This browser cannot read that file.', true); return; }
+    file.text().then((text) => {
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setVehiclesRidersIoStatus('Could not read that file -- not valid JSON.', true);
+        return;
+      }
+      const vehicles = Array.isArray(parsed && parsed.vehicles) ? parsed.vehicles : [];
+      const riders = Array.isArray(parsed && parsed.riders) ? parsed.riders : [];
+      if (!vehicles.length && !riders.length) {
+        setVehiclesRidersIoStatus("That file doesn't look like a csv-plotter vehicles/riders export.", true);
+        return;
+      }
+      Promise.all([
+        Promise.all(vehicles.map((v) => sessionsApi.VehicleService.createVehicle(stripRecordForExport(v)).then(() => true).catch(() => false))),
+        Promise.all(riders.map((r) => sessionsApi.RiderService.createRider(stripRecordForExport(r)).then(() => true).catch(() => false)))
+      ]).then(([vehicleResults, riderResults]) => {
+        const vehiclesAdded = vehicleResults.filter(Boolean).length;
+        const ridersAdded = riderResults.filter(Boolean).length;
+        const failed = (vehicleResults.length - vehiclesAdded) + (riderResults.length - ridersAdded);
+        setVehiclesRidersIoStatus(
+          `Imported ${vehiclesAdded} vehicle${vehiclesAdded === 1 ? '' : 's'} and ${ridersAdded} rider${ridersAdded === 1 ? '' : 's'} as new entries`
+          + (failed ? `; ${failed} record(s) could not be imported.` : '.'),
+          failed > 0 && vehiclesAdded + ridersAdded === 0
+        );
+        refreshVehicleSimLists();
+        if (window.SessionsUI) window.SessionsUI.renderPanel();
+      });
+    }, () => setVehiclesRidersIoStatus('Failed to read that file.', true));
+  }
+
+  if (downloadVehiclesRidersBtn) {
+    downloadVehiclesRidersBtn.addEventListener('click', downloadVehiclesRidersJson);
+  }
+  if (uploadVehiclesRidersBtn && vehiclesRidersFileInput) {
+    uploadVehiclesRidersBtn.addEventListener('click', () => vehiclesRidersFileInput.click());
+    vehiclesRidersFileInput.addEventListener('change', () => {
+      const file = vehiclesRidersFileInput.files && vehiclesRidersFileInput.files[0];
+      vehiclesRidersFileInput.value = '';
+      if (file) importVehiclesRidersFromFile(file);
     });
   }
 

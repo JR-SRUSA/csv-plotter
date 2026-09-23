@@ -652,12 +652,16 @@ body.map-fullscreen-open{overflow:hidden}
 .selection-stats-close:hover{opacity:1}
 .selection-stats-controls{padding:6px 8px 0}
 .selection-stats-fit-type-label,
+.selection-stats-fit-slope-units-row,
 .selection-stats-fit-formula-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#555);margin-bottom:6px}
 .selection-stats-fit-type-label select,
+.selection-stats-fit-slope-units-row select,
 .selection-stats-fit-formula-row input{flex:1;min-width:0;font-size:12px;padding:2px 4px;border:1px solid var(--border-color,#ccc);border-radius:4px;background:var(--panel-bg,#fff);color:var(--text-color,#222)}
 [data-theme=dark] .selection-stats-fit-type-label,
+[data-theme=dark] .selection-stats-fit-slope-units-row,
 [data-theme=dark] .selection-stats-fit-formula-row{color:#a8b8cc}
 [data-theme=dark] .selection-stats-fit-type-label select,
+[data-theme=dark] .selection-stats-fit-slope-units-row select,
 [data-theme=dark] .selection-stats-fit-formula-row input{background:#0f1520;border-color:#3a4556;color:#dde6f2}
 .selection-stats-fit-equation{font-size:11px;font-family:ui-monospace,"SF Mono",Consolas,monospace;color:var(--text-muted,#555);margin:-3px 0 6px;word-break:break-word}
 [data-theme=dark] .selection-stats-fit-equation{color:#a8b8cc}

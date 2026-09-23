@@ -1175,6 +1175,143 @@
     return { leanDeg, leanRateDegS: rate };
   }
 
+  // Splits a *logged* run's measured longitudinal acceleration into the aerodynamic-drag
+  // and track-grade shares and what's left over for the tires, at each sample. This is
+  // just the simulation's own accounting (see simulateVehicleSpeed's forward/backward
+  // passes: net accel = tire accel - drag - grade, and braking similarly adds drag and
+  // grade on top of the tire's own braking) read the other way: given the real measured
+  // net accel, add drag and grade back in to recover what the tires alone were doing.
+  // Everything is in g.
+  //   Aero Decel (always >= 0): the deceleration drag alone causes at that speed --
+  //     0.5 * rho * CdA * v^2 / mass, independent of throttle/brake.
+  //   Slope Decel (signed, positive = uphill): gravity's own contribution, g * sin(grade).
+  //     An uphill grade assists braking (adds to it) and fights acceleration; downhill
+  //     does the reverse -- 0 (or null, with no grade data) on a flat track.
+  //   Tire ("Tire Longitudinal Grip"): longAccG + Aero Decel + Slope Decel -- the tires'
+  //     own net longitudinal contribution once aero and grade are accounted for, in
+  //     EITHER direction: positive means net driving grip, negative means net braking
+  //     grip. This is why a logged straight-line stop can show more deceleration than the
+  //     tires/brakes are actually capable of: drag (and an uphill grade) stack on top.
+  // `ctx.gradeDeg` (optional, parallel to speedMs, degrees, positive = uphill) adds the
+  // same track-grade term the simulation uses; omitted (or null entries) treats it as flat.
+  function computeTireAeroDecel(speedMs, longAccG, ctx) {
+    if (!Array.isArray(speedMs) || !Array.isArray(longAccG)) return null;
+    const n = Math.min(speedMs.length, longAccG.length);
+    if (n === 0) return null;
+    const c = ctx || {};
+    const mass = Math.max(1, Number(c.massKg) || 215);
+    const cda = Math.max(0.01, Number(c.cda) || 0.35);
+    const gradeDeg = Array.isArray(c.gradeDeg) && c.gradeDeg.length === speedMs.length ? c.gradeDeg : null;
+    const aeroDecelG = new Array(n).fill(null);
+    const slopeDecelG = new Array(n).fill(null);
+    const tireAccelG = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+      const v = Number(speedMs[i]);
+      const axG = Number(longAccG[i]);
+      if (!Number.isFinite(v) || !Number.isFinite(axG)) continue;
+      aeroDecelG[i] = (0.5 * AIR_DENSITY_KGM3 * cda * v * v) / mass / GRAVITY_MS2;
+      slopeDecelG[i] = gradeDeg && Number.isFinite(gradeDeg[i]) ? Math.sin(gradeDeg[i] * Math.PI / 180) : 0;
+      tireAccelG[i] = axG + aeroDecelG[i] + slopeDecelG[i];
+    }
+    return { aeroDecelG, slopeDecelG, tireAccelG, hasGrade: !!gradeDeg };
+  }
+
+  // Longitudinal weight transfer -- the mechanical share (the vehicle's net accel acting
+  // through its own CG height) plus an aerodynamic pitching share (drag acting through its
+  // own center of pressure, which can sit at a different height than the CG). Taking
+  // moments about a rear contact patch (ground level), the tire forces themselves drop out
+  // entirely (they act at that same height), leaving exactly two terms: the inertial
+  // reaction to the vehicle's TOTAL measured/simulated accel, through the CG, and aero
+  // drag's own moment through the CoP -- which is why this needs `axG` to be the total
+  // (tire + aero + grade combined) accel, not the tire-only figure. If the CoP happened to
+  // sit at exactly the CG's height, the two terms would cancel out to nothing (drag would
+  // just look like ordinary deceleration); the height difference is what makes it a
+  // distinct "aero load transfer" on top of the ordinary weight transfer.
+  //   Front = mass*(L-p)/L - mass*axG*hCgEff/L - mass*aeroDecelG*hCop/L
+  //   Rear  = mass*p/L     + mass*axG*hCgEff/L + mass*aeroDecelG*hCop/L
+  // (dividing the usual Newton's-law weight-transfer formula through by g turns a
+  // Newton-based force into a "load in kg" directly against a G-unit accel, with no unit
+  // conversion needed elsewhere.)
+  // `leanDeg` (optional, degrees, motorcycles only): as the bike leans over, its CG swings
+  // toward the ground like an inverted pendulum, so the height that matters for weight
+  // transfer shrinks with lean -- hCgEff = cgHeightM * cos(lean). Pass null for a vehicle
+  // that doesn't lean (leanDeg is ignored either way if the class doesn't call for it).
+  // `geom`: { massKg, cgHeightM, cgPositionM (from the front axle), wheelbaseM,
+  // copHeightM (optional -- omitting it just skips the aero term) }. Returns null unless
+  // massKg, cgHeightM, cgPositionM and wheelbaseM are all present and positive.
+  // A lean past this is treated as "hanging off" rather than tucked/sitting-up, for
+  // picking which of a rider's saved CG deltas applies at a given point (see
+  // computeRiderCgDeltas) -- a simple, documented heuristic: serious lean only really
+  // happens mid-corner, exactly where hanging off is the normal riding position.
+  const HANGOFF_LEAN_THRESHOLD_DEG = 15;
+
+  // Picks, at each sample, which of a rider's three saved CG deltas (tucked/braking/
+  // hangoff -- see the Rider typedef) applies, the same idea as Rider.cda_tucked_m2 etc.
+  // being layered onto Vehicle.cda_m2, just for weight-transfer geometry instead of drag:
+  // hanging off past HANGOFF_LEAN_THRESHOLD_DEG of lean, otherwise braking (axG < 0) or
+  // tucked (accelerating/neutral). Returns null if there's no rider or no deltas to apply
+  // (each is independently optional -- a rider missing all of them changes nothing).
+  function computeRiderCgDeltas(axG, leanDeg, rider) {
+    if (!rider || !Array.isArray(axG)) return null;
+    const n = axG.length;
+    const heightDeltaM = new Array(n).fill(0);
+    const positionDeltaM = new Array(n).fill(0);
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      const lean = Array.isArray(leanDeg) && Number.isFinite(leanDeg[i]) ? Math.abs(leanDeg[i]) : 0;
+      let hKey;
+      let pKey;
+      if (lean > HANGOFF_LEAN_THRESHOLD_DEG) { hKey = 'cg_height_delta_hangoff_m'; pKey = 'cg_position_delta_hangoff_m'; }
+      else if (Number.isFinite(axG[i]) && axG[i] < 0) { hKey = 'cg_height_delta_braking_m'; pKey = 'cg_position_delta_braking_m'; }
+      else { hKey = 'cg_height_delta_tucked_m'; pKey = 'cg_position_delta_tucked_m'; }
+      const h = Number(rider[hKey]);
+      const p = Number(rider[pKey]);
+      if (Number.isFinite(h) && h !== 0) { heightDeltaM[i] = h; any = true; }
+      if (Number.isFinite(p) && p !== 0) { positionDeltaM[i] = p; any = true; }
+    }
+    return any ? { heightDeltaM, positionDeltaM } : null;
+  }
+
+  // `geom.cgHeightDeltaM`/`geom.cgPositionDeltaM` (optional, arrays parallel to axG): a
+  // per-sample adjustment on top of the vehicle's own cgHeightM/cgPositionM -- e.g. from
+  // computeRiderCgDeltas -- so the CG (and therefore the static split too) can shift
+  // through the lap with riding position, not just with lean.
+  function computeWheelLoads(axG, aeroDecelG, leanDeg, geom) {
+    if (!Array.isArray(axG)) return null;
+    const g = geom || {};
+    const mass = Number(g.massKg);
+    const hCgBase = Number(g.cgHeightM);
+    const pBase = Number(g.cgPositionM);
+    const L = Number(g.wheelbaseM);
+    if (!(mass > 0) || !(hCgBase > 0) || !(pBase > 0) || !(L > 0)) return null;
+    const hCop = Number(g.copHeightM);
+    const hasAero = hCop > 0 && Array.isArray(aeroDecelG);
+    const n = axG.length;
+    const heightDeltaArr = Array.isArray(g.cgHeightDeltaM) && g.cgHeightDeltaM.length === n ? g.cgHeightDeltaM : null;
+    const positionDeltaArr = Array.isArray(g.cgPositionDeltaM) && g.cgPositionDeltaM.length === n ? g.cgPositionDeltaM : null;
+    const frontKg = new Array(n).fill(null);
+    const rearKg = new Array(n).fill(null);
+    // Reported once as a plain baseline figure (vehicle only, no rider delta), even
+    // though the per-sample split below can vary if a rider CG delta was supplied.
+    const staticFrontKg = mass * (L - pBase) / L;
+    const staticRearKg = mass * pBase / L;
+    for (let i = 0; i < n; i++) {
+      const a = Number(axG[i]);
+      if (!Number.isFinite(a)) continue;
+      const hCg = hCgBase + (heightDeltaArr && Number.isFinite(heightDeltaArr[i]) ? heightDeltaArr[i] : 0);
+      const p = pBase + (positionDeltaArr && Number.isFinite(positionDeltaArr[i]) ? positionDeltaArr[i] : 0);
+      const leanRad = (Array.isArray(leanDeg) && Number.isFinite(leanDeg[i])) ? Math.abs(leanDeg[i]) * Math.PI / 180 : 0;
+      const hCgEff = hCg * Math.cos(leanRad);
+      const mechKg = mass * a * hCgEff / L;
+      const aeroKg = (hasAero && Number.isFinite(aeroDecelG[i])) ? (mass * aeroDecelG[i] * hCop / L) : 0;
+      const staticFrontRow = mass * (L - p) / L;
+      const staticRearRow = mass * p / L;
+      frontKg[i] = staticFrontRow - mechKg - aeroKg;
+      rearKg[i] = staticRearRow + mechKg + aeroKg;
+    }
+    return { frontKg, rearKg, staticFrontKg, staticRearKg };
+  }
+
   // `rep`: the periodic B-spline representation being simulated (a live fit's
   // `fit.control`, or one reconstructed for an already-accepted racing-line lap).
   // `sampled`: points along it to simulate at, e.g. `fit.sampled` or a fresh call to
@@ -1371,9 +1508,30 @@
       revLimitedFraction = atLimit / n;
     }
 
+    // Aero/slope/tire breakdown of the final speed profile's own tangential accel, and the
+    // weight transfer it (plus the vehicle's geometry, if given) implies -- the same
+    // decomposition computeTireAeroDecel/computeWheelLoads give a *logged* run, just fed
+    // from this simulation's own ax instead of a real LongAcc channel, so both paths write
+    // identical channel names and agree with each other when compared directly.
+    const axG = ax.map((a) => a / GRAVITY_MS2);
+    const decomposed = computeTireAeroDecel(speed, axG, { massKg: mass, cda, gradeDeg: hasGrade ? gradeDeg : null });
+    // params.geom.rider (optional, the raw Rider record): layers that rider's own CG
+    // deltas (tucked/braking/hangoff) onto the vehicle's geometry -- see
+    // computeRiderCgDeltas -- before computing wheel/axle loads.
+    let wheelLoads = null;
+    if (params.geom) {
+      const riderCg = computeRiderCgDeltas(axG, leanDeg, params.geom.rider);
+      const geomWithRider = riderCg
+        ? Object.assign({}, params.geom, { cgHeightDeltaM: riderCg.heightDeltaM, cgPositionDeltaM: riderCg.positionDeltaM })
+        : params.geom;
+      wheelLoads = computeWheelLoads(axG, decomposed.aeroDecelG, leanDeg, geomWithRider);
+    }
+
     return {
       speed, ax, ay, leanDeg, leanRateDegS, time, lapTime, topSpeedFromPower, usedGrade: hasGrade,
       gear, rpm, usedEngineModel: !!engine,
+      aeroDecelG: decomposed.aeroDecelG, slopeDecelG: decomposed.slopeDecelG, tireAccelG: decomposed.tireAccelG,
+      hasSlopeDecel: decomposed.hasGrade, wheelLoads,
       revLimitedFraction, redlineSpeed: engine ? engine.maxGearSpeed : null
     };
   }
@@ -1388,6 +1546,9 @@
     buildEngineModel,
     computeEngineRpmGear,
     computeLeanFromLatAcc,
+    computeTireAeroDecel,
+    computeWheelLoads,
+    computeRiderCgDeltas,
     describeEngineProblems
   };
 })();
