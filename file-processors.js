@@ -47,10 +47,18 @@
     return 'auto';
   }
 
+  // Date.parse() is pathologically permissive (e.g. it happily parses plain text like
+  // "SDS IGN AN 1" as a valid date), which used to make arbitrary text channel names
+  // spuriously count as "data-like" and throw off header-row detection. Only hand it
+  // strings that are actually shaped like a date/timestamp.
+  const DATE_LIKE_PATTERN = /^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(AM|PM)?)?$/i;
+  const MONTH_NAME_PATTERN = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i;
+
   function isDataLikeCell(value) {
     if (!value) return false;
     if (!isNaN(Number(value))) return true;
-    if (!isNaN(Date.parse(value))) return true;
+    const looksDateLike = DATE_LIKE_PATTERN.test(value) || (MONTH_NAME_PATTERN.test(value) && /\d/.test(value));
+    if (looksDateLike && !isNaN(Date.parse(value))) return true;
     return /^(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)$/.test(value);
   }
 
@@ -331,31 +339,31 @@
   function processGPBikesRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'GP Bikes';
     const format = details.format || 'PiBoSo CSV File';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { manualHeader: details.manualHeader || null });
   }
 
   function processAiMRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'AiM';
     const format = details.format || 'AiM CSV File';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { manualHeader: details.manualHeader || null });
   }
 
   function processMoTeCRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'MoTeC';
     const format = details.format || 'MoTeC CSV File';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { manualHeader: details.manualHeader || null });
   }
 
   function processStandardRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'Standard CSV';
     const format = details.format || 'Standard CSV';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false, manualHeader: details.manualHeader || null });
   }
 
   function processTsvRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'TSV';
     const format = details.format || 'TSV';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { manualHeader: details.manualHeader || null });
   }
 
   function processGenericRows(rows, headerRowIndex, details = {}) {
@@ -365,14 +373,14 @@
     // displaying its first entry (GP Bikes) regardless of what actually decoded the file.
     const source = details.source || 'Generic';
     const format = details.format || 'Unknown';
-    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {});
+    return processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { manualHeader: details.manualHeader || null });
   }
 
   function processVIGradeRows(rows, headerRowIndex, details = {}) {
     const source = details.source || 'VIGrade';
     const format = details.format || 'VIGrade CSV';
     const processed = processRowsWithCurrentMethod(
-      rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false }
+      rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false, manualHeader: details.manualHeader || null }
     );
     filterAllZeroColumns(processed);
     return processed;
@@ -756,7 +764,7 @@
       return sparseResult;
     }
 
-    const base = processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false });
+    const base = processRowsWithCurrentMethod(rows, headerRowIndex, source, format, details.metadata || {}, { allowUnitsRow: false, manualHeader: details.manualHeader || null });
     normalizeScanMyTeslaTimeToSeconds(base);
     applyScanMyTeslaDefaultUnits(base);
     const resampled = resampleProcessedData(base, resampleHz);
@@ -1286,13 +1294,18 @@
     };
   }
 
-  function processRowsWithCurrentMethod(rows, headerRowIndex, source, format, metadata = {}, options = {}) {
-    const allowUnitsRow = options.allowUnitsRow !== false;
+  // Auto-detects whether the row right after the header is a units row (one unit per
+  // column, e.g. "s","km/h",...) and, if so, that data starts one row later than it
+  // otherwise would. Shared by processRowsWithCurrentMethod (actually parses the file)
+  // and describeAutoHeaderDetection (previews what auto-detect picked, for the manual
+  // header-override UI) so the two never drift apart.
+  function detectUnitsRowAndDataStart(rows, headerRowIndex, allowUnitsRow = true) {
     const rawCols = (rows[headerRowIndex] || []).map(c => String(c).trim());
     const minSignalCount = Math.max(2, Math.floor(rawCols.length * 0.3));
 
     let dataStart = headerRowIndex + 1;
     let unitsRow = null;
+    let unitsRowIndex = null;
     if (allowUnitsRow && rows[dataStart]) {
       const unitCandidate = rows[dataStart].slice(0, rawCols.length).map(c => (c == null ? '' : String(c).trim()));
       const nextRowCells = (rows[dataStart + 1] || []).slice(0, rawCols.length).map(c => (c == null ? '' : String(c).trim()));
@@ -1305,8 +1318,62 @@
 
       if (looksLikeUnitsRow || strictLegacyUnitsRow) {
         unitsRow = unitCandidate;
+        unitsRowIndex = dataStart;
         dataStart = headerRowIndex + 2;
       }
+    }
+
+    return { dataStart, unitsRow, unitsRowIndex };
+  }
+
+  // Validates/clamps a user-supplied manual header override so a stale saved override
+  // (e.g. from before a file's content changed) can't send parsing out of bounds --
+  // malformed or out-of-range values are treated as absent, falling back to auto-detect.
+  function normalizeManualHeaderOverride(raw, rowCount) {
+    if (!raw || typeof raw !== 'object') return null;
+    const headerRowIndex = Number(raw.headerRowIndex);
+    const dataStartRowIndex = Number(raw.dataStartRowIndex);
+    if (!Number.isInteger(headerRowIndex) || headerRowIndex < 0 || headerRowIndex >= rowCount) return null;
+    if (!Number.isInteger(dataStartRowIndex) || dataStartRowIndex <= headerRowIndex || dataStartRowIndex > rowCount) return null;
+
+    let unitsRowIndex = null;
+    const rawUnitsRowIndex = Number(raw.unitsRowIndex);
+    if (Number.isInteger(rawUnitsRowIndex) && rawUnitsRowIndex > headerRowIndex && rawUnitsRowIndex < dataStartRowIndex) {
+      unitsRowIndex = rawUnitsRowIndex;
+    }
+
+    return { headerRowIndex, unitsRowIndex, dataStartRowIndex };
+  }
+
+  // Reports what auto-detection currently picks for a given decoder, without actually
+  // parsing the file -- used to prefill the manual header-override UI with sensible
+  // starting values (what's "currently automatic") rather than a blank slate.
+  function describeAutoHeaderDetection(rows, decoderName) {
+    const formatHint = getMetadataValueFromRows(rows, 'format');
+    const useMotecHeader = decoderName === 'MoTeC';
+    const headerRowIndex = (useMotecHeader || isMoTeCFormat(formatHint))
+      ? findMoTeCHeaderRowIndex(rows)
+      : findHeaderRowIndex(rows);
+    const allowUnitsRow = decoderName !== 'Standard' && decoderName !== 'VIGrade' && decoderName !== 'ScanMyTesla';
+    const { dataStart, unitsRowIndex } = detectUnitsRowAndDataStart(rows, headerRowIndex, allowUnitsRow);
+    return { headerRowIndex, unitsRowIndex, dataStartRowIndex: dataStart };
+  }
+
+  function processRowsWithCurrentMethod(rows, headerRowIndex, source, format, metadata = {}, options = {}) {
+    const rawCols = (rows[headerRowIndex] || []).map(c => String(c).trim());
+    const manualHeader = options.manualHeader || null;
+
+    let dataStart, unitsRow;
+    if (manualHeader) {
+      dataStart = manualHeader.dataStartRowIndex;
+      unitsRow = (Number.isInteger(manualHeader.unitsRowIndex) && rows[manualHeader.unitsRowIndex])
+        ? rows[manualHeader.unitsRowIndex].slice(0, rawCols.length).map(c => (c == null ? '' : String(c).trim()))
+        : null;
+    } else {
+      const allowUnitsRow = options.allowUnitsRow !== false;
+      const detected = detectUnitsRowAndDataStart(rows, headerRowIndex, allowUnitsRow);
+      dataStart = detected.dataStart;
+      unitsRow = detected.unitsRow;
     }
 
     const data = rows.slice(dataStart).map((r) => {
@@ -1658,36 +1725,37 @@
 
   function processCsvRowsWithDecoder(rows, decoderName, options = {}) {
     const parsedOptions = (options && typeof options === 'object' && !Array.isArray(options)) ? options : {};
+    const manualHeader = normalizeManualHeaderOverride(parsedOptions.manualHeader, rows.length);
     const useMotecHeader = decoderName === 'MoTeC';
     const formatHint = getMetadataValueFromRows(rows, 'format');
-    const headerRowIndex = (useMotecHeader || isMoTeCFormat(formatHint))
-      ? findMoTeCHeaderRowIndex(rows)
-      : findHeaderRowIndex(rows);
+    const headerRowIndex = manualHeader
+      ? manualHeader.headerRowIndex
+      : ((useMotecHeader || isMoTeCFormat(formatHint)) ? findMoTeCHeaderRowIndex(rows) : findHeaderRowIndex(rows));
     const metadata = extractMetadata(rows, headerRowIndex);
     const source = getMetadataValue(metadata, 'data source') || getMetadataValue(metadata, 'source');
     const format = getMetadataValue(metadata, 'format');
 
     switch (decoderName) {
       case 'GP Bikes':
-        return processGPBikesRows(rows, headerRowIndex, { source, format, metadata });
+        return processGPBikesRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'AiM':
-        return processAiMRows(rows, headerRowIndex, { source, format, metadata });
+        return processAiMRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'MoTeC':
-        return processMoTeCRows(rows, headerRowIndex, { source, format, metadata });
+        return processMoTeCRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'VIGrade':
-        return processVIGradeRows(rows, headerRowIndex, { source, format, metadata });
+        return processVIGradeRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'VBOX':
         return processVBoxRows(rows, { source, format, metadata });
       case 'ScanMyTesla':
-        return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata }, {
+        return processScanMyTeslaRows(rows, headerRowIndex, { source, format, metadata, manualHeader }, {
           resampleHz: parsedOptions.scanMyTeslaHz
         });
       case 'Standard':
-        return processStandardRows(rows, headerRowIndex, { source, format, metadata });
+        return processStandardRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'TSV':
-        return processTsvRows(rows, headerRowIndex, { source, format, metadata });
+        return processTsvRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       case 'Generic':
-        return processGenericRows(rows, headerRowIndex, { source, format, metadata });
+        return processGenericRows(rows, headerRowIndex, { source, format, metadata, manualHeader });
       default:
         return processCsvRows(rows, options);
     }
@@ -1696,6 +1764,7 @@
   window.LogFileProcessors = {
     processCsvRows,
     processCsvRowsWithDecoder,
+    describeAutoHeaderDetection,
     processVIGradeResXml,
     parseGarminTcxXml,
     AVAILABLE_DECODERS,

@@ -10,8 +10,11 @@ try {
   ensureDir('build');
   ensureDir('lib');
   ensureDir(path.join('lib', 'images'));
-  // Minify Plotly's browser-ready basic distribution bundle.
-  const sourceBundle = require.resolve('plotly.js-basic-dist');
+  // Minify Plotly's browser-ready cartesian distribution bundle. Not the smaller "basic"
+  // bundle -- that one only registers scatter/bar/pie (no heatmap), which the temperature
+  // profile plots feature needs; "cartesian" covers every 2D trace type this app uses
+  // without pulling in the 3D/geo/mapbox trace types the app doesn't.
+  const sourceBundle = require.resolve('plotly.js-cartesian-dist');
   const tempOutput = path.join('build', 'plotly-custom.min.js');
   const finalOutput = path.join('lib', 'plotly-custom.min.js');
   execSync(`npx terser ${sourceBundle} -c -m -o ${tempOutput}`, { stdio: 'inherit' });

@@ -59,7 +59,8 @@ try {
   const distTrackMapDefaults = path.join(distStaticDir, 'gpbikes-track-map-defaults.json');
   const sourceChannelMap = path.join(rootDir, 'channel-map.json');
   const sourceTrackMapDefaults = path.join(rootDir, 'static', 'gpbikes-track-map-defaults.json');
-  const plotlySource = require.resolve('plotly.js-basic-dist');
+  // See scripts/build-plotly-custom.js for why this is "cartesian" and not "basic".
+  const plotlySource = require.resolve('plotly.js-cartesian-dist');
   const papaSource = require.resolve('papaparse/papaparse.min.js');
   const leafletSource = require.resolve('leaflet/dist/leaflet.js');
   const leafletCssSource = require.resolve('leaflet/dist/leaflet.css');
