@@ -108,6 +108,10 @@
   const mathChCancel = document.getElementById('mathChCancel');
   const mathChSuggestions = document.getElementById('mathChSuggestions');
   const mathChPreview = document.getElementById('mathChPreview');
+  const addTempProfileBtn = document.getElementById('addTempProfileBtn');
+  const editTempProfileDefaultsBtn = document.getElementById('editTempProfileDefaultsBtn');
+  const tempProfilePlotsList = document.getElementById('tempProfilePlotsList');
+  const tempProfileHiddenHint = document.getElementById('tempProfileHiddenHint');
   const dataFiltersEnabledInput = document.getElementById('dataFiltersEnabled');
   const addDataFilterBtn = document.getElementById('addDataFilterBtn');
   const dataFiltersList = document.getElementById('dataFiltersList');
@@ -137,6 +141,14 @@
   const importerEditorCancelBtn = document.getElementById('importerEditorCancel');
   const importerEditorSaveBtn = document.getElementById('importerEditorSave');
   const importerEditorSubtitle = document.getElementById('importerEditorSubtitle');
+  const importerHeaderOverrideSection = document.getElementById('importerHeaderOverrideSection');
+  const importerHeaderModeAutoInput = document.getElementById('importerHeaderModeAuto');
+  const importerHeaderModeManualInput = document.getElementById('importerHeaderModeManual');
+  const importerHeaderOverrideFields = document.getElementById('importerHeaderOverrideFields');
+  const importerHeaderRowInput = document.getElementById('importerHeaderRowInput');
+  const importerUnitsRowInput = document.getElementById('importerUnitsRowInput');
+  const importerDataStartRowInput = document.getElementById('importerDataStartRowInput');
+  const importerRowPreview = document.getElementById('importerRowPreview');
   const importerEditorDataFreqValue = document.getElementById('importerEditorDataFreqValue');
   const importerEditorDownsampleHzInput = document.getElementById('importerEditorDownsampleHz');
   const importerEditorRows = document.getElementById('importerEditorRows');
@@ -392,6 +404,36 @@
   const dataFilters = []; // { channel, min: number|null, max: number|null, enabled }
   let dataFilterEditIdx = -1; // -1 = add mode, >=0 = editing existing filter
 
+  // Temperature Profile Plots: named groupings of channels (e.g. "LF External") rendered
+  // as a heatmap strip (X = time/distance, Y = channel, color = value) between the main
+  // plot and Time Slip. See TEMP_COLORMAPS below for the curated colormap stop tables.
+  let tempProfilePlots = []; // { id, name, channels: [...ordered display names], enabled,
+                             //   useDefaultRange, colormap, min, max, aboveColor, belowColor }
+  let tempProfileDefaults = { colormap: 'Jet', min: 100, max: 250, aboveColor: '#FF00FF', belowColor: '#000000' };
+  const TEMP_PROFILE_ROWS_HEIGHT_KEY = 'tempProfilePlotsHeightPx';
+  const TEMP_PROFILE_ROWS_DEFAULT_HEIGHT_PX = 220;
+  const TEMP_PROFILE_ROWS_MIN_HEIGHT_PX = 80;
+  const TEMP_PROFILE_MAIN_MIN_HEIGHT_PX = 120;
+  let tempProfileRowsHeightPx = TEMP_PROFILE_ROWS_DEFAULT_HEIGHT_PX;
+  const TEMP_PROFILE_MULTI_LAP_OPACITY = 0.6;
+  let lastIncludeTimeSlipForTempResize = false; // refreshed each updatePlot(), read by the drag handle
+  let tempProfileResizeHandleEl = null;
+
+  // Curated colormap stop tables, extracted verbatim from this app's own bundled
+  // plotly.js-cartesian-dist (node_modules/plotly.js-cartesian-dist/plotly-cartesian.js)
+  // so the custom under/over-range colorscale built in buildTempProfileColorscale()
+  // visually matches Plotly's own named scales.
+  const TEMP_COLORMAPS = {
+    Jet: [[0,'rgb(0,0,131)'],[0.125,'rgb(0,60,170)'],[0.375,'rgb(5,255,255)'],[0.625,'rgb(255,255,0)'],[0.875,'rgb(250,0,0)'],[1,'rgb(128,0,0)']],
+    Rainbow: [[0,'rgb(150,0,90)'],[0.125,'rgb(0,0,200)'],[0.25,'rgb(0,25,255)'],[0.375,'rgb(0,152,255)'],[0.5,'rgb(44,255,150)'],[0.625,'rgb(151,255,0)'],[0.75,'rgb(255,234,0)'],[0.875,'rgb(255,111,0)'],[1,'rgb(255,0,0)']],
+    Hot: [[0,'rgb(0,0,0)'],[0.3,'rgb(230,0,0)'],[0.6,'rgb(255,210,0)'],[1,'rgb(255,255,255)']],
+    Portland: [[0,'rgb(12,51,131)'],[0.25,'rgb(10,136,186)'],[0.5,'rgb(242,211,56)'],[0.75,'rgb(242,143,56)'],[1,'rgb(217,30,30)']],
+    Electric: [[0,'rgb(0,0,0)'],[0.15,'rgb(30,0,100)'],[0.4,'rgb(120,0,100)'],[0.6,'rgb(160,90,0)'],[0.8,'rgb(230,200,0)'],[1,'rgb(255,250,220)']],
+    Viridis: [[0,'#440154'],[0.0627,'#48186a'],[0.1255,'#472d7b'],[0.1882,'#424086'],[0.251,'#3b528b'],[0.3137,'#33638d'],[0.3765,'#2c728e'],[0.4392,'#26828e'],[0.502,'#21918c'],[0.5647,'#1fa088'],[0.6275,'#28ae80'],[0.6902,'#3fbc73'],[0.7529,'#5ec962'],[0.8157,'#84d44b'],[0.8784,'#addc30'],[0.9412,'#d8e219'],[1,'#fde725']],
+    RdBu: [[0,'rgb(5,10,172)'],[0.35,'rgb(106,137,247)'],[0.5,'rgb(190,190,190)'],[0.6,'rgb(220,170,132)'],[0.7,'rgb(230,145,90)'],[1,'rgb(178,10,28)']]
+  };
+  const TEMP_COLORMAP_NAMES = ['Jet', 'Rainbow', 'Hot', 'Portland', 'Electric', 'Viridis', 'RdBu'];
+
   // Quick modify state
   const QUICK_MOD_PREVIEW_PREFIX = 'Quick Mod: ';
   let quickModPreviewName = null; // name of the current preview channel (or null)
@@ -430,7 +472,10 @@
     dataFrequencyHz: null,
     downsampleHz: null,
     channels: {},
-    filters: {}
+    filters: {},
+    rawRows: null,
+    headerOverrideSupported: false,
+    headerOverride: null
   };
   let customStandardChannels = [];
 
@@ -2324,11 +2369,25 @@
 
     const downsampleHz = Number(config.downsampleHz);
 
+    // Optional manual header-row override (bypasses auto-detection of the header/units/
+    // first-data row when parsing this file) -- all 0-based row indices into the parsed
+    // rows array. Left null when not in manual mode; file-processors.js's own
+    // normalizeManualHeaderOverride re-validates these against the actual row count at
+    // parse time, so a stale value here (e.g. the file's content changed) can't misbehave.
+    const headerRowIndex = Number(config.headerRowIndex);
+    const dataStartRowIndex = Number(config.dataStartRowIndex);
+    const unitsRowIndexRaw = Number(config.unitsRowIndex);
+    const hasManualHeader = Number.isInteger(headerRowIndex) && headerRowIndex >= 0
+      && Number.isInteger(dataStartRowIndex) && dataStartRowIndex > headerRowIndex;
+
     return {
       decoder,
       channels,
       filters,
-      downsampleHz: Number.isFinite(downsampleHz) && downsampleHz > 0 ? downsampleHz : null
+      downsampleHz: Number.isFinite(downsampleHz) && downsampleHz > 0 ? downsampleHz : null,
+      headerRowIndex: hasManualHeader ? headerRowIndex : null,
+      unitsRowIndex: hasManualHeader && Number.isInteger(unitsRowIndexRaw) ? unitsRowIndexRaw : null,
+      dataStartRowIndex: hasManualHeader ? dataStartRowIndex : null
     };
   }
 
@@ -2683,6 +2742,12 @@
     importerEditorError.hidden = !text;
   }
 
+  // Decoders whose parsing pipeline doesn't go through header-row-index detection at all
+  // (VBOX uses bracket-sectioned markers; ScanMyTesla's real-world files are sparse
+  // long-format logs handled by a dedicated pipeline that never reaches the header-index
+  // fallback) -- the manual header-override UI would be a dead control for these.
+  const HEADER_OVERRIDE_UNSUPPORTED_DECODERS = ['VBOX', 'ScanMyTesla'];
+
   function buildDefaultImporterEditorState(log, decoderName) {
     const existing = getCustomImporterConfigForLog(log, decoderName);
     const baseCols = Array.isArray(log && log.meta && log.meta.baseCols)
@@ -2691,6 +2756,22 @@
     const allowedCols = new Set(baseCols);
     const channels = {};
     const filters = {};
+
+    const rawRows = getCsvRawRowsForLog(log);
+    const headerOverrideSupported = Array.isArray(rawRows) && rawRows.length > 0
+      && !HEADER_OVERRIDE_UNSUPPORTED_DECODERS.includes(decoderName);
+    const hasSavedManualHeader = !!(existing && Number.isInteger(existing.headerRowIndex) && Number.isInteger(existing.dataStartRowIndex));
+    let headerOverride = null;
+    if (headerOverrideSupported) {
+      const LP = window.LogFileProcessors;
+      const auto = (typeof LP.describeAutoHeaderDetection === 'function') ? LP.describeAutoHeaderDetection(rawRows, decoderName) : null;
+      headerOverride = {
+        enabled: hasSavedManualHeader,
+        headerRowIndex: hasSavedManualHeader ? existing.headerRowIndex : (auto ? auto.headerRowIndex : 0),
+        unitsRowIndex: hasSavedManualHeader ? existing.unitsRowIndex : (auto ? auto.unitsRowIndex : null),
+        dataStartRowIndex: hasSavedManualHeader ? existing.dataStartRowIndex : (auto ? auto.dataStartRowIndex : 1)
+      };
+    }
 
     getImporterStandardChannels().forEach((standardDef) => {
       const standard = standardDef.displayName;
@@ -2724,8 +2805,97 @@
         ? Number(existing.downsampleHz)
         : (decoderName === 'Garmin TCX' ? 10 : null),
       channels,
-      filters
+      filters,
+      rawRows,
+      headerOverrideSupported,
+      headerOverride
     };
+  }
+
+  const IMPORTER_ROW_PREVIEW_MAX_ROWS = 60;
+  const IMPORTER_ROW_PREVIEW_MAX_CELLS = 8;
+
+  function formatImporterPreviewRow(row) {
+    if (!Array.isArray(row)) return '';
+    const cells = row.slice(0, IMPORTER_ROW_PREVIEW_MAX_CELLS);
+    const text = cells.map((c) => (c == null ? '' : String(c).trim())).filter((c) => c !== '').join(', ');
+    return text + (row.length > IMPORTER_ROW_PREVIEW_MAX_CELLS ? ', …' : '');
+  }
+
+  // Refreshes the whole "Header Rows" section (toggle state, number inputs, preview) from
+  // importerEditorState.headerOverride -- called on modal open and whenever the toggle or
+  // number inputs change.
+  function renderImporterHeaderOverride() {
+    if (!importerHeaderOverrideSection) return;
+    const state = importerEditorState;
+    const supported = !!state.headerOverrideSupported;
+    importerHeaderOverrideSection.hidden = !supported;
+    if (!supported || !state.headerOverride) return;
+
+    const override = state.headerOverride;
+    if (importerHeaderModeAutoInput) importerHeaderModeAutoInput.checked = !override.enabled;
+    if (importerHeaderModeManualInput) importerHeaderModeManualInput.checked = !!override.enabled;
+    if (importerHeaderOverrideFields) importerHeaderOverrideFields.hidden = !override.enabled;
+
+    if (importerHeaderRowInput) {
+      importerHeaderRowInput.value = Number.isInteger(override.headerRowIndex) ? String(override.headerRowIndex + 1) : '';
+    }
+    if (importerUnitsRowInput) {
+      importerUnitsRowInput.value = Number.isInteger(override.unitsRowIndex) ? String(override.unitsRowIndex + 1) : '';
+    }
+    if (importerDataStartRowInput) {
+      importerDataStartRowInput.value = Number.isInteger(override.dataStartRowIndex) ? String(override.dataStartRowIndex + 1) : '';
+    }
+
+    renderImporterRowPreview();
+  }
+
+  function renderImporterRowPreview() {
+    if (!importerRowPreview) return;
+    const state = importerEditorState;
+    const rows = Array.isArray(state.rawRows) ? state.rawRows : [];
+    const override = state.headerOverride || {};
+    const total = rows.length;
+    const shown = Math.min(total, IMPORTER_ROW_PREVIEW_MAX_ROWS);
+
+    let html = '';
+    for (let i = 0; i < shown; i++) {
+      let cls = 'importer-row-preview-row';
+      if (i === override.headerRowIndex) cls += ' is-header-row';
+      else if (i === override.unitsRowIndex) cls += ' is-units-row';
+      else if (i === override.dataStartRowIndex) cls += ' is-data-row';
+      html += `<div class="${cls}" role="listitem"><span class="importer-row-preview-num">${i + 1}</span><span class="importer-row-preview-text">${escapeHtml(formatImporterPreviewRow(rows[i]))}</span></div>`;
+    }
+    if (total > shown) {
+      const remaining = total - shown;
+      html += `<div class="importer-row-preview-more">&hellip;${remaining} more row${remaining === 1 ? '' : 's'} not shown</div>`;
+    }
+    importerRowPreview.innerHTML = html;
+  }
+
+  // Returns a user-facing error message if the current manual header-override fields are
+  // invalid, or '' if they're fine (or manual mode isn't active). Row numbers here are
+  // 1-based (as shown in the UI); headerOverride itself stores 0-based indices.
+  function getImporterHeaderOverrideError() {
+    const state = importerEditorState;
+    const override = state.headerOverride;
+    if (!state.headerOverrideSupported || !override || !override.enabled) return '';
+
+    const rowCount = Array.isArray(state.rawRows) ? state.rawRows.length : 0;
+    const header = override.headerRowIndex;
+    const units = override.unitsRowIndex;
+    const dataStart = override.dataStartRowIndex;
+
+    if (!Number.isInteger(header) || header < 0 || header >= rowCount) {
+      return `Header row must be between 1 and ${rowCount}.`;
+    }
+    if (!Number.isInteger(dataStart) || dataStart <= header || dataStart > rowCount) {
+      return `First data row must be after the header row (${header + 1}) and no more than ${rowCount}.`;
+    }
+    if (units != null && (!Number.isInteger(units) || units <= header || units >= dataStart)) {
+      return `Units row must be between the header row (${header + 1}) and the first data row (${dataStart + 1}).`;
+    }
+    return '';
   }
 
   function renderImporterEditorRows() {
@@ -2844,6 +3014,7 @@
     }
     updateImporterEditorFrequencyInfo();
     renderImporterEditorRows();
+    renderImporterHeaderOverride();
     if (importerEditorModal) importerEditorModal.hidden = false;
   }
 
@@ -2855,7 +3026,10 @@
       dataFrequencyHz: null,
       downsampleHz: null,
       channels: {},
-      filters: {}
+      filters: {},
+      rawRows: null,
+      headerOverrideSupported: false,
+      headerOverride: null
     };
     if (importerEditorModal) importerEditorModal.hidden = true;
     setImporterEditorError('');
@@ -3058,6 +3232,16 @@
     errorEl.hidden = !text;
   }
 
+  // Pulls the plain [][] rows array out of a log's rawRows (which can be a bare array
+  // for older records, or {kind:'csvRows', rows:[...]} for newer ones), or null when
+  // this log's raw input isn't row-shaped (XML-based formats).
+  function getCsvRawRowsForLog(log) {
+    const rawInput = log && log.rawRows;
+    if (Array.isArray(rawInput)) return rawInput;
+    if (rawInput && rawInput.kind === 'csvRows' && Array.isArray(rawInput.rows)) return rawInput.rows;
+    return null;
+  }
+
   function reprocessLogWithDecoder(logId, decoderName, customImporterConfig = null) {
     const logIdx = logs.findIndex(l => l.id === logId);
     if (logIdx < 0) return false;
@@ -3072,16 +3256,22 @@
     let processed, builtRecord;
     try {
       const rawInput = log.rawRows;
-      const rawRows = Array.isArray(rawInput)
-        ? rawInput
-        : (rawInput && rawInput.kind === 'csvRows' && Array.isArray(rawInput.rows) ? rawInput.rows : null);
+      const rawRows = getCsvRawRowsForLog(log);
 
       if (rawRows) {
         if (typeof LP.processCsvRowsWithDecoder !== 'function') {
           console.error('CSV decoder reprocess unavailable for log:', log.name);
           return false;
         }
-        processed = LP.processCsvRowsWithDecoder(rawRows, decoderName);
+        const manualHeader = (customImporterConfig && Number.isInteger(customImporterConfig.headerRowIndex)
+          && Number.isInteger(customImporterConfig.dataStartRowIndex))
+          ? {
+              headerRowIndex: customImporterConfig.headerRowIndex,
+              unitsRowIndex: customImporterConfig.unitsRowIndex,
+              dataStartRowIndex: customImporterConfig.dataStartRowIndex
+            }
+          : null;
+        processed = LP.processCsvRowsWithDecoder(rawRows, decoderName, { manualHeader });
       } else if (rawInput && rawInput.kind === 'tcxXml' && typeof LP.parseGarminTcxXml === 'function') {
         processed = LP.parseGarminTcxXml(rawInput.text || '');
       } else if (rawInput && rawInput.kind === 'resXml' && typeof LP.processVIGradeResXml === 'function') {
@@ -3879,6 +4069,25 @@
       `<span class="data-filter-desc">${escapeHtml(formatDataFilterRange(f))}</span>` +
       `<button type="button" class="data-filter-edit" data-idx="${i}" aria-label="Edit filter on ${escapeHtml(f.channel)}">✎</button>` +
       `<button type="button" class="data-filter-delete" data-idx="${i}" aria-label="Delete filter on ${escapeHtml(f.channel)}">✕</button>` +
+      `</div>`
+    )).join('');
+  }
+
+  function formatTempProfileSummary(p) {
+    const chLabel = `${p.channels.length} channel${p.channels.length === 1 ? '' : 's'}`;
+    if (p.useDefaultRange) return `${chLabel} · ${tempProfileDefaults.colormap} · default range`;
+    return `${chLabel} · ${p.colormap} · ${p.min}–${p.max}`;
+  }
+
+  function renderTempProfilePlotsList() {
+    if (!tempProfilePlotsList) return;
+    tempProfilePlotsList.innerHTML = tempProfilePlots.map((p, i) => (
+      `<div class="temp-profile-item${p.enabled ? '' : ' is-disabled'}">` +
+      `<input type="checkbox" class="temp-profile-item-enabled" data-idx="${i}" ${p.enabled ? 'checked' : ''} aria-label="Show ${escapeHtml(p.name)}" />` +
+      `<span class="temp-profile-item-name">${escapeHtml(p.name)}</span>` +
+      `<span class="temp-profile-item-summary">${escapeHtml(formatTempProfileSummary(p))}</span>` +
+      `<button type="button" class="temp-profile-edit" data-idx="${i}" aria-label="Edit ${escapeHtml(p.name)}">✎</button>` +
+      `<button type="button" class="temp-profile-delete" data-idx="${i}" aria-label="Delete ${escapeHtml(p.name)}">✕</button>` +
       `</div>`
     )).join('');
   }
@@ -4808,7 +5017,16 @@
     sel2.forEach(log => {
       const fileLaps = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       if (fileLaps.length === 0) return;
-      html.push(`<div class="file-lap-group"><div class="file-lap-heading">${escapeHtml(log.name)}</div><div class="laps-col">`);
+      html.push(
+        `<div class="file-lap-group">` +
+        `<div class="file-lap-heading">` +
+        `<span class="file-lap-heading-name">${escapeHtml(log.name)}</span>` +
+        `<span class="file-lap-select-actions">` +
+        `<button type="button" class="lap-select-all-btn" data-lap-select-all="${log.id}">All</button>` +
+        `<button type="button" class="lap-select-none-btn" data-lap-select-none="${log.id}">None</button>` +
+        `</span>` +
+        `</div><div class="laps-col">`
+      );
       const totalFileLaps = fileLaps.length;
       const negativeDistLaps = getLapsWithNegativeDistance(log.meta);
       fileLaps.forEach((n, idx) => {
@@ -6182,6 +6400,436 @@
     overlay.appendChild(backdrop);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
+  }
+
+  // ── Temperature Profile Plots: Add/Edit modal + shared color-field builder ────────────
+
+  // Builds the colormap/min/max/above-below-color field group shared by the per-plot Add/Edit
+  // modal (withDefaultToggle:true, adds a "use plotter default" checkbox that shows/hides the
+  // rest) and the Default-Colors modal (withDefaultToggle:false, the fields ARE the default).
+  function buildTempProfileColorFields(initial, withDefaultToggle) {
+    const wrap = document.createElement('div');
+
+    let useDefaultCheckbox = null;
+    if (withDefaultToggle) {
+      const row = document.createElement('label');
+      row.className = 'temp-profile-use-default-row';
+      useDefaultCheckbox = document.createElement('input');
+      useDefaultCheckbox.type = 'checkbox';
+      useDefaultCheckbox.checked = initial.useDefaultRange !== false;
+      row.appendChild(useDefaultCheckbox);
+      row.appendChild(document.createTextNode(' Use plotter default colormap/range'));
+      wrap.appendChild(row);
+    }
+
+    const fieldsRow = document.createElement('div');
+    fieldsRow.className = 'session-modal-new-fields temp-profile-color-row';
+
+    const colormapSelect = document.createElement('select');
+    colormapSelect.className = 'session-modal-select temp-profile-colormap-select';
+    TEMP_COLORMAP_NAMES.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      colormapSelect.appendChild(opt);
+    });
+    colormapSelect.value = TEMP_COLORMAP_NAMES.includes(initial.colormap) ? initial.colormap : 'Jet';
+
+    const minInput = document.createElement('input');
+    minInput.type = 'number'; minInput.step = 'any'; minInput.className = 'session-modal-input temp-profile-min-input';
+    minInput.placeholder = 'Min'; minInput.value = Number.isFinite(initial.min) ? initial.min : '';
+
+    const maxInput = document.createElement('input');
+    maxInput.type = 'number'; maxInput.step = 'any'; maxInput.className = 'session-modal-input temp-profile-max-input';
+    maxInput.placeholder = 'Max'; maxInput.value = Number.isFinite(initial.max) ? initial.max : '';
+
+    const belowColorInput = document.createElement('input');
+    belowColorInput.type = 'color';
+    belowColorInput.className = 'temp-profile-below-color-input';
+    belowColorInput.value = initial.belowColor || '#000000';
+    belowColorInput.title = 'Below-min color';
+
+    const aboveColorInput = document.createElement('input');
+    aboveColorInput.type = 'color';
+    aboveColorInput.className = 'temp-profile-above-color-input';
+    aboveColorInput.value = initial.aboveColor || '#ff00ff';
+    aboveColorInput.title = 'Above-max color';
+
+    const makeField = (labelText, control) => {
+      const label = document.createElement('label');
+      label.className = 'temp-profile-color-field';
+      label.appendChild(document.createTextNode(labelText));
+      label.appendChild(control);
+      return label;
+    };
+    fieldsRow.appendChild(makeField('Colormap', colormapSelect));
+    fieldsRow.appendChild(makeField('Min', minInput));
+    fieldsRow.appendChild(makeField('Max', maxInput));
+    fieldsRow.appendChild(makeField('Below Min', belowColorInput));
+    fieldsRow.appendChild(makeField('Above Max', aboveColorInput));
+    wrap.appendChild(fieldsRow);
+
+    // Live preview of the actual effective colorscale (base colormap gradient plus the
+    // below-min/above-max edge colors), built via the same buildTempProfileColorscale()
+    // used to color the real heatmap traces, so this always matches what gets plotted.
+    const previewRow = document.createElement('div');
+    previewRow.className = 'temp-profile-colormap-preview-row';
+    const previewMinLabel = document.createElement('span');
+    previewMinLabel.className = 'temp-profile-colormap-preview-label';
+    const previewBar = document.createElement('div');
+    previewBar.className = 'temp-profile-colormap-preview-bar';
+    const previewMaxLabel = document.createElement('span');
+    previewMaxLabel.className = 'temp-profile-colormap-preview-label';
+    previewRow.appendChild(previewMinLabel);
+    previewRow.appendChild(previewBar);
+    previewRow.appendChild(previewMaxLabel);
+    wrap.appendChild(previewRow);
+
+    function updatePreview() {
+      const stops = buildTempProfileColorscale(colormapSelect.value, aboveColorInput.value, belowColorInput.value);
+      previewBar.style.background = `linear-gradient(to right, ${stops.map(([pos, color]) => `${color} ${(pos * 100).toFixed(2)}%`).join(', ')})`;
+      previewMinLabel.textContent = minInput.value !== '' ? minInput.value : 'Min';
+      previewMaxLabel.textContent = maxInput.value !== '' ? maxInput.value : 'Max';
+    }
+    updatePreview();
+    colormapSelect.addEventListener('change', updatePreview);
+    belowColorInput.addEventListener('input', updatePreview);
+    aboveColorInput.addEventListener('input', updatePreview);
+    minInput.addEventListener('input', updatePreview);
+    maxInput.addEventListener('input', updatePreview);
+
+    const note = document.createElement('div');
+    note.className = 'session-modal-hint';
+    note.textContent = 'Uses the shared plotter default -- edit it via the "Default Colors" button.';
+    if (withDefaultToggle) wrap.appendChild(note);
+
+    function syncVisibility() {
+      if (!withDefaultToggle) return;
+      const useDefault = useDefaultCheckbox.checked;
+      fieldsRow.hidden = useDefault;
+      previewRow.hidden = useDefault;
+      note.hidden = !useDefault;
+    }
+    if (withDefaultToggle) {
+      useDefaultCheckbox.addEventListener('change', syncVisibility);
+      syncVisibility();
+    }
+
+    return {
+      container: wrap,
+      getValue() {
+        return {
+          useDefaultRange: withDefaultToggle ? !!useDefaultCheckbox.checked : true,
+          colormap: colormapSelect.value,
+          min: parseFloat(minInput.value),
+          max: parseFloat(maxInput.value),
+          aboveColor: aboveColorInput.value,
+          belowColor: belowColorInput.value
+        };
+      }
+    };
+  }
+
+  // Builds the channel picker: a text-filtered <select multiple> (the same searchable
+  // multi-select pattern the main Y-channel picker already uses -- #ySelectSearch +
+  // #ySelect, via buildYSelectOptionEntries/renderYSelectOptions) plus a separate ordered
+  // list below it, since a native <select multiple> has no user-controlled display order.
+  function buildTempProfileChannelPicker(initialChannels) {
+    const container = document.createElement('div');
+    container.className = 'temp-profile-channel-picker';
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'session-modal-input y-select-search';
+    searchInput.placeholder = 'Search channels...';
+    searchInput.autocomplete = 'off';
+
+    const select = document.createElement('select');
+    select.multiple = true;
+    select.size = 6;
+    select.className = 'session-modal-select temp-profile-channel-list';
+
+    const orderHeader = document.createElement('div');
+    orderHeader.className = 'temp-profile-order-header';
+    const flipBtn = document.createElement('button');
+    flipBtn.type = 'button';
+    flipBtn.className = 'temp-profile-flip-btn';
+    flipBtn.textContent = 'Flip Order';
+    orderHeader.appendChild(flipBtn);
+
+    const orderList = document.createElement('div');
+    orderList.className = 'temp-profile-order-list';
+
+    let order = (initialChannels || []).slice();
+    const allEntries = buildYSelectOptionEntries();
+    const labelByValue = new Map(allEntries.map((e) => [e.value, e.label]));
+
+    function renderSelect() {
+      const term = searchInput.value.trim().toLowerCase();
+      const selectedSet = new Set(order);
+      const filtered = term
+        ? allEntries.filter((e) => selectedSet.has(e.value) || e.label.toLowerCase().includes(term))
+        : allEntries;
+      select.innerHTML = filtered.map((e) => (
+        `<option value="${escapeHtml(e.value)}"${selectedSet.has(e.value) ? ' selected' : ''}>${escapeHtml(e.label)}</option>`
+      )).join('');
+    }
+
+    function renderOrderList() {
+      orderList.innerHTML = order.map((ch, i) => (
+        `<div class="temp-profile-order-item">` +
+        `<span class="temp-profile-order-item-name">${escapeHtml(labelByValue.get(ch) || ch)}</span>` +
+        `<button type="button" class="temp-profile-order-btn" data-action="up" data-idx="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">▲</button>` +
+        `<button type="button" class="temp-profile-order-btn" data-action="down" data-idx="${i}" ${i === order.length - 1 ? 'disabled' : ''} aria-label="Move down">▼</button>` +
+        `<button type="button" class="temp-profile-order-btn" data-action="remove" data-idx="${i}" aria-label="Remove">✕</button>` +
+        `</div>`
+      )).join('');
+    }
+
+    function renderAll() { renderSelect(); renderOrderList(); }
+
+    searchInput.addEventListener('input', renderSelect);
+
+    select.addEventListener('change', () => {
+      const renderedValues = new Set(Array.from(select.options).map((o) => o.value));
+      const selectedNow = new Set(Array.from(select.selectedOptions).map((o) => o.value));
+      order = order.filter((ch) => !renderedValues.has(ch) || selectedNow.has(ch));
+      Array.from(select.options).forEach((o) => {
+        if (o.selected && !order.includes(o.value)) order.push(o.value);
+      });
+      renderAll();
+    });
+
+    orderList.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.temp-profile-order-btn');
+      if (!btn) return;
+      const idx = Number(btn.dataset.idx);
+      const action = btn.dataset.action;
+      if (action === 'up' && idx > 0) {
+        [order[idx - 1], order[idx]] = [order[idx], order[idx - 1]];
+      } else if (action === 'down' && idx < order.length - 1) {
+        [order[idx + 1], order[idx]] = [order[idx], order[idx + 1]];
+      } else if (action === 'remove') {
+        order.splice(idx, 1);
+      }
+      renderAll();
+    });
+
+    flipBtn.addEventListener('click', () => {
+      order.reverse();
+      renderAll();
+    });
+
+    renderAll();
+    container.appendChild(searchInput);
+    container.appendChild(select);
+    container.appendChild(orderHeader);
+    container.appendChild(orderList);
+
+    return { container, getOrder: () => order.slice() };
+  }
+
+  function buildTempProfileModalShell(titleText, ariaLabel) {
+    const overlay = document.createElement('div');
+    overlay.className = 'session-modal';
+    const close = () => overlay.remove();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'session-modal-backdrop';
+    backdrop.addEventListener('click', close);
+
+    const dialog = document.createElement('div');
+    dialog.className = 'session-modal-dialog temp-profile-modal-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', ariaLabel);
+
+    const header = document.createElement('div');
+    header.className = 'session-modal-header';
+    const title = document.createElement('h3');
+    title.className = 'session-modal-title';
+    title.textContent = titleText;
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'session-modal-close';
+    closeBtn.textContent = '✕';
+    closeBtn.setAttribute('aria-label', 'Close');
+    closeBtn.addEventListener('click', close);
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    dialog.appendChild(header);
+
+    overlay.appendChild(backdrop);
+    overlay.appendChild(dialog);
+    return { overlay, dialog, close };
+  }
+
+  function openTempProfilePlotModal(existingPlot) {
+    const isEdit = !!existingPlot;
+    const p = existingPlot || {
+      name: '', channels: [], enabled: true, useDefaultRange: true,
+      colormap: tempProfileDefaults.colormap, min: tempProfileDefaults.min, max: tempProfileDefaults.max,
+      aboveColor: tempProfileDefaults.aboveColor, belowColor: tempProfileDefaults.belowColor
+    };
+
+    const shell = buildTempProfileModalShell(
+      isEdit ? 'Edit Temperature Profile Plot' : 'Add Temperature Profile Plot',
+      isEdit ? 'Edit temperature profile plot' : 'Add temperature profile plot'
+    );
+    const { dialog, close } = shell;
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'session-modal-input temp-profile-name-input';
+    nameInput.placeholder = 'Plot name, e.g. LF External';
+    nameInput.value = p.name || '';
+
+    const picker = buildTempProfileChannelPicker(p.channels);
+    const colorFields = buildTempProfileColorFields(p, true);
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'session-modal-status';
+    function showError(msg) {
+      statusEl.textContent = msg;
+      statusEl.classList.add('is-error');
+    }
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'session-modal-save';
+    saveBtn.textContent = isEdit ? 'Save Changes' : 'Add Plot';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'session-modal-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', close);
+
+    const actions = document.createElement('div');
+    actions.className = 'session-modal-actions';
+    if (isEdit) {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'session-modal-cancel';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.addEventListener('click', () => {
+        const idx = tempProfilePlots.findIndex((x) => x.id === existingPlot.id);
+        if (idx >= 0) tempProfilePlots.splice(idx, 1);
+        saveTempProfilePlots();
+        renderTempProfilePlotsList();
+        updatePlot();
+        close();
+      });
+      actions.appendChild(deleteBtn);
+    }
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+
+    saveBtn.addEventListener('click', () => {
+      const name = nameInput.value.trim();
+      if (!name) return showError('Name is required.');
+      const dup = tempProfilePlots.some((x) => x.name.toLowerCase() === name.toLowerCase() && (!isEdit || x.id !== existingPlot.id));
+      if (dup) return showError(`"${name}" already exists.`);
+      const order = picker.getOrder();
+      if (order.length === 0) return showError('Select at least one channel.');
+      const colorVal = colorFields.getValue();
+      if (!colorVal.useDefaultRange && (!Number.isFinite(colorVal.min) || !Number.isFinite(colorVal.max) || colorVal.min >= colorVal.max)) {
+        return showError('Min must be less than Max.');
+      }
+      const plotData = {
+        id: isEdit ? existingPlot.id : `temp-profile-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+        name,
+        channels: order,
+        enabled: isEdit ? existingPlot.enabled : true,
+        useDefaultRange: colorVal.useDefaultRange,
+        colormap: colorVal.colormap,
+        min: Number.isFinite(colorVal.min) ? colorVal.min : tempProfileDefaults.min,
+        max: Number.isFinite(colorVal.max) ? colorVal.max : tempProfileDefaults.max,
+        aboveColor: colorVal.aboveColor,
+        belowColor: colorVal.belowColor
+      };
+      if (isEdit) {
+        const idx = tempProfilePlots.findIndex((x) => x.id === existingPlot.id);
+        if (idx >= 0) tempProfilePlots[idx] = plotData;
+      } else {
+        tempProfilePlots.push(plotData);
+      }
+      saveTempProfilePlots();
+      renderTempProfilePlotsList();
+      updatePlot();
+      close();
+    });
+
+    const nameLabel = document.createElement('label');
+    nameLabel.className = 'session-modal-label';
+    nameLabel.textContent = 'Name';
+    const channelsLabel = document.createElement('label');
+    channelsLabel.className = 'session-modal-label';
+    channelsLabel.textContent = 'Channels';
+    const colorsLabel = document.createElement('label');
+    colorsLabel.className = 'session-modal-label';
+    colorsLabel.textContent = 'Color Settings';
+
+    dialog.appendChild(nameLabel);
+    dialog.appendChild(nameInput);
+    dialog.appendChild(channelsLabel);
+    dialog.appendChild(picker.container);
+    dialog.appendChild(colorsLabel);
+    dialog.appendChild(colorFields.container);
+    dialog.appendChild(statusEl);
+    dialog.appendChild(actions);
+
+    document.body.appendChild(shell.overlay);
+    nameInput.focus();
+  }
+
+  function openTempProfileDefaultsModal() {
+    const shell = buildTempProfileModalShell('Plotter Default Colors', 'Edit plotter default temperature colors');
+    const { dialog, close } = shell;
+
+    const hint = document.createElement('div');
+    hint.className = 'session-modal-hint';
+    hint.textContent = 'Used by any temperature profile plot with "Use plotter default colormap/range" checked.';
+
+    const colorFields = buildTempProfileColorFields(tempProfileDefaults, false);
+
+    const statusEl = document.createElement('div');
+    statusEl.className = 'session-modal-status';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'session-modal-save';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => {
+      const val = colorFields.getValue();
+      if (!Number.isFinite(val.min) || !Number.isFinite(val.max) || val.min >= val.max) {
+        statusEl.textContent = 'Min must be less than Max.';
+        statusEl.classList.add('is-error');
+        return;
+      }
+      tempProfileDefaults = { colormap: val.colormap, min: val.min, max: val.max, aboveColor: val.aboveColor, belowColor: val.belowColor };
+      saveTempProfileDefaults();
+      renderTempProfilePlotsList();
+      updatePlot();
+      close();
+    });
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'session-modal-cancel';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', close);
+
+    const actions = document.createElement('div');
+    actions.className = 'session-modal-actions';
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+
+    dialog.appendChild(hint);
+    dialog.appendChild(colorFields.container);
+    dialog.appendChild(statusEl);
+    dialog.appendChild(actions);
+
+    document.body.appendChild(shell.overlay);
   }
 
   // Map X / Map Y on the simulated lap, like the GPS logs have. Normally they come from the
@@ -8209,6 +8857,45 @@
     };
   }
 
+  // Builds a Plotly-compatible [pos, color] colorscale stop array for a temperature profile
+  // plot's heatmap: the real gradient (from TEMP_COLORMAPS) is compressed into the middle of
+  // the [0,1] position range, with a hard color step to belowColor at 0 and aboveColor at 1.
+  // Plotly heatmaps have no native "out of range" color -- zmin/zmax just clamp values to the
+  // gradient's own end color -- so this reproduces distinct under/over colors via extra edge
+  // stops, the same technique getMapColorScaleConfig uses above for its divergent colorscale.
+  function buildTempProfileColorscale(colormapName, aboveColor, belowColor) {
+    const base = TEMP_COLORMAPS[colormapName] || TEMP_COLORMAPS.Jet;
+    const innerStart = 0.03;
+    const innerEnd = 0.97;
+    const edgeEps = 1e-4;
+    const stops = [
+      [0, belowColor],
+      [Math.max(0, innerStart - edgeEps), belowColor]
+    ];
+    base.forEach(([pos, color]) => {
+      stops.push([innerStart + pos * (innerEnd - innerStart), color]);
+    });
+    stops.push([Math.min(1, innerEnd + edgeEps), aboveColor]);
+    stops.push([1, aboveColor]);
+    return stops;
+  }
+
+  // Resolves a temp-profile plot's effective color config, following the shared "plotter
+  // default" when the plot has useDefaultRange set (so editing the default retroactively
+  // updates every plot using it).
+  function getEffectiveTempProfileColorConfig(p) {
+    return p.useDefaultRange
+      ? tempProfileDefaults
+      : { colormap: p.colormap, min: p.min, max: p.max, aboveColor: p.aboveColor, belowColor: p.belowColor };
+  }
+
+  // Temperature profile plots are only available for Time/Distance X-axis (not Channel/
+  // "custom" mode), matching how buildTimeSlipTraces gates Time Slip to xMode==='distance'.
+  function getActiveTempProfilePlots(xMode) {
+    if (xMode !== 'time' && xMode !== 'distance') return [];
+    return tempProfilePlots.filter((p) => p.enabled && p.channels.length > 0);
+  }
+
   // Classifies a channel's plotted values as 'discrete' (categorical -- a fixed color per
   // distinct value) or 'continuous' (a Viridis gradient). Non-numeric values (e.g. a text
   // LABEL column) are always discrete, since a colorscale has no meaning for them. Numeric
@@ -9018,38 +9705,176 @@
     requestAnimationFrame(() => leafletMap.invalidateSize());
   }
 
-  function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY) {
+  // Creates (once) the desktop-only drag handle that lets the user resize the shared
+  // temperature-profile-plots height budget (tempProfileRowsHeightPx). Mirrors the drag
+  // interaction resize-panels.js already uses for the sidebar/maps/plot-height handles, but
+  // lives here since only app.js knows Plotly's own computed subplot domains. Dragging is
+  // throttled to one full updatePlot() per animation frame rather than hand-rolling a partial
+  // Plotly.relayout, so the drag can never drift out of sync with buildLayout's own domain math
+  // (which also has to reshuffle the main plot's channel-axis domains, not just yaxis).
+  function ensureTempProfileResizeHandle() {
+    if (tempProfileResizeHandleEl) return tempProfileResizeHandleEl;
+    if (!plotDiv) return null;
+    const handle = document.createElement('div');
+    handle.className = 'temp-profile-resize-handle';
+    handle.title = 'Drag to resize temperature profile plots';
+    handle.hidden = true;
+    plotDiv.appendChild(handle);
+
+    let dragStartY = 0;
+    let dragStartHeightPx = 0;
+    let rafPending = false;
+
+    function scheduleUpdate() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => { rafPending = false; updatePlot(); });
+    }
+
+    function onMove(ev) {
+      const dy = ev.clientY - dragStartY;
+      const totalHeight = getFigureHeight(lastIncludeTimeSlipForTempResize);
+      const maxAllowedPx = Math.max(TEMP_PROFILE_ROWS_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX);
+      // Handle sits above the temp-profile block: dragging down grows the main plot and
+      // shrinks the block.
+      tempProfileRowsHeightPx = Math.min(Math.max(dragStartHeightPx - dy, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), maxAllowedPx);
+      scheduleUpdate();
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      handle.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      saveTempProfileRowsHeight();
+    }
+    handle.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      dragStartY = ev.clientY;
+      dragStartHeightPx = tempProfileRowsHeightPx;
+      handle.classList.add('is-dragging');
+      document.body.style.cursor = 'row-resize';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    tempProfileResizeHandleEl = handle;
+    return handle;
+  }
+
+  // Positions the handle at the pixel row where the main plot's domain meets the
+  // temp-profile block's domain, read from Plotly's own resolved _fullLayout (post-render,
+  // so automargin-adjusted margins are accounted for) rather than the nominal layout object
+  // passed into Plotly.react -- domain *fractions* are respected as given, but automargin can
+  // grow the actual top/bottom margins beyond the hint buildLayout supplied.
+  function positionTempProfileResizeHandle(tempBlockDomain, hasTempPlots) {
+    const mobile = window.innerWidth <= 980;
+    if (!hasTempPlots || mobile || !tempBlockDomain || !plotDiv) {
+      if (tempProfileResizeHandleEl) tempProfileResizeHandleEl.hidden = true;
+      return;
+    }
+    const handle = ensureTempProfileResizeHandle();
+    if (!handle) return;
+    plotDiv.style.position = plotDiv.style.position || 'relative';
+    const fullLayout = plotDiv._fullLayout;
+    if (!fullLayout || !Number.isFinite(fullLayout.height)) { handle.hidden = true; return; }
+    const marginT = (fullLayout.margin && Number.isFinite(fullLayout.margin.t)) ? fullLayout.margin.t : 30;
+    const marginB = (fullLayout.margin && Number.isFinite(fullLayout.margin.b)) ? fullLayout.margin.b : 80;
+    const plotAreaHeight = Math.max(0, fullLayout.height - marginT - marginB);
+    const topPx = marginT + (1 - tempBlockDomain[1]) * plotAreaHeight;
+    handle.hidden = false;
+    handle.style.top = `${Math.round(topPx)}px`;
+  }
+
+  // activeTempPlots (optional): the temperature profile plots currently active (see
+  // getActiveTempProfilePlots). Each gets its own xaxisN/yaxisN pair, stacked directly above
+  // Time Slip's existing domain (or above 0 if there's no Time Slip) -- Time Slip's own domain
+  // is never touched; only the main plot's domain bottom moves up to make room. The whole temp
+  // block shares one height budget (tempProfileRowsHeightPx, user-draggable -- see
+  // positionTempProfileResizeHandle), split evenly across however many plots are active.
+  function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY, activeTempPlots) {
     const mobile = window.innerWidth <= 980;
     const mainDomainTop = showCornerStrip ? (CORNER_STRIP_DOMAIN[0] - CORNER_STRIP_GAP) : 1;
-    const mainDomain = includeTimeSlip ? (mobile ? [0.48,mainDomainTop] : [0.23,mainDomainTop]) : [0,mainDomainTop];
+    const tempPlots = activeTempPlots || [];
+    const multiRow = includeTimeSlip || tempPlots.length > 0;
+    const totalHeight = getFigureHeight(includeTimeSlip);
+
+    let mainDomainBottom = includeTimeSlip ? (mobile ? 0.48 : 0.23) : 0;
     const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
+
+    let tempBlockDomain = null;
+    if (tempPlots.length > 0) {
+      const maxAllowedPx = Math.max(TEMP_PROFILE_ROWS_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX);
+      const clampedPx = Math.min(Math.max(tempProfileRowsHeightPx, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), maxAllowedPx);
+      const tempBlockFraction = totalHeight > 0 ? clampedPx / totalHeight : 0;
+      const tempBlockBottom = mainDomainBottom;
+      const tempBlockTop = Math.min(mainDomainTop - 0.02, tempBlockBottom + tempBlockFraction);
+      tempBlockDomain = [tempBlockBottom, Math.max(tempBlockBottom, tempBlockTop)];
+      mainDomainBottom = tempBlockDomain[1];
+    }
+
+    const mainDomain = [mainDomainBottom, mainDomainTop];
     const axisCfg = buildChannelAxisConfig(ycols, mainDomain, logY);
 
-    if (!includeTimeSlip) {
+    if (!multiRow) {
       const layout = {
         margin:{t:30},
         xaxis:{title:{text: mainXTitle, standoff: 8}, automargin:true, type: logX ? 'log' : 'linear'},
         showlegend:false,
-        height: getFigureHeight(false)
+        height: totalHeight
       };
       layout.margin.l = axisCfg.marginLeft;
       layout.margin.r = axisCfg.marginRight;
       Object.assign(layout, axisCfg.axisLayout);
-      return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop};
+      return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap: new Map(), tempBlockDomain: null};
     }
 
     const layout = {
       margin:{t:30},
       xaxis:{title:{text: mainXTitle, standoff: 8}, domain:[0,1], anchor:'y', type: logX ? 'log' : 'linear'},
-      xaxis2:{title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false, type: logX ? 'log' : 'linear'},
-      yaxis2:{title:{text: 'Time Slip (s)', standoff: 8}, domain: timeSlipDomain},
       showlegend:false,
-      height: getFigureHeight(true)
+      height: totalHeight
     };
+    if (includeTimeSlip) {
+      layout.xaxis2 = {title:{text: ''}, domain:[0,1], anchor:'y2', matches:'x', showticklabels:false, type: logX ? 'log' : 'linear'};
+      layout.yaxis2 = {title:{text: 'Time Slip (s)', standoff: 8}, domain: timeSlipDomain};
+    }
+
+    // yaxis2/xaxis2 are always reserved for Time Slip (see groupChannelsByAxis), so temp
+    // profile axes start after both that and whatever channel axes the Y-channel selection
+    // already needs (distinct-unit channels get their own yaxis3, yaxis4, ... -- see
+    // buildChannelAxisConfig above).
+    const tempAxisMap = new Map(); // plot.id -> { xaxis: 'x3', yaxis: 'y3', domain: [bottom, top] }
+    if (tempPlots.length > 0) {
+      const { groups } = groupChannelsByAxis(ycols);
+      let maxAxisIndex = 1;
+      groups.forEach((g, gi) => {
+        const n = gi === 0 ? 1 : (gi + 2);
+        if (n > maxAxisIndex) maxAxisIndex = n;
+      });
+      const axisStart = Math.max(maxAxisIndex, 2) + 1;
+      const rowHeight = (tempBlockDomain[1] - tempBlockDomain[0]) / tempPlots.length;
+      tempPlots.forEach((p, i) => {
+        const axisIdx = axisStart + i;
+        const rowTop = tempBlockDomain[1] - i * rowHeight;
+        const rowBottom = rowTop - rowHeight;
+        const xKey = `xaxis${axisIdx}`;
+        const yKey = `yaxis${axisIdx}`;
+        layout[xKey] = {domain:[0,1], anchor: `y${axisIdx}`, matches:'x', showticklabels:false, type: logX ? 'log' : 'linear'};
+        // categoryarray[0] renders at the bottom of a categorical y-axis, so reverse the
+        // configured order (first configured channel = top of the strip, reading order).
+        layout[yKey] = {
+          type:'category', categoryorder:'array', categoryarray: p.channels.slice().reverse(),
+          domain: [rowBottom, rowTop], title:{text: p.name, standoff: 4}, automargin:true
+        };
+        tempAxisMap.set(p.id, {xaxis: `x${axisIdx}`, yaxis: `y${axisIdx}`, domain: [rowBottom, rowTop]});
+      });
+    }
+
     layout.margin.l = axisCfg.marginLeft;
-    layout.margin.r = axisCfg.marginRight;
+    layout.margin.r = axisCfg.marginRight + (tempPlots.length > 0 ? 60 : 0);
     Object.assign(layout, axisCfg.axisLayout);
-    return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop};
+    return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap, tempBlockDomain};
   }
 
   // Plotly's built-in autorange breaks catastrophically (producing a range spanning
@@ -10267,6 +11092,10 @@
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
+    lastIncludeTimeSlipForTempResize = includeTimeSlip;
+
+    const activeTempPlots = getActiveTempProfilePlots(xMode);
+    if (tempProfileHiddenHint) tempProfileHiddenHint.hidden = !(tempProfilePlots.length > 0 && xMode === 'custom');
 
     const cornersEnabled = !!(showCornersInput && showCornersInput.checked);
     let cornerData = null;
@@ -10289,7 +11118,7 @@
     activeCornerDataForFitting = cornerData;
     activeCornerReferenceForFitting = cornerRef;
 
-    const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY);
+    const built = buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY, activeTempPlots);
     const layout = built.layout;
     const channelToRef = built.channelToRef;
     let traces = [];
@@ -10456,6 +11285,75 @@
       });
     });
 
+    // Temperature profile plots: one heatmap trace per active plot per contributing
+    // (log, lap) -- X = the selected time/distance axis, Y = the plot's channels (in the
+    // configured order), color = each sample's value. See getActiveTempProfilePlots for the
+    // Time/Distance-only gating and built.tempAxisMap (from buildLayout) for the xaxis/yaxis
+    // pair + domain each plot was assigned.
+    activeTempPlots.forEach((p) => {
+      const axisInfo = built.tempAxisMap.get(p.id);
+      if (!axisInfo) return;
+      const colorConfig = getEffectiveTempProfileColorConfig(p);
+      const colorscale = buildTempProfileColorscale(colorConfig.colormap, colorConfig.aboveColor, colorConfig.belowColor);
+
+      // Gather every contributing (log, lap) first so the equal fixed multi-lap opacity
+      // (TEMP_PROFILE_MULTI_LAP_OPACITY) can be decided before building trace objects.
+      const contributors = [];
+      selFiles.forEach((log) => {
+        const activeDataFilters = resolveDataFiltersForLog(log, enabledDataFilters);
+        const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+        lapNums.forEach((lap) => {
+          if (!isLapSelected(selectedLaps, log.id, lap)) return;
+          let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
+          maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
+          const xArr = getXSeriesForMode(log, maskIdx, xMode, customXCol);
+          if (!xArr || xArr.length === 0) return;
+          contributors.push({log, lap, maskIdx, xArr});
+        });
+      });
+
+      const opacity = contributors.length > 1 ? TEMP_PROFILE_MULTI_LAP_OPACITY : 1;
+      let scaleShown = false;
+      contributors.forEach(({log, lap, maskIdx, xArr}) => {
+        // A channel absent from this particular log becomes an all-null row -- keeps the
+        // row/category alignment intact without breaking on partial sensor coverage across
+        // files (e.g. a file missing one of the configured sensors).
+        const z = p.channels.map((ch) => {
+          const resolvedCol = resolveChannelForLog(ch, log);
+          if (!resolvedCol || !log.cols.includes(resolvedCol)) return maskIdx.map(() => null);
+          return maskIdx.map((i) => {
+            const v = Number(log.data[i][resolvedCol]);
+            return Number.isFinite(v) ? v : null;
+          });
+        });
+        const trace = {
+          type: 'heatmap',
+          x: xArr,
+          y: p.channels,
+          z,
+          xaxis: axisInfo.xaxis,
+          yaxis: axisInfo.yaxis,
+          zmin: colorConfig.min,
+          zmax: colorConfig.max,
+          zauto: false,
+          colorscale,
+          opacity,
+          name: `${log.name} — Lap ${lap} — ${p.name}`,
+          hovertemplate: `${mainXTitle}: %{x}<br>%{y}: %{z}<extra>${p.name}</extra>`,
+          showscale: !scaleShown,
+          colorbar: !scaleShown ? {
+            y: (axisInfo.domain[0] + axisInfo.domain[1]) / 2,
+            len: Math.max(0.05, axisInfo.domain[1] - axisInfo.domain[0]),
+            yanchor: 'middle',
+            thickness: 12,
+            title: {text: p.name}
+          } : undefined
+        };
+        scaleShown = true;
+        traces.push(trace);
+      });
+    });
+
     if (binnedPlotEnabled && Number.isFinite(binnedPlotBinWidth) && binnedPlotBinWidth > 0) {
       traces.push(...computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, binnedPlotAxis, binnedPlotBinWidth, channelToRef));
     }
@@ -10523,6 +11421,7 @@
     bindMainPlotRelayoutSync();
     bindMainPlotSelectionSync();
     bindCornerStripZoom();
+    positionTempProfileResizeHandle(built.tempBlockDomain, activeTempPlots.length > 0);
     // Plotly.react rebuilds trace objects from scratch (mode:'lines'), so re-apply the
     // invisible selection markers if the select/lasso tool was already active.
     if (selectModeActive) setSelectableMarkersEnabled(true);
@@ -10973,6 +11872,47 @@
     });
   }
 
+  function handleImporterHeaderModeChange() {
+    if (!importerEditorState.headerOverride) return;
+    importerEditorState.headerOverride.enabled = !!(importerHeaderModeManualInput && importerHeaderModeManualInput.checked);
+    if (importerHeaderOverrideFields) importerHeaderOverrideFields.hidden = !importerEditorState.headerOverride.enabled;
+    setImporterEditorError('');
+  }
+  if (importerHeaderModeAutoInput) importerHeaderModeAutoInput.addEventListener('change', handleImporterHeaderModeChange);
+  if (importerHeaderModeManualInput) importerHeaderModeManualInput.addEventListener('change', handleImporterHeaderModeChange);
+
+  // Converts a 1-based row-number input's value into a 0-based index, or null when blank
+  // (only valid for the optional units-row field -- the header/data-start inputs are
+  // required and simply resolve to NaN, caught by getImporterHeaderOverrideError on save).
+  function importerRowInputToIndex(inputEl) {
+    const raw = inputEl ? String(inputEl.value || '').trim() : '';
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isInteger(n) ? n - 1 : NaN;
+  }
+
+  if (importerHeaderRowInput) {
+    importerHeaderRowInput.addEventListener('input', () => {
+      if (!importerEditorState.headerOverride) return;
+      importerEditorState.headerOverride.headerRowIndex = importerRowInputToIndex(importerHeaderRowInput);
+      renderImporterRowPreview();
+    });
+  }
+  if (importerUnitsRowInput) {
+    importerUnitsRowInput.addEventListener('input', () => {
+      if (!importerEditorState.headerOverride) return;
+      importerEditorState.headerOverride.unitsRowIndex = importerRowInputToIndex(importerUnitsRowInput);
+      renderImporterRowPreview();
+    });
+  }
+  if (importerDataStartRowInput) {
+    importerDataStartRowInput.addEventListener('input', () => {
+      if (!importerEditorState.headerOverride) return;
+      importerEditorState.headerOverride.dataStartRowIndex = importerRowInputToIndex(importerDataStartRowInput);
+      renderImporterRowPreview();
+    });
+  }
+
   if (importerCustomStandardAddBtn) {
     importerCustomStandardAddBtn.addEventListener('click', () => {
       const result = addUserDefinedStandardChannel(
@@ -11025,11 +11965,22 @@
     importerEditorSaveBtn.addEventListener('click', () => {
       if (!importerEditorState.isOpen || !importerEditorState.logId || !importerEditorState.decoderName) return;
 
+      const headerOverrideError = getImporterHeaderOverrideError();
+      if (headerOverrideError) {
+        setImporterEditorError(headerOverrideError);
+        return;
+      }
+      const manualHeaderActive = importerEditorState.headerOverrideSupported
+        && importerEditorState.headerOverride && importerEditorState.headerOverride.enabled;
+
       const normalized = normalizeCustomImporterConfig({
         decoder: importerEditorState.decoderName,
         channels: importerEditorState.channels,
         filters: importerEditorState.filters,
-        downsampleHz: importerEditorState.downsampleHz
+        downsampleHz: importerEditorState.downsampleHz,
+        headerRowIndex: manualHeaderActive ? importerEditorState.headerOverride.headerRowIndex : null,
+        unitsRowIndex: manualHeaderActive ? importerEditorState.headerOverride.unitsRowIndex : null,
+        dataStartRowIndex: manualHeaderActive ? importerEditorState.headerOverride.dataStartRowIndex : null
       });
       if (!normalized) {
         setImporterEditorError('Could not save importer config.');
@@ -11038,7 +11989,8 @@
 
       const hasAnyChannel = Object.values(normalized.channels).some((v) => String(v || '').trim() !== '');
       const hasDownsample = Number.isFinite(Number(normalized.downsampleHz)) && Number(normalized.downsampleHz) > 0;
-      const payload = (hasAnyChannel || hasDownsample) ? normalized : null;
+      const hasManualHeader = Number.isInteger(normalized.headerRowIndex);
+      const payload = (hasAnyChannel || hasDownsample || hasManualHeader) ? normalized : null;
       const ok = reprocessLogWithDecoder(importerEditorState.logId, importerEditorState.decoderName, payload);
       if (!ok) {
         setImporterEditorError('Could not reprocess this file with the custom importer settings. See console for details.');
@@ -11076,6 +12028,18 @@
   if (lapsList) {
     lapsList.addEventListener('change', (ev)=>{
       if (ev.target.matches('input[type=checkbox]')) updatePlot();
+    });
+    lapsList.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[data-lap-select-all], button[data-lap-select-none]');
+      if (!btn) return;
+      const logId = btn.getAttribute('data-lap-select-all') || btn.getAttribute('data-lap-select-none');
+      const checkAll = btn.hasAttribute('data-lap-select-all');
+      const group = btn.closest('.file-lap-group');
+      if (!group) return;
+      group.querySelectorAll(`input[type=checkbox][data-id="${CSS.escape(logId)}"]`).forEach((cb) => {
+        cb.checked = checkAll;
+      });
+      updatePlot();
     });
     lapsList.addEventListener('input', (ev) => {
       const target = ev.target;
@@ -11204,6 +12168,60 @@
     } catch {}
   })();
 
+  function saveTempProfilePlots() {
+    try { localStorage.setItem('tempProfilePlots', JSON.stringify(tempProfilePlots)); } catch {}
+  }
+
+  function saveTempProfileDefaults() {
+    try { localStorage.setItem('tempProfileDefaults', JSON.stringify(tempProfileDefaults)); } catch {}
+  }
+
+  function saveTempProfileRowsHeight() {
+    try { localStorage.setItem(TEMP_PROFILE_ROWS_HEIGHT_KEY, JSON.stringify(tempProfileRowsHeightPx)); } catch {}
+  }
+
+  function normalizeTempProfilePlot(p) {
+    if (!p || typeof p !== 'object' || typeof p.name !== 'string' || !p.name) return null;
+    const channels = Array.isArray(p.channels) ? p.channels.filter(c => typeof c === 'string' && c) : [];
+    if (channels.length === 0) return null;
+    return {
+      id: typeof p.id === 'string' && p.id ? p.id : `temp-profile-${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+      name: p.name,
+      channels,
+      enabled: p.enabled !== false,
+      useDefaultRange: p.useDefaultRange !== false,
+      colormap: TEMP_COLORMAP_NAMES.includes(p.colormap) ? p.colormap : 'Jet',
+      min: Number.isFinite(p.min) ? p.min : tempProfileDefaults.min,
+      max: Number.isFinite(p.max) ? p.max : tempProfileDefaults.max,
+      aboveColor: typeof p.aboveColor === 'string' && p.aboveColor ? p.aboveColor : tempProfileDefaults.aboveColor,
+      belowColor: typeof p.belowColor === 'string' && p.belowColor ? p.belowColor : tempProfileDefaults.belowColor
+    };
+  }
+
+  (function loadTempProfileData() {
+    try {
+      const savedDefaults = JSON.parse(localStorage.getItem('tempProfileDefaults') || 'null');
+      if (savedDefaults && typeof savedDefaults === 'object') {
+        tempProfileDefaults = {
+          colormap: TEMP_COLORMAP_NAMES.includes(savedDefaults.colormap) ? savedDefaults.colormap : tempProfileDefaults.colormap,
+          min: Number.isFinite(savedDefaults.min) ? savedDefaults.min : tempProfileDefaults.min,
+          max: Number.isFinite(savedDefaults.max) ? savedDefaults.max : tempProfileDefaults.max,
+          aboveColor: typeof savedDefaults.aboveColor === 'string' && savedDefaults.aboveColor ? savedDefaults.aboveColor : tempProfileDefaults.aboveColor,
+          belowColor: typeof savedDefaults.belowColor === 'string' && savedDefaults.belowColor ? savedDefaults.belowColor : tempProfileDefaults.belowColor
+        };
+      }
+    } catch {}
+    try {
+      const saved = JSON.parse(localStorage.getItem('tempProfilePlots') || '[]');
+      if (Array.isArray(saved)) tempProfilePlots = saved.map(normalizeTempProfilePlot).filter(Boolean);
+    } catch {}
+    try {
+      const savedHeight = JSON.parse(localStorage.getItem(TEMP_PROFILE_ROWS_HEIGHT_KEY) || 'null');
+      if (Number.isFinite(savedHeight) && savedHeight > 0) tempProfileRowsHeightPx = savedHeight;
+    } catch {}
+    if (tempProfilePlots.length > 0) renderTempProfilePlotsList();
+  })();
+
   // localStorage keys that represent user-editable settings/preferences (as opposed to
   // in-memory-only UI state, or the 'uiFlag7' easter-egg toggle) -- the set the User
   // section's Download/Upload Settings buttons carry between browsers. Loaded log files
@@ -11219,7 +12237,10 @@
     SELECTION_FIT_FORMULA_STORAGE_KEY,
     'trackCornerMetadata',
     'trackCornerOverrides',
-    'startFinishLineOverrides'
+    'startFinishLineOverrides',
+    'tempProfilePlots',
+    'tempProfileDefaults',
+    TEMP_PROFILE_ROWS_HEIGHT_KEY
   ];
 
   function triggerJsonDownload(jsonString, filenamePrefix) {
@@ -13016,6 +14037,42 @@
   if (dataFiltersEnabledInput) {
     dataFiltersEnabledInput.addEventListener('change', () => {
       saveDataFilters();
+      updatePlot();
+    });
+  }
+
+  // Temperature Profile Plots event handlers
+  if (addTempProfileBtn) {
+    addTempProfileBtn.addEventListener('click', () => openTempProfilePlotModal(null));
+  }
+  if (editTempProfileDefaultsBtn) {
+    editTempProfileDefaultsBtn.addEventListener('click', () => openTempProfileDefaultsModal());
+  }
+  if (tempProfilePlotsList) {
+    tempProfilePlotsList.addEventListener('click', (ev) => {
+      const editBtn = ev.target.closest('.temp-profile-edit');
+      if (editBtn) {
+        const idx = Number(editBtn.dataset.idx);
+        if (!Number.isFinite(idx) || idx < 0 || idx >= tempProfilePlots.length) return;
+        openTempProfilePlotModal(tempProfilePlots[idx]);
+        return;
+      }
+      const deleteBtn = ev.target.closest('.temp-profile-delete');
+      if (!deleteBtn) return;
+      const idx = Number(deleteBtn.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= tempProfilePlots.length) return;
+      tempProfilePlots.splice(idx, 1);
+      saveTempProfilePlots();
+      renderTempProfilePlotsList();
+      updatePlot();
+    });
+    tempProfilePlotsList.addEventListener('change', (ev) => {
+      if (!ev.target.matches('.temp-profile-item-enabled')) return;
+      const idx = Number(ev.target.dataset.idx);
+      if (!Number.isFinite(idx) || idx < 0 || idx >= tempProfilePlots.length) return;
+      tempProfilePlots[idx].enabled = ev.target.checked;
+      saveTempProfilePlots();
+      renderTempProfilePlotsList();
       updatePlot();
     });
   }

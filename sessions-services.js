@@ -736,7 +736,10 @@
               decoder: decoderName,
               channels: config.channels,
               filters: config.filters,
-              downsampleHz: config.downsampleHz
+              downsampleHz: config.downsampleHz,
+              headerRowIndex: Number.isInteger(config.headerRowIndex) ? config.headerRowIndex : null,
+              unitsRowIndex: Number.isInteger(config.unitsRowIndex) ? config.unitsRowIndex : null,
+              dataStartRowIndex: Number.isInteger(config.dataStartRowIndex) ? config.dataStartRowIndex : null
             };
           } else {
             delete next.importerConfig;

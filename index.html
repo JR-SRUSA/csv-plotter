@@ -202,6 +202,18 @@
             </div>
           </div>
 
+          <div class="temp-profile-controls">
+            <div class="temp-profile-header">
+              <strong>Temperature Profile Plots:</strong>
+              <button id="addTempProfileBtn" type="button" class="temp-profile-add-btn">+ Add</button>
+              <button id="editTempProfileDefaultsBtn" type="button" class="temp-profile-defaults-btn" title="Edit the shared default colormap/range">Default Colors</button>
+            </div>
+            <div id="tempProfilePlotsList"></div>
+            <div id="tempProfileHiddenHint" class="temp-profile-hidden-hint" hidden>
+              Temperature profile plots are shown only when X Axis is Time or Distance.
+            </div>
+          </div>
+
           <div class="data-filters-controls">
             <div class="data-filters-header">
               <label><input type="checkbox" id="dataFiltersEnabled" checked /> <strong>Data Filters:</strong></label>
@@ -432,7 +444,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-22h</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-23f</div>
     </section>
 
     <section class="plot">
@@ -500,6 +512,26 @@
         <button id="importerEditorClose" type="button" class="importer-editor-close" aria-label="Close importer editor">🗙</button>
       </div>
       <div id="importerEditorSubtitle" class="importer-editor-subtitle"></div>
+      <div id="importerHeaderOverrideSection" class="importer-header-override-section" hidden>
+        <h3>Header Rows</h3>
+        <p class="importer-header-override-hint">If the auto-detected channel names look wrong (e.g. lap-time or metadata values showing up as channels), switch to manual and pick the correct rows from the preview below.</p>
+        <div class="importer-header-override-toggle" role="radiogroup" aria-label="Header row detection mode">
+          <label><input type="radio" name="importerHeaderMode" id="importerHeaderModeAuto" value="auto" /> Detect automatically</label>
+          <label><input type="radio" name="importerHeaderMode" id="importerHeaderModeManual" value="manual" /> Set manually</label>
+        </div>
+        <div id="importerHeaderOverrideFields" class="importer-header-override-fields" hidden>
+          <label>Header row
+            <input type="number" id="importerHeaderRowInput" min="1" step="1" />
+          </label>
+          <label>Units row (optional)
+            <input type="number" id="importerUnitsRowInput" min="1" step="1" placeholder="none" />
+          </label>
+          <label>First data row
+            <input type="number" id="importerDataStartRowInput" min="1" step="1" />
+          </label>
+        </div>
+        <div id="importerRowPreview" class="importer-row-preview" role="list"></div>
+      </div>
       <div class="importer-editor-frequency-row">
         <span>Data Frequency: <strong id="importerEditorDataFreqValue">n/a</strong></span>
         <label>Resample To (Hz)

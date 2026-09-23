@@ -171,6 +171,93 @@ test('processCsvRowsWithDecoder forces AiM decoder', () => {
   assert.equal(processed.meta.source, 'AiM', 'source should be AiM');
 });
 
+test('does not mistake an AiM "Segment Times" metadata row for the real header row', () => {
+  // Regression test: JS's Date.parse() used to be trusted to detect "data-like" cells,
+  // but it's absurdly permissive (Date.parse("SDS IGN AN 1") parses as a real date). A
+  // header row containing channel names shaped like that used to spuriously look
+  // "data-like" enough to make findHeaderRowIndex lock onto the "Segment Times" metadata
+  // row above it (each lap's split time, e.g. "0:01.0") instead of the real header.
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Format', 'AiM CSV File'],
+    ['Session', 'Test'],
+    ['Beacon Markers', '10', '20'],
+    ['Segment Times', '0:01.0', '0:02.0'],
+    ['Time', 'SDS IGN AN 1', 'SDS IGN AN 2', 'GPS Speed'],
+    ['s', 'deg', 'deg', 'km/h'],
+    [0, 1, 2, 50],
+    [1, 2, 3, 60],
+    [2, 3, 4, 70]
+  ];
+
+  const processed = processors.processCsvRows(rows);
+  assert.deepEqual(processed.cols, ['Time', 'SDS IGN AN 1', 'SDS IGN AN 2', 'GPS Speed']);
+  assert.equal(processed.meta.timeCol, 'Time');
+  assert.equal(processed.data.length, 3);
+});
+
+test('describeAutoHeaderDetection reports the row auto-detect currently picks', () => {
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Format', 'AiM CSV File'],
+    ['Beacon Markers', '10', '20'],
+    ['Segment Times', '0:01.0', '0:02.0'],
+    ['Time', 'SDS IGN AN 1', 'SDS IGN AN 2', 'GPS Speed'],
+    ['s', 'deg', 'deg', 'km/h'],
+    [0, 1, 2, 50],
+    [1, 2, 3, 60]
+  ];
+
+  const described = processors.describeAutoHeaderDetection(rows, 'AiM');
+  assert.equal(described.headerRowIndex, 3);
+  assert.equal(described.unitsRowIndex, 4);
+  assert.equal(described.dataStartRowIndex, 5);
+});
+
+test('processCsvRowsWithDecoder honors an explicit manualHeader override', () => {
+  const processors = loadLogFileProcessors();
+
+  // Header/units rows deliberately in the "wrong" place for auto-detect to find on its
+  // own -- only passing manualHeader should make this resolve correctly.
+  const rows = [
+    ['junk', 'junk', 'junk'],
+    ['Time', 'Speed', 'RPM'],
+    ['s', 'km/h', 'rpm'],
+    ['extra junk row', '', ''],
+    [0, 50, 3000],
+    [1, 60, 3500]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'AiM', {
+    manualHeader: { headerRowIndex: 1, unitsRowIndex: 2, dataStartRowIndex: 4 }
+  });
+
+  assert.deepEqual(processed.cols, ['Time', 'Speed', 'RPM']);
+  assert.equal(processed.units.Speed, 'km/h');
+  assert.equal(processed.data.length, 2);
+  assert.equal(processed.data[0].Speed, 50);
+});
+
+test('processCsvRowsWithDecoder falls back to auto-detect when manualHeader is out of range', () => {
+  const processors = loadLogFileProcessors();
+
+  const rows = [
+    ['Time', 'Speed', 'RPM'],
+    ['s', 'km/h', 'rpm'],
+    [0, 50, 3000],
+    [1, 60, 3500]
+  ];
+
+  const processed = processors.processCsvRowsWithDecoder(rows, 'AiM', {
+    manualHeader: { headerRowIndex: 999, unitsRowIndex: null, dataStartRowIndex: 9999 }
+  });
+
+  assert.deepEqual(processed.cols, ['Time', 'Speed', 'RPM']);
+  assert.equal(processed.data.length, 2);
+});
+
 test('processCsvRowsWithDecoder forces Standard decoder', () => {
   const processors = loadLogFileProcessors();
 

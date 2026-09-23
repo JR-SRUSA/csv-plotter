@@ -170,6 +170,23 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .importer-editor-table td input[type=number]{max-width:130px}
 .importer-editor-actions{display:flex;justify-content:flex-end;gap:8px}
 .importer-editor-error{font-size:0.84em;color:var(--danger-text);background:var(--danger-bg);border:1px solid var(--danger-border);border-radius:4px;padding:5px 8px}
+.importer-header-override-section{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px dashed var(--border-dashed);border-radius:6px;background:var(--bg-subtle)}
+.importer-header-override-section h3{margin:0;font-size:0.9rem}
+.importer-header-override-hint{margin:0;font-size:0.8em;color:var(--text-muted)}
+.importer-header-override-toggle{display:flex;gap:14px;flex-wrap:wrap;font-size:0.86em}
+.importer-header-override-toggle label{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+.importer-header-override-fields{display:flex;gap:12px;flex-wrap:wrap;font-size:0.86em}
+.importer-header-override-fields label{display:flex;flex-direction:column;gap:3px}
+.importer-header-override-fields input[type=number]{width:110px}
+.importer-row-preview{max-height:220px;overflow:auto;border:1px solid var(--border-dashed);border-radius:6px;background:var(--bg-surface);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.78em}
+.importer-row-preview-row{display:flex;gap:8px;padding:2px 8px;border-bottom:1px solid var(--border-dashed);white-space:nowrap}
+.importer-row-preview-row:last-child{border-bottom:none}
+.importer-row-preview-num{flex:0 0 auto;min-width:2.4em;color:var(--text-muted);text-align:right}
+.importer-row-preview-text{overflow:hidden;text-overflow:ellipsis}
+.importer-row-preview-row.is-header-row{background:var(--accent-active-bg);color:var(--accent-active-text);font-weight:600}
+.importer-row-preview-row.is-units-row{background:var(--warning-bg)}
+.importer-row-preview-row.is-data-row{background:var(--success-bg)}
+.importer-row-preview-more{padding:4px 8px;color:var(--text-muted);font-style:italic}
 .importer-custom-standards{display:flex;flex-direction:column;gap:6px;padding:8px;border:1px dashed var(--border-dashed);border-radius:6px;background:var(--bg-subtle)}
 .importer-custom-standards h3{margin:0;font-size:0.9rem}
 .importer-custom-standard-entry{display:grid;grid-template-columns:minmax(180px,1.6fr) minmax(120px,1fr) auto;gap:6px;align-items:center}
@@ -282,6 +299,46 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .searchable-select-item:hover,.searchable-select-item.active{background:var(--bg-hover)}
 .searchable-select-item.is-current{font-weight:600}
 .searchable-select-empty{padding:6px 8px;color:var(--text-muted);font-size:0.85em}
+.temp-profile-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
+.temp-profile-header{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.temp-profile-header strong{margin-right:auto}
+.temp-profile-add-btn,.temp-profile-defaults-btn{padding:2px 8px;font-size:0.82em}
+.temp-profile-item{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px dashed var(--border-dashed);font-size:0.85em}
+.temp-profile-item.is-disabled .temp-profile-item-name,.temp-profile-item.is-disabled .temp-profile-item-summary{opacity:0.45}
+.temp-profile-item-name{font-weight:600;flex:0 0 auto;max-width:40%;overflow-wrap:anywhere}
+.temp-profile-item-summary{flex:1;color:var(--text-muted);overflow-wrap:anywhere}
+.temp-profile-edit{padding:2px 6px;font-size:0.8em;flex:0 0 auto;color:var(--edit-text);border-color:var(--edit-border);background:var(--edit-bg)}
+.temp-profile-edit:hover{background:var(--edit-bg-hover)}
+.temp-profile-delete{padding:2px 6px;font-size:0.8em;flex:0 0 auto;color:var(--danger-text);border-color:var(--danger-border);background:var(--danger-bg)}
+.temp-profile-delete:hover{background:var(--danger-bg-hover)}
+.temp-profile-hidden-hint{font-size:0.8em;color:var(--text-muted);margin-top:4px}
+
+/* Add/Edit Temperature Profile Plot modal (built in app.js, reusing .session-modal-*) */
+.temp-profile-modal-dialog{width:min(480px,100%)}
+.temp-profile-use-default-row{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-primary);margin-top:4px;cursor:pointer}
+.temp-profile-color-row{flex-direction:row;flex-wrap:wrap}
+.temp-profile-color-field{display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-muted);flex:1 1 90px;min-width:80px}
+.temp-profile-color-field input[type=color]{width:100%;height:26px;padding:1px;border:1px solid var(--border);border-radius:3px;background:var(--bg-surface);cursor:pointer}
+.temp-profile-colormap-preview-row{display:flex;align-items:center;gap:6px;margin-top:8px}
+.temp-profile-colormap-preview-bar{flex:1 1 auto;height:16px;border-radius:3px;border:1px solid var(--border)}
+.temp-profile-colormap-preview-label{font-size:10px;color:var(--text-muted);min-width:2em;text-align:center}
+.temp-profile-channel-picker{margin-top:5px}
+.temp-profile-channel-list{height:auto}
+.temp-profile-order-header{display:flex;justify-content:flex-end;margin-top:6px}
+.temp-profile-flip-btn{padding:2px 8px;font-size:0.8em}
+.temp-profile-order-list{margin-top:4px;max-height:180px;overflow-y:auto;border:1px solid var(--border-dashed);border-radius:4px}
+.temp-profile-order-item{display:flex;align-items:center;gap:6px;padding:3px 6px;border-bottom:1px dashed var(--border-dashed);font-size:0.85em}
+.temp-profile-order-item:last-child{border-bottom:none}
+.temp-profile-order-item-name{flex:1;overflow-wrap:anywhere}
+.temp-profile-order-btn{padding:1px 6px;font-size:0.78em;flex:0 0 auto}
+.temp-profile-order-btn:disabled{opacity:0.35;cursor:default}
+
+/* Desktop-only drag handle between the main plot and the temp-profile block, positioned in
+   JS (positionTempProfileResizeHandle) at the pixel row where the two domains meet. */
+.temp-profile-resize-handle{position:absolute;left:0;right:0;height:9px;margin-top:-4px;cursor:row-resize;z-index:60;user-select:none;touch-action:none}
+.temp-profile-resize-handle:hover,.temp-profile-resize-handle.is-dragging{background:var(--bg-hover)}
+@media (max-width:980px){.temp-profile-resize-handle{display:none}}
+
 .data-filters-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
 .file-upsampled-indicator{display:inline-flex;align-items:center;gap:4px;font-size:0.78em;color:var(--warning-text);background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:3px;padding:1px 6px;white-space:nowrap;flex:0 0 auto}
 .data-filters-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
@@ -459,7 +516,10 @@ body.sidebar-collapsed .controls{display:none}
 .lap-label{font-weight:500}
 .lap-warning{cursor:help;font-size:0.9em}
 .file-lap-group{margin-top:8px}
-.file-lap-heading{font-size:0.82em;font-weight:600;color:var(--text-muted);margin-bottom:4px;word-break:break-all}
+.file-lap-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:0.82em;font-weight:600;color:var(--text-muted);margin-bottom:4px}
+.file-lap-heading-name{word-break:break-all}
+.file-lap-select-actions{display:flex;gap:4px;flex:0 0 auto}
+.lap-select-all-btn,.lap-select-none-btn{padding:1px 7px;font-size:0.82em;font-weight:400;line-height:1.4;border-radius:3px;cursor:pointer}
 
 /* Leaflet ships its own light-chrome control styling; these overrides keep the zoom
    buttons, layer picker and attribution strip legible instead of a stark white box
