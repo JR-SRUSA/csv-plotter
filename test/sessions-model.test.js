@@ -281,3 +281,54 @@ test('normalizeGearing keeps a positive shift time and drops blank/zero/invalid 
   assert.equal(g('80').shift_time_ms, 80);
   for (const bad of [0, '', null, -5, 'abc']) assert.equal('shift_time_ms' in g(bad), false);
 });
+
+test('normalize(vehicles) keeps the optional weight-transfer geometry fields when positive, drops them otherwise', () => {
+  const v = Model.normalize('vehicles', {
+    type: 'motorcycle', cg_height_m: 0.6, cg_position_m: 0.8, wheelbase_m: 1.4, cop_height_m: 1.1
+  });
+  assert.equal(v.cg_height_m, 0.6);
+  assert.equal(v.cg_position_m, 0.8);
+  assert.equal(v.wheelbase_m, 1.4);
+  assert.equal(v.cop_height_m, 1.1);
+
+  const bad = Model.normalize('vehicles', {
+    type: 'motorcycle', cg_height_m: 0, cg_position_m: -1, wheelbase_m: 'nope', cop_height_m: ''
+  });
+  assert.equal('cg_height_m' in bad, false);
+  assert.equal('cg_position_m' in bad, false);
+  assert.equal('wheelbase_m' in bad, false);
+  assert.equal('cop_height_m' in bad, false);
+});
+
+test('normalize(vehicles) keeps max_lat_g/max_long_g and gearing.efficiency_pct when positive', () => {
+  const v = Model.normalize('vehicles', { type: 'motorcycle', max_lat_g: 1.3, max_long_g: 0.9, gearing: { final_ratio: 2.8, efficiency_pct: 92 } });
+  assert.equal(v.max_lat_g, 1.3);
+  assert.equal(v.max_long_g, 0.9);
+  assert.equal(v.gearing.efficiency_pct, 92);
+
+  const bad = Model.normalize('vehicles', { type: 'motorcycle', max_lat_g: -1, max_long_g: 0 });
+  assert.equal('max_lat_g' in bad, false);
+  assert.equal('max_long_g' in bad, false);
+});
+
+test('normalize(riders) keeps the CG weight-transfer deltas (tucked/braking/hangoff, plus hangoff lateral)', () => {
+  const r = Model.normalize('riders', {
+    name: 'A',
+    cg_height_delta_tucked_m: -0.05, cg_position_delta_tucked_m: 0.02,
+    cg_height_delta_braking_m: 0.08, cg_position_delta_braking_m: -0.01,
+    cg_height_delta_hangoff_m: -0.1, cg_position_delta_hangoff_m: 0,
+    cg_lateral_hangoff_m: 0.3
+  });
+  assert.equal(r.cg_height_delta_tucked_m, -0.05);
+  assert.equal(r.cg_position_delta_tucked_m, 0.02);
+  assert.equal(r.cg_height_delta_braking_m, 0.08);
+  assert.equal(r.cg_position_delta_braking_m, -0.01);
+  assert.equal(r.cg_height_delta_hangoff_m, -0.1);
+  assert.equal(r.cg_position_delta_hangoff_m, 0);
+  assert.equal(r.cg_lateral_hangoff_m, 0.3);
+
+  const blank = Model.normalize('riders', { name: 'B' });
+  ['cg_height_delta_tucked_m', 'cg_position_delta_tucked_m', 'cg_height_delta_braking_m',
+    'cg_position_delta_braking_m', 'cg_height_delta_hangoff_m', 'cg_position_delta_hangoff_m',
+    'cg_lateral_hangoff_m'].forEach((f) => assert.equal(f in blank, false));
+});

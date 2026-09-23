@@ -213,7 +213,7 @@ test.describe('linked simulated-channel files and the remembered session', () =>
     await expect.poll(async () => (await storedFiles(page)).find((f) => !f.simulated && f.session_ids.length === 1)).toBeTruthy();
 
     await page.evaluate(() => { document.getElementById('vehicleSimDetails').open = true; });
-    await page.locator('#vehicleSimLoggedBtn').click(); // motorcycle, no vehicle: lean channels only
+    await page.locator('#vehicleSimLoggedBtn').click(); // motorcycle, no vehicle: lean + Tire/Aero Decel
     await expect(page.locator('#vehicleSimStatus')).toContainText('Saved as linked file');
 
     const linked = (await storedFiles(page)).find((f) => f.name.endsWith(' - sim channels.csv'));
@@ -221,7 +221,7 @@ test.describe('linked simulated-channel files and the remembered session', () =>
     expect(linked.simulated).toBe(true);
     const source = (await storedFiles(page)).find((f) => f.name.startsWith('PiBoSo'));
     expect(linked.session_ids).toEqual(source.session_ids); // same session as its source
-    expect(linked.text.split('\n')[0]).toBe('Row,Required Lean Angle,Required Lean Angle Rate');
+    expect(linked.text.split('\n')[0]).toBe('Row,Required Lean Angle,Required Lean Angle Rate,Aero Decel (sim),Tire Longitudinal Grip (sim)');
 
     // Reload and load the source log again: the channels come back by themselves.
     await page.reload();

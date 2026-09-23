@@ -388,6 +388,9 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .stored-file-remove-btn{flex-shrink:0;padding:1px 5px;font-size:11px;line-height:1.4;border-radius:3px;cursor:pointer;background:var(--bg-surface);border:1px solid var(--border-dashed);color:var(--danger-text)}
 .stored-file-remove-btn:hover{background:var(--danger-text);color:#fff;border-color:var(--danger-text)}
 .stored-files-actions{display:flex;gap:8px;flex-wrap:wrap}
+.storage-persist-row{display:flex;flex-direction:column;align-items:flex-start;gap:2px}
+.storage-persist-row #requestPersistBtn{flex:0 0 auto}
+.storage-persist-row .settings-io-status{margin-top:2px}
 .controls-version{margin-top:16px;padding-top:12px;border-top:1px solid var(--border-dashed);font-size:12px;color:var(--text-muted)}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:var(--bg-surface);padding:12px;border-radius:6px;box-shadow:0 1px 4px var(--shadow-sm)}
 .plot{flex:1;min-width:0;max-width:100%;overflow-x:clip;background:var(--bg-surface);padding:12px;border-radius:6px;box-shadow:0 1px 4px var(--shadow-sm);display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,20%);grid-template-areas:"plot maps";column-gap:12px;align-items:stretch;transition:background-color 0.15s ease}
@@ -649,12 +652,16 @@ body.map-fullscreen-open{overflow:hidden}
 .selection-stats-close:hover{opacity:1}
 .selection-stats-controls{padding:6px 8px 0}
 .selection-stats-fit-type-label,
+.selection-stats-fit-slope-units-row,
 .selection-stats-fit-formula-row{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted,#555);margin-bottom:6px}
 .selection-stats-fit-type-label select,
+.selection-stats-fit-slope-units-row select,
 .selection-stats-fit-formula-row input{flex:1;min-width:0;font-size:12px;padding:2px 4px;border:1px solid var(--border-color,#ccc);border-radius:4px;background:var(--panel-bg,#fff);color:var(--text-color,#222)}
 [data-theme=dark] .selection-stats-fit-type-label,
+[data-theme=dark] .selection-stats-fit-slope-units-row,
 [data-theme=dark] .selection-stats-fit-formula-row{color:#a8b8cc}
 [data-theme=dark] .selection-stats-fit-type-label select,
+[data-theme=dark] .selection-stats-fit-slope-units-row select,
 [data-theme=dark] .selection-stats-fit-formula-row input{background:#0f1520;border-color:#3a4556;color:#dde6f2}
 .selection-stats-fit-equation{font-size:11px;font-family:ui-monospace,"SF Mono",Consolas,monospace;color:var(--text-muted,#555);margin:-3px 0 6px;word-break:break-word}
 [data-theme=dark] .selection-stats-fit-equation{color:#a8b8cc}

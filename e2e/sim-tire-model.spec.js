@@ -97,6 +97,11 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await expect(dialog).toContainText('Required Lean Angle');
     await expect(dialog).toContainText('tread crown radius = tire width / 2 (70 mm for this tire)');
     await expect(dialog).toContainText('RPM (sim)');
+    await expect(dialog).toContainText('Aero Decel (sim)');
+    await expect(dialog).toContainText('Slope Decel (sim)');
+    await expect(dialog).toContainText('Tire Longitudinal Grip (sim)');
+    await expect(dialog).toContainText('Front/Rear Wheel Load (sim)');
+    await expect(dialog).toContainText('missing CG height, CG position and/or wheelbase');
     await page.locator('.sim-info-dialog .session-modal-close').click();
     await expect(dialog).toHaveCount(0);
 
@@ -104,7 +109,11 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await page.locator('#vehicleSimInfoBtn').click();
     await expect(page.locator('.sim-info-dialog')).toContainText('About the simulation (car)');
     await expect(page.locator('.sim-info-dialog')).toContainText('Car class: no lean channels');
-    await expect(page.locator('.sim-info-dialog .sim-info-off')).toHaveCount(2); // the two lean channels
+    // The two lean channels, plus Front/Rear Axle Load (sim) -- this vehicle has an engine
+    // (so Gear/RPM (sim) are "on"), but no weight-transfer geometry set, so the Load
+    // channels show as not currently computed.
+    await expect(page.locator('.sim-info-dialog .sim-info-off')).toHaveCount(3);
+    await expect(page.locator('.sim-info-dialog')).toContainText('Front/Rear Axle Load (sim)');
   });
 
   test('a car simulation has no lean channels', async ({ page }) => {
@@ -137,11 +146,21 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await pick(page, 'R3Tire');
     await page.locator('input[name="vehicleSimClass"][value="motorcycle"]').check();
     await page.locator('#vehicleSimLoggedBtn').click();
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Added RPM (sim), Gear (sim), Required Lean Angle, Required Lean Angle Rate to 1 log (RPM lean-adjusted');
+    const status = page.locator('#vehicleSimStatus');
+    // The sample log has LongAcc, so Aero/Tire Decel are added alongside RPM/Gear/lean --
+    // checked individually rather than as one long literal, since their order in the
+    // status line just follows the order each block happens to run in.
+    for (const chan of ['RPM (sim)', 'Gear (sim)', 'Required Lean Angle', 'Required Lean Angle Rate', 'Aero Decel (sim)', 'Tire Longitudinal Grip (sim)']) {
+      await expect(status).toContainText(chan);
+    }
+    await expect(status).toContainText('to 1 log');
+    await expect(status).toContainText('RPM lean-adjusted');
 
     const cols = await page.evaluate(() => Array.from(document.getElementById('ySelect').options).map((o) => o.value));
     expect(cols).toContain('RPM (sim)');
     expect(cols).toContain('Gear (sim)');
+    expect(cols).toContain('Aero Decel (sim)');
+    expect(cols).toContain('Tire Longitudinal Grip (sim)');
 
     await page.evaluate(() => {
       const sel = document.getElementById('ySelect');
@@ -153,7 +172,9 @@ test.describe('simulation tire/lean model and vehicle class', () => {
 
     await page.locator('input[name="vehicleSimClass"][value="car"]').check();
     await page.locator('#vehicleSimLoggedBtn').click();
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Added RPM (sim), Gear (sim) to 1 log.');
+    await expect(status).toContainText('RPM (sim)');
+    await expect(status).toContainText('Gear (sim)');
+    await expect(status).toContainText('to 1 log');
     await page.evaluate(() => {
       const sel = document.getElementById('ySelect');
       sel.dispatchEvent(new Event('change', { bubbles: true }));
@@ -161,12 +182,19 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await expect.poll(async () => (await meanOf(page, 'RPM (sim)')) < leaned).toBe(true);
   });
 
-  test('logged-data RPM needs a vehicle with an engine (a car has nothing else to add)', async ({ page }) => {
+  test('logged data with no engine still adds Tire/Aero Decel from the typed Mass/CdA (works for a car too)', async ({ page }) => {
     await loadSampleFile(page, PITT_LAP);
     await openSim(page);
     await page.locator('input[name="vehicleSimClass"][value="car"]').check();
     await page.locator('#vehicleSimLoggedBtn').click();
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Pick a vehicle');
+    const status = page.locator('#vehicleSimStatus');
+    await expect(status).toContainText('Aero Decel (sim)');
+    await expect(status).toContainText('Tire Longitudinal Grip (sim)');
+    await expect(status).toContainText('RPM and gear need a vehicle');
+    const cols = await page.evaluate(() => Array.from(document.getElementById('ySelect').options).map((o) => o.value));
+    expect(cols).toContain('Aero Decel (sim)');
+    expect(cols).toContain('Tire Longitudinal Grip (sim)');
+    expect(cols).not.toContain('RPM (sim)');
   });
 });
 
@@ -240,14 +268,63 @@ test.describe('simulated lap map data and logged-data lean', () => {
     if (ok.found) expect(ok.worst).toBeLessThan(0.01);
   });
 
-  test('a motorcycle logged run still gets lean without an engine; a car does not', async ({ page }) => {
+  test('a motorcycle logged run gets lean plus Tire/Aero Decel without an engine; a car gets Tire/Aero Decel only', async ({ page }) => {
     await loadSampleFile(page, PITT_LAP);
     await openSim(page);
-    await page.locator('#vehicleSimLoggedBtn').click(); // manual, no vehicle
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle');
-    await expect(page.locator('#vehicleSimStatus')).toContainText('need a vehicle');
+    await page.locator('#vehicleSimLoggedBtn').click(); // manual, no vehicle, motorcycle (default class)
+    const status = page.locator('#vehicleSimStatus');
+    await expect(status).toContainText('Required Lean Angle');
+    await expect(status).toContainText('Aero Decel (sim)');
+    await expect(status).toContainText('Tire Longitudinal Grip (sim)');
+    await expect(status).toContainText('need a vehicle');
+
     await page.locator('input[name="vehicleSimClass"][value="car"]').check();
     await page.locator('#vehicleSimLoggedBtn').click();
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Pick a vehicle');
+    await expect(status).toContainText('Aero Decel (sim)');
+    await expect(status).toContainText('Tire Longitudinal Grip (sim)');
+    await expect(status).not.toContainText('Required Lean Angle');
+  });
+
+  test('Aero Decel and Tire Longitudinal Grip are computed correctly from Speed and LongAcc, with no vehicle picked', async ({ page }) => {
+    await loadSampleFile(page, PITT_LAP);
+    await openSim(page);
+    await page.locator('#vehicleSimLoggedBtn').click();
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Aero Decel (sim)');
+
+    await page.evaluate(() => {
+      const sel = document.getElementById('ySelect');
+      Array.from(sel.options).forEach((o) => { o.selected = ['Speed', 'LongAcc', 'Aero Decel (sim)', 'Tire Longitudinal Grip (sim)'].includes(o.value); });
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const data = await page.evaluate(() => {
+      const pd = document.getElementById('plotDiv');
+      const byChannel = (ch) => {
+        const t = pd.data.find((tr) => tr.meta && tr.meta.channel === ch);
+        return t ? Array.from(t.y) : null;
+      };
+      return { speedKmh: byChannel('Speed'), longG: byChannel('LongAcc'), aero: byChannel('Aero Decel (sim)'), tire: byChannel('Tire Longitudinal Grip (sim)') };
+    });
+    expect(data.speedKmh).not.toBeNull();
+    expect(data.longG).not.toBeNull();
+    expect(data.aero).not.toBeNull();
+    expect(data.tire).not.toBeNull();
+
+    // Generic default Mass/CdA used when no vehicle is picked (see SIM_DEFAULT_PARAMS).
+    const mass = 235, cda = 0.5, rho = 1.225, g = 9.81;
+    let checked = 0;
+    for (let i = 0; i < data.speedKmh.length; i += 37) {
+      const v = data.speedKmh[i] / 3.6;
+      if (!Number.isFinite(v) || !Number.isFinite(data.aero[i])) continue;
+      const expectedAero = (0.5 * rho * cda * v * v) / mass / g;
+      expect(Math.abs(data.aero[i] - expectedAero)).toBeLessThan(1e-6);
+      if (Number.isFinite(data.longG[i]) && Number.isFinite(data.tire[i])) {
+        // GP Bikes/PiBoSo has no Slope channel, so no grade term here -- tire is exactly
+        // the measured LongAcc with the aero contribution added back in.
+        expect(Math.abs(data.tire[i] - (data.longG[i] + data.aero[i]))).toBeLessThan(1e-6);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(5);
   });
 });

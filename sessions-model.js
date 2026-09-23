@@ -14,6 +14,12 @@
   // sessions-storage.js. Mirrored into appMetadata and every export bundle.
   const SCHEMA_VERSION = '1.0';
 
+  // The one place the default display name for a device-local user (no login, so no real
+  // name) is spelled out. sessions-services.js's UserService is the only other file that
+  // reads it -- everything else with a user's name gets it from a User record, never from
+  // this default directly.
+  const DEFAULT_LOCAL_USER_NAME = 'Anonymous User';
+
   // Prefixes keep raw IDs readable in exported JSON and in devtools ("session_3f2a..."
   // beats a bare UUID when eyeballing a bundle).
   const ID_PREFIXES = {
@@ -87,6 +93,13 @@
    * drag areas -- and may be negative (e.g. leaning into a corner can reduce frontal area
    * versus sitting upright).
    *
+   * cg_height_delta_*_m/cg_position_delta_*_m are the same idea applied to weight-transfer
+   * geometry instead of drag: DELTAS added to the vehicle's own cg_height_m/cg_position_m
+   * for that riding position (e.g. sitting up under braking raises the combined CG; tucking
+   * lowers it), one pair per position -- tucked, braking, and hanging off. cg_lateral_hangoff_m
+   * is the rider's sideways displacement when hanging off; captured for a future left/right
+   * load split (this app currently only computes front/rear, so it isn't consumed yet).
+   *
    * @typedef {Object} Rider
    * @property {string} id
    * @property {string} name
@@ -96,6 +109,13 @@
    * @property {number} [cda_tucked_m2]    additive to Vehicle.cda_m2
    * @property {number} [cda_braking_m2]   additive to Vehicle.cda_m2
    * @property {number} [cda_cornering_m2] additive to Vehicle.cda_m2
+   * @property {number} [cg_height_delta_tucked_m]     additive to Vehicle.cg_height_m
+   * @property {number} [cg_position_delta_tucked_m]   additive to Vehicle.cg_position_m
+   * @property {number} [cg_height_delta_braking_m]    additive to Vehicle.cg_height_m
+   * @property {number} [cg_position_delta_braking_m]  additive to Vehicle.cg_position_m
+   * @property {number} [cg_height_delta_hangoff_m]    additive to Vehicle.cg_height_m
+   * @property {number} [cg_position_delta_hangoff_m]  additive to Vehicle.cg_position_m
+   * @property {number} [cg_lateral_hangoff_m]         sideways CG displacement when hanging off (not yet consumed)
    * @property {string[]} [tags]
    * @property {string} created_at
    * @property {string} updated_at
@@ -129,10 +149,11 @@
    * @property {number[]} [gear_ratios]
    * @property {string} [tire_size]            metric size like "140/70R17"; when it parses, wheel_circumference_m is derived from it
    * @property {number} [wheel_circumference_m]
+   * @property {number} [efficiency_pct]       drivetrain efficiency, 0-100; omitted defaults to 95 at consumption
    *
    * @typedef {Object} Vehicle
    * @property {string} id
-   * @property {string} type          "motorcycle" | "car" | "kart" | ...
+   * @property {string} type          "basic" | "motorcycle" | "car" | "kart" | ...
    * @property {string} [make]
    * @property {string} [model]
    * @property {number} [year]
@@ -141,6 +162,12 @@
    * @property {number} [avg_power_kw]
    * @property {PowerCurvePoint[]} [power_curve]
    * @property {Gearing} [gearing]
+   * @property {number} [cg_height_m]       centre-of-gravity height above the ground, upright
+   * @property {number} [cg_position_m]     centre-of-gravity distance from the front axle/wheel
+   * @property {number} [wheelbase_m]
+   * @property {number} [cop_height_m]      aerodynamic centre of pressure height above the ground
+   * @property {number} [max_lat_g]         simulated max lateral grip, g
+   * @property {number} [max_long_g]        simulated max longitudinal (braking/drive) grip, g
    * @property {string[]} [tags]
    * @property {Record<string, any>} [metadata]
    * @property {string} created_at
@@ -606,6 +633,8 @@
     // Optional; blank/0 means an instantaneous shift.
     const shiftMs = toPositiveNumberOrUndefined(raw.shift_time_ms);
     if (shiftMs !== undefined) gearing.shift_time_ms = shiftMs;
+    const efficiency = toPositiveNumberOrUndefined(raw.efficiency_pct);
+    if (efficiency !== undefined) gearing.efficiency_pct = efficiency;
     return Object.keys(gearing).length ? gearing : undefined;
   }
 
@@ -635,7 +664,16 @@
       // Additive CdA deltas for specific riding positions, layered on top of the
       // vehicle's own cda_m2 -- see toFiniteNumberOrUndefined for why these may be
       // negative. Each is independently optional.
-      ['cda_tucked_m2', 'cda_braking_m2', 'cda_cornering_m2'].forEach((field) => {
+      [
+        'cda_tucked_m2', 'cda_braking_m2', 'cda_cornering_m2',
+        // Same idea for weight-transfer geometry: additive deltas onto the vehicle's own
+        // cg_height_m/cg_position_m, one pair per riding position, plus the hang-off
+        // lateral displacement (not yet consumed -- see the typedef above).
+        'cg_height_delta_tucked_m', 'cg_position_delta_tucked_m',
+        'cg_height_delta_braking_m', 'cg_position_delta_braking_m',
+        'cg_height_delta_hangoff_m', 'cg_position_delta_hangoff_m',
+        'cg_lateral_hangoff_m'
+      ].forEach((field) => {
         const value = toFiniteNumberOrUndefined(obj[field]);
         if (value === undefined) delete obj[field]; else obj[field] = value;
       });
@@ -678,6 +716,25 @@
 
       const gearing = normalizeGearing(obj.gearing);
       if (gearing) obj.gearing = gearing; else delete obj.gearing;
+
+      // Weight-transfer geometry, all optional and independent of each other -- computing
+      // wheel/axle loads just needs mass, cg_height_m, cg_position_m and wheelbase_m;
+      // cop_height_m only adds the aerodynamic pitching contribution on top of that.
+      const cgHeight = toPositiveNumberOrUndefined(obj.cg_height_m);
+      if (cgHeight === undefined) delete obj.cg_height_m; else obj.cg_height_m = cgHeight;
+      const cgPosition = toPositiveNumberOrUndefined(obj.cg_position_m);
+      if (cgPosition === undefined) delete obj.cg_position_m; else obj.cg_position_m = cgPosition;
+      const wheelbase = toPositiveNumberOrUndefined(obj.wheelbase_m);
+      if (wheelbase === undefined) delete obj.wheelbase_m; else obj.wheelbase_m = wheelbase;
+      const copHeight = toPositiveNumberOrUndefined(obj.cop_height_m);
+      if (copHeight === undefined) delete obj.cop_height_m; else obj.cop_height_m = copHeight;
+
+      // Simulated grip limits -- shared by every vehicle type now (previously only typed
+      // into the Simulate panel), so a saved vehicle carries its own without retyping it.
+      const maxLat = toPositiveNumberOrUndefined(obj.max_lat_g);
+      if (maxLat === undefined) delete obj.max_lat_g; else obj.max_lat_g = maxLat;
+      const maxLong = toPositiveNumberOrUndefined(obj.max_long_g);
+      if (maxLong === undefined) delete obj.max_long_g; else obj.max_long_g = maxLong;
       return obj;
     },
     setups(raw) {
@@ -832,6 +889,7 @@
 
   const api = {
     SCHEMA_VERSION,
+    DEFAULT_LOCAL_USER_NAME,
     ID_PREFIXES,
     NOTE_TYPES,
     NOTE_ICON_SVG,

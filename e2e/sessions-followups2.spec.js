@@ -176,7 +176,7 @@ test.describe('sessions: hover marker, pin placement, event ordering, author nam
     const authorInput = page.locator('#authorNameInput');
     await authorInput.fill('   ');
     await authorInput.blur();
-    await expect(authorInput).toHaveValue('This device');
+    await expect(authorInput).toHaveValue('Anonymous User');
   });
 
   test('Pick Uploaded Data can load every file in a session at once', async ({ page }) => {

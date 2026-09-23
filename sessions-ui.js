@@ -595,7 +595,12 @@
       const v = existingVehicle || {};
       const gearing = v.gearing || {};
 
+      // "Basic" is the simplest profile: just the friction-circle/average-power fields
+      // (mass, CdA, average power, max lateral/longitudinal grip) and nothing else -- no
+      // gearing, power curve or weight-transfer geometry, which all need more than a
+      // Basic vehicle is meant to carry. See updateVehicleTypeVisibility below.
       const typeSelect = el('select', { class: 'session-modal-select' }, [
+        option('basic', 'Basic', v.type === 'basic'),
         option('motorcycle', 'Motorcycle', v.type === 'motorcycle' || !isEdit),
         option('car', 'Car', v.type === 'car'),
         option('kart', 'Kart', v.type === 'kart'),
@@ -609,6 +614,12 @@
       if (v.mass_kg != null) massInput.value = v.mass_kg;
       const cdaInput = numberField('CdA, m² (optional)');
       if (v.cda_m2 != null) cdaInput.value = v.cda_m2;
+      // Simulated grip limits -- one vehicle-level pair used for every simulation of it
+      // (previously typed fresh into the Simulate panel each time).
+      const maxLatInput = numberField('Max lateral grip, g (optional)', '0.05');
+      if (v.max_lat_g != null) maxLatInput.value = v.max_lat_g;
+      const maxLongInput = numberField('Max longitudinal grip, g (optional)', '0.05');
+      if (v.max_long_g != null) maxLongInput.value = v.max_long_g;
       const avgPowerInput = numberField('Average power, kW (optional)');
       if (v.avg_power_kw != null) avgPowerInput.value = v.avg_power_kw;
 
@@ -667,7 +678,23 @@
       // when the extra drive gained outweighs the down + up shift time.
       const shiftTimeInput = numberField('Shift time, ms (e.g. 100)');
       if (gearing.shift_time_ms != null) shiftTimeInput.value = gearing.shift_time_ms;
+      // Only meaningful with a power curve/gearing to apply it to, so it lives here
+      // rather than as a per-run Simulate panel field.
+      const efficiencyInput = numberField('Drivetrain efficiency, % (e.g. 95)', '1');
+      if (gearing.efficiency_pct != null) efficiencyInput.value = gearing.efficiency_pct;
       const tireDiameterEl = el('div', { class: 'session-modal-hint' });
+
+      // Weight-transfer geometry, all optional and independent of each other (see the
+      // (?) explainer in the Simulate panel for the formulas and what each one feeds).
+      // cg_position_m is measured from the FRONT axle/wheel, not the rear.
+      const cgHeightInput = numberField('CG height, m');
+      if (v.cg_height_m != null) cgHeightInput.value = v.cg_height_m;
+      const cgPositionInput = numberField('CG position from front, m');
+      if (v.cg_position_m != null) cgPositionInput.value = v.cg_position_m;
+      const wheelbaseInput = numberField('Wheelbase, m');
+      if (v.wheelbase_m != null) wheelbaseInput.value = v.wheelbase_m;
+      const copHeightInput = numberField('Center of pressure height, m');
+      if (v.cop_height_m != null) copHeightInput.value = v.cop_height_m;
       function updateTireDiameter() {
         const text = tireSizeInput.value.trim();
         const parsed = text && Model && Model.parseTireSize ? Model.parseTireSize(text) : null;
@@ -697,6 +724,7 @@
             return;
           }
           saveBtn.disabled = true;
+          const isBasic = typeSelect.value === 'basic';
           const payload = {
             type: typeSelect.value,
             make: makeInput.value.trim() || undefined,
@@ -705,12 +733,22 @@
             mass_kg: readNumber(massInput),
             cda_m2: readNumber(cdaInput),
             avg_power_kw: readNumber(avgPowerInput),
-            power_curve: parsePowerCurveText(powerCurveInput.value, curveMode),
-            gearing: {
+            max_lat_g: readNumber(maxLatInput),
+            max_long_g: readNumber(maxLongInput),
+            // A Basic vehicle never carries gearing/a power curve/weight-transfer geometry,
+            // even if some was typed in before switching the type to Basic -- otherwise
+            // switching back and forth would silently resurrect stale hidden values.
+            power_curve: isBasic ? [] : parsePowerCurveText(powerCurveInput.value, curveMode),
+            cg_height_m: isBasic ? undefined : readNumber(cgHeightInput),
+            cg_position_m: isBasic ? undefined : readNumber(cgPositionInput),
+            wheelbase_m: isBasic ? undefined : readNumber(wheelbaseInput),
+            cop_height_m: isBasic ? undefined : readNumber(copHeightInput),
+            gearing: isBasic ? {} : {
               primary_ratio: readNumber(primaryRatioInput),
               final_ratio: readNumber(finalRatioInput),
               gear_ratios: gearRatiosInput.value.split(',').map((s) => s.trim()).filter(Boolean),
               shift_time_ms: readNumber(shiftTimeInput),
+              efficiency_pct: readNumber(efficiencyInput),
               tire_size: tireText || undefined,
               // Legacy vehicles with no tire size keep their stored circumference.
               wheel_circumference_m: tireText ? undefined : gearing.wheel_circumference_m
@@ -728,6 +766,27 @@
         }
       });
 
+      // Hidden entirely for a Basic vehicle (see typeSelect above) -- power curve, gearing
+      // and weight-transfer geometry all need more than Basic is meant to carry.
+      const powerCurveSection = el('div', {}, [curveModeRow, powerCurveInput, powerCurveChart]);
+      const gearingSection = el('div', {}, [
+        el('div', { class: 'session-modal-subheading', text: 'Gearing (optional)' }),
+        el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, tireSizeInput, shiftTimeInput, efficiencyInput]),
+        tireDiameterEl
+      ]);
+      const weightTransferSection = el('div', {}, [
+        el('div', { class: 'session-modal-subheading', text: 'Weight Transfer (optional)' }),
+        el('div', { class: 'session-modal-hint', text: 'For simulated wheel/axle loads -- see the (?) next to Simulate Vehicle for what each one does.' }),
+        el('div', { class: 'session-modal-new-fields' }, [cgHeightInput, cgPositionInput, wheelbaseInput, copHeightInput])
+      ]);
+      function updateVehicleTypeVisibility() {
+        const basic = typeSelect.value === 'basic';
+        powerCurveSection.hidden = basic;
+        gearingSection.hidden = basic;
+        weightTransferSection.hidden = basic;
+      }
+      typeSelect.addEventListener('change', updateVehicleTypeVisibility);
+
       const overlay = el('div', { class: 'session-modal' }, [
         el('div', { class: 'session-modal-backdrop', onclick: () => overlay.remove() }),
         el('div', { class: 'session-modal-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': isEdit ? 'Edit vehicle' : 'Add vehicle' }, [
@@ -739,13 +798,10 @@
           el('div', { class: 'session-modal-new-fields' }, [makeInput, modelInput, yearInput]),
           el('div', { class: 'session-modal-subheading', text: 'Physics (all optional)' }),
           el('div', { class: 'session-modal-hint', text: 'Used for later performance/drag estimates -- leave blank if unknown.' }),
-          el('div', { class: 'session-modal-new-fields' }, [massInput, cdaInput, avgPowerInput]),
-          curveModeRow,
-          powerCurveInput,
-          powerCurveChart,
-          el('div', { class: 'session-modal-subheading', text: 'Gearing (optional)' }),
-          el('div', { class: 'session-modal-new-fields' }, [primaryRatioInput, finalRatioInput, gearRatiosInput, tireSizeInput, shiftTimeInput]),
-          tireDiameterEl,
+          el('div', { class: 'session-modal-new-fields' }, [massInput, cdaInput, avgPowerInput, maxLatInput, maxLongInput]),
+          powerCurveSection,
+          gearingSection,
+          weightTransferSection,
           statusEl,
           el('div', { class: 'session-modal-actions' }, [
             el('button', { type: 'button', class: 'session-modal-cancel', text: 'Cancel', onclick: () => overlay.remove() }),
@@ -753,6 +809,7 @@
           ])
         ])
       ]);
+      updateVehicleTypeVisibility();
       document.body.appendChild(overlay);
       updateCurveChart(); // only meaningful now that powerCurveChart has real layout
       makeInput.focus();
@@ -778,6 +835,25 @@
       if (r.cda_braking_m2 != null) cdaBrakingInput.value = r.cda_braking_m2;
       const cdaCorneringInput = numberField('Cornering ΔCdA, m²');
       if (r.cda_cornering_m2 != null) cdaCorneringInput.value = r.cda_cornering_m2;
+
+      // Same idea as the CdA deltas above, applied to weight-transfer geometry instead of
+      // drag: each pair is ADDED to the vehicle's own CG height/position for that riding
+      // position. The simulation picks tucked/braking/hangoff automatically per point
+      // (accelerating vs braking, or a significant lean) -- see computeRiderCgDeltas.
+      const cgHeightTuckedInput = numberField('Tucked ΔCG height, m');
+      if (r.cg_height_delta_tucked_m != null) cgHeightTuckedInput.value = r.cg_height_delta_tucked_m;
+      const cgPositionTuckedInput = numberField('Tucked ΔCG position, m');
+      if (r.cg_position_delta_tucked_m != null) cgPositionTuckedInput.value = r.cg_position_delta_tucked_m;
+      const cgHeightBrakingInput = numberField('Braking ΔCG height, m');
+      if (r.cg_height_delta_braking_m != null) cgHeightBrakingInput.value = r.cg_height_delta_braking_m;
+      const cgPositionBrakingInput = numberField('Braking ΔCG position, m');
+      if (r.cg_position_delta_braking_m != null) cgPositionBrakingInput.value = r.cg_position_delta_braking_m;
+      const cgHeightHangoffInput = numberField('Hang-off ΔCG height, m');
+      if (r.cg_height_delta_hangoff_m != null) cgHeightHangoffInput.value = r.cg_height_delta_hangoff_m;
+      const cgPositionHangoffInput = numberField('Hang-off ΔCG position, m');
+      if (r.cg_position_delta_hangoff_m != null) cgPositionHangoffInput.value = r.cg_position_delta_hangoff_m;
+      const cgLateralHangoffInput = numberField('Hang-off lateral displacement, m');
+      if (r.cg_lateral_hangoff_m != null) cgLateralHangoffInput.value = r.cg_lateral_hangoff_m;
       const statusEl = el('div', { class: 'session-modal-status' });
 
       const saveBtn = el('button', {
@@ -794,7 +870,14 @@
             experience: experienceInput.value.trim() || undefined,
             cda_tucked_m2: readNumber(cdaTuckedInput),
             cda_braking_m2: readNumber(cdaBrakingInput),
-            cda_cornering_m2: readNumber(cdaCorneringInput)
+            cda_cornering_m2: readNumber(cdaCorneringInput),
+            cg_height_delta_tucked_m: readNumber(cgHeightTuckedInput),
+            cg_position_delta_tucked_m: readNumber(cgPositionTuckedInput),
+            cg_height_delta_braking_m: readNumber(cgHeightBrakingInput),
+            cg_position_delta_braking_m: readNumber(cgPositionBrakingInput),
+            cg_height_delta_hangoff_m: readNumber(cgHeightHangoffInput),
+            cg_position_delta_hangoff_m: readNumber(cgPositionHangoffInput),
+            cg_lateral_hangoff_m: readNumber(cgLateralHangoffInput)
           };
           const save = isEdit ? RiderService.updateRider(r.id, payload) : RiderService.createRider(payload);
           save.then((rider) => {
@@ -824,6 +907,17 @@
               + 'e.g. leaning into a corner can reduce frontal area versus sitting upright. Leave blank if unknown.'
           }),
           el('div', { class: 'session-modal-new-fields' }, [cdaTuckedInput, cdaBrakingInput, cdaCorneringInput]),
+          el('div', { class: 'session-modal-subheading', text: 'Weight Transfer (all optional)' }),
+          el('div', {
+            class: 'session-modal-hint',
+            text: 'Each pair is ADDED to the vehicle’s own CG height/position for that riding position -- e.g. '
+              + 'sitting up under braking raises the combined CG. The simulation picks tucked, braking or hanging '
+              + 'off automatically at each point. Hang-off lateral displacement is stored but not used in any '
+              + 'calculation yet (this app only computes front/rear, not left/right).'
+          }),
+          el('div', { class: 'session-modal-new-fields' }, [cgHeightTuckedInput, cgPositionTuckedInput]),
+          el('div', { class: 'session-modal-new-fields' }, [cgHeightBrakingInput, cgPositionBrakingInput]),
+          el('div', { class: 'session-modal-new-fields' }, [cgHeightHangoffInput, cgPositionHangoffInput, cgLateralHangoffInput]),
           statusEl,
           el('div', { class: 'session-modal-actions' }, [
             el('button', { type: 'button', class: 'session-modal-cancel', text: 'Cancel', onclick: () => overlay.remove() }),
