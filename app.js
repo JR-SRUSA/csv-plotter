@@ -113,11 +113,15 @@
   const tempProfilePlotsList = document.getElementById('tempProfilePlotsList');
   const tempProfileHiddenHint = document.getElementById('tempProfileHiddenHint');
   const dataFiltersEnabledInput = document.getElementById('dataFiltersEnabled');
+  const dataFiltersControls = document.querySelector('.data-filters-controls');
   const addDataFilterBtn = document.getElementById('addDataFilterBtn');
   const dataFiltersList = document.getElementById('dataFiltersList');
   const dataFilterForm = document.getElementById('dataFilterForm');
   const dataFilterChannelSelect = document.getElementById('dataFilterChannel');
   const dataFilterRangeHint = document.getElementById('dataFilterRangeHint');
+  const dataFilterModeToggle = document.getElementById('dataFilterModeToggle');
+  const dataFilterModeRangeInput = document.getElementById('dataFilterModeRange');
+  const dataFilterModeDiscreteInput = document.getElementById('dataFilterModeDiscrete');
   const dataFilterRangeField = document.getElementById('dataFilterRangeField');
   const dataFilterMinInput = document.getElementById('dataFilterMin');
   const dataFilterMaxInput = document.getElementById('dataFilterMax');
@@ -416,8 +420,35 @@
   const TEMP_PROFILE_MAIN_MIN_HEIGHT_PX = 120;
   let tempProfileRowsHeightPx = TEMP_PROFILE_ROWS_DEFAULT_HEIGHT_PX;
   const TEMP_PROFILE_MULTI_LAP_OPACITY = 0.6;
-  let lastIncludeTimeSlipForTempResize = false; // refreshed each updatePlot(), read by the drag handle
+  let lastIncludeTimeSlipForResize = false; // refreshed each updatePlot(), read by both drag handles below
   let tempProfileResizeHandleEl = null;
+
+  // Mobile has no drag handle (desktop-only, like the temp-profile/Time-Slip resize handles
+  // above), so tempProfileRowsHeightPx's draggable-preference approach doesn't apply there --
+  // instead each active plot gets a height sized to its own channel count, and the *total*
+  // figure height (getFigureHeight) grows to fit rather than squeezing everything into a
+  // fixed mobile budget. The page already scrolls normally on mobile (only the >=981px
+  // breakpoint pins body/main to the viewport), so a taller figure just becomes scrollable.
+  const MOBILE_TEMP_PLOT_ROW_HEIGHT_PX = 26;
+  const MOBILE_TEMP_PLOT_MIN_HEIGHT_PX = 70;
+  function computeMobileTempPlotsHeightPx(tempPlots) {
+    return (tempPlots || []).reduce((sum, p) => {
+      const rows = Array.isArray(p.channels) ? p.channels.length : 0;
+      return sum + Math.max(MOBILE_TEMP_PLOT_MIN_HEIGHT_PX, rows * MOBILE_TEMP_PLOT_ROW_HEIGHT_PX);
+    }, 0);
+  }
+
+  // Time Slip's own draggable height, same idea/mechanics as the temp-profile-plots block
+  // above -- see ensureTimeSlipResizeHandle/positionTimeSlipResizeHandle near buildLayout.
+  const TIME_SLIP_HEIGHT_KEY = 'timeSlipHeightPx';
+  const TIME_SLIP_DEFAULT_HEIGHT_PX = 150;
+  const TIME_SLIP_MIN_HEIGHT_PX = 80;
+  let timeSlipHeightPx = TIME_SLIP_DEFAULT_HEIGHT_PX;
+  let timeSlipResizeHandleEl = null;
+
+  // "Shaded area between all laps" (shadeLaps checkbox) -- defaults to checked in the HTML
+  // (see index.html); persisted so an explicit choice survives reload.
+  const SHADE_LAPS_STORAGE_KEY = 'shadeLapsEnabled';
 
   // Curated colormap stop tables, extracted verbatim from this app's own bundled
   // plotly.js-cartesian-dist (node_modules/plotly.js-cartesian-dist/plotly-cartesian.js)
@@ -433,6 +464,12 @@
     RdBu: [[0,'rgb(5,10,172)'],[0.35,'rgb(106,137,247)'],[0.5,'rgb(190,190,190)'],[0.6,'rgb(220,170,132)'],[0.7,'rgb(230,145,90)'],[1,'rgb(178,10,28)']]
   };
   const TEMP_COLORMAP_NAMES = ['Jet', 'Rainbow', 'Hot', 'Portland', 'Electric', 'Viridis', 'RdBu'];
+
+  // Hovering a lap row in the sidebar laps list temporarily previews that lap's traces on
+  // the plot even when it isn't checked -- cleared on mouseleave. See renderLapsList's
+  // .lap-item hover wiring and the isPreviewOnly check in updatePlot()'s main trace loop.
+  let hoverPreviewLap = null; // { fileId, lap } | null
+  let hoverPreviewTimer = null;
 
   // Quick modify state
   const QUICK_MOD_PREVIEW_PREFIX = 'Quick Mod: ';
@@ -4100,6 +4137,16 @@
     return masterEnabled ? dataFilters.filter(f => f.enabled) : [];
   }
 
+  // Dims the filter list/form/Add button (but leaves them fully interactive) whenever the
+  // master "Data Filters:" checkbox is off, so a filter that's individually checked but
+  // silently having no effect (the master toggle gates all of them) is visually obvious
+  // instead of an easy-to-miss unchecked checkbox sitting next to a bunch of checked ones.
+  function syncDataFiltersEnabledVisual() {
+    if (!dataFiltersControls) return;
+    const masterEnabled = !!(dataFiltersEnabledInput && dataFiltersEnabledInput.checked);
+    dataFiltersControls.classList.toggle('is-filters-disabled', !masterEnabled);
+  }
+
   // Resolves each filter's channel against this specific log once, dropping any filter
   // whose channel doesn't exist here -- a filter only constrains files that have the
   // channel it names, same as the color axis and math channel resolution elsewhere.
@@ -4227,25 +4274,67 @@
     )).join('');
   }
 
+  // The classification computed for the currently-selected filter channel -- set by
+  // updateDataFilterFormForChannel, read by handleDataFilterModeToggleChange and the Save
+  // handler so they don't need to recompute it.
+  let dataFilterFormClassification = null;
+
+  function applyDataFilterModeVisibility(isDiscreteMode) {
+    if (dataFilterRangeField) dataFilterRangeField.hidden = isDiscreteMode;
+    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = !isDiscreteMode;
+  }
+
+  // Reacts to the user flipping the Range/Specific-values toggle (only shown for numeric
+  // channels whose distinct-value count is low enough that classification defaults to
+  // "discrete" -- see updateDataFilterFormForChannel). Doesn't touch the toggle's own
+  // checked state; only re-renders which fields are visible for whatever it's now set to.
+  function handleDataFilterModeToggleChange() {
+    if (!dataFilterModeToggle || dataFilterModeToggle.hidden) return;
+    const isDiscreteMode = !!(dataFilterModeDiscreteInput && dataFilterModeDiscreteInput.checked);
+    applyDataFilterModeVisibility(isDiscreteMode);
+    if (isDiscreteMode && dataFilterFormClassification) populateDataFilterValuesSelect(dataFilterFormClassification);
+  }
+
   // Single entry point for reacting to a channel pick in the filter form: reclassifies the
   // channel, swaps between the range fields and the discrete multiselect, and updates the
   // hint line. Called on channel change and whenever the form is opened (add or edit).
+  //
+  // classifyColorAxisValues (shared with the color-by-channel legend) treats any channel
+  // with few distinct values as "discrete" -- the right call for a legend grouping Gear or
+  // Lap Number, but wrong for a genuinely continuous physical channel (Speed, lateral
+  // acceleration) that just happens to have coarse sensor-resolution quantization: forcing
+  // it into a "pick individual values" multiselect instead of Min/Max silently breaks what
+  // most users expect a numeric filter to do. Range filtering only makes sense for numeric
+  // data in the first place (rowPassesDataFilters' range branch does Number(raw), which
+  // would filter out every row of a text channel) -- so: non-numeric channels stay
+  // discrete-only exactly as before, numeric-and-clearly-continuous channels stay
+  // range-only exactly as before, and only the ambiguous case (numeric but few distinct
+  // values) gets a toggle so the user can choose instead of having it decided for them.
   function updateDataFilterFormForChannel() {
     const channel = dataFilterChannelSelect ? dataFilterChannelSelect.value : '';
     const classification = channel ? computeDataFilterChannelClassification(channel) : null;
+    dataFilterFormClassification = classification;
 
-    const isDiscrete = !!(classification && classification.kind === 'discrete');
-    if (dataFilterRangeField) dataFilterRangeField.hidden = isDiscrete;
-    if (dataFilterDiscreteField) dataFilterDiscreteField.hidden = !isDiscrete;
+    const isNumeric = !!(classification && classification.allNumeric);
+    const classifiedDiscrete = !!(classification && classification.kind === 'discrete');
+    const ambiguous = isNumeric && classifiedDiscrete;
 
-    if (isDiscrete) {
-      populateDataFilterValuesSelect(classification);
+    if (dataFilterModeToggle) dataFilterModeToggle.hidden = !ambiguous;
+    if (ambiguous) {
+      if (dataFilterModeRangeInput) dataFilterModeRangeInput.checked = false;
+      if (dataFilterModeDiscreteInput) dataFilterModeDiscreteInput.checked = true;
     }
 
+    const isDiscreteMode = classifiedDiscrete; // toggle (when shown) starts on this same default
+    applyDataFilterModeVisibility(isDiscreteMode);
+    if (isDiscreteMode && classification) populateDataFilterValuesSelect(classification);
+
     if (!dataFilterRangeHint) return;
-    if (isDiscrete) {
+    if (classifiedDiscrete) {
       const n = classification.categories.length;
-      dataFilterRangeHint.textContent = `Discrete channel — ${n} distinct value${n === 1 ? '' : 's'}`;
+      dataFilterRangeHint.textContent = ambiguous
+        ? `${n} distinct value${n === 1 ? '' : 's'} — filter by range or specific values above.`
+        : `Discrete channel — ${n} distinct value${n === 1 ? '' : 's'}`;
     } else if (classification) {
       dataFilterRangeHint.textContent =
         `Data range: ${formatDataFilterHintNumber(classification.min)} – ${formatDataFilterHintNumber(classification.max)}`;
@@ -4979,6 +5068,16 @@
     return result;
   }
 
+  // First and last lap (by lap number) of a file are conventionally the out-lap and
+  // in-lap -- unchecked by default in the lap list (renderLapsList) and always excluded
+  // from the "Shaded area between all laps" envelope (below), since neither is a
+  // representative racing lap. Only applied once there are >=3 laps so a 1-2 lap file isn't
+  // left with nothing to show. sortedLapNums must already be sorted ascending.
+  function getInOutLapNumbers(sortedLapNums) {
+    if (!Array.isArray(sortedLapNums) || sortedLapNums.length < 3) return new Set();
+    return new Set([sortedLapNums[0], sortedLapNums[sortedLapNums.length - 1]]);
+  }
+
   function renderLapsList() {
     const container = document.getElementById('lapsList');
     if (!container) return;
@@ -5027,23 +5126,36 @@
         `</span>` +
         `</div><div class="laps-col">`
       );
-      const totalFileLaps = fileLaps.length;
       const negativeDistLaps = getLapsWithNegativeDistance(log.meta);
-      fileLaps.forEach((n, idx) => {
+      const inOutLapNums = getInOutLapNumbers(fileLaps);
+      // Only the single fastest eligible lap (excluding in/out laps and any lap with
+      // negative distance, e.g. a pit-lane pass) is checked by default -- everything else
+      // starts unchecked, so a freshly-loaded file opens on just its best representative
+      // lap instead of every lap at once. Falls back to the first eligible lap if none
+      // have a usable duration, so something is still shown by default when possible.
+      let defaultCheckedLap = null;
+      let fastestDuration = Infinity;
+      fileLaps.forEach((n) => {
+        if (inOutLapNums.has(n) || negativeDistLaps.has(n)) return;
+        const dur = getLapDuration(log.meta, n);
+        if (Number.isFinite(dur) && dur < fastestDuration) {
+          fastestDuration = dur;
+          defaultCheckedLap = n;
+        } else if (defaultCheckedLap === null) {
+          defaultCheckedLap = n;
+        }
+      });
+      fileLaps.forEach((n) => {
         const color = getLapColor(log.id, n);
         const dur = getLapDuration(log.meta, n);
         const lapLabel = `${n} - ${formatLapTime(dur)}`;
-        // Uncheck first and last lap (in/out laps) when there are 3 or more laps, and any
-        // lap containing negative lap distance (e.g. a pit-lane pass) -- still selectable,
-        // just not shown by default.
-        const isInOutLap = totalFileLaps >= 3 && (idx === 0 || idx === totalFileLaps - 1);
         const hasNegativeDistance = negativeDistLaps.has(n);
-        const checkedAttr = (isInOutLap || hasNegativeDistance) ? '' : ' checked';
+        const checkedAttr = (n === defaultCheckedLap) ? ' checked' : '';
         const warningBadge = hasNegativeDistance
           ? ` <span class="lap-warning" title="Contains negative lap distance (e.g. a pit-lane pass) -- unchecked by default">⚠</span>`
           : '';
         html.push(
-          `<div class="lap-item">` +
+          `<div class="lap-item" data-id="${log.id}" data-lap="${n}">` +
           `<label class="lap-toggle"><input type="checkbox" data-id="${log.id}" data-lap="${n}"${checkedAttr} style="accent-color:${color};" /> <span class="lap-label" style="color:${color}">${lapLabel}</span>${warningBadge}</label>` +
           `<input type="color" class="lap-color-input" data-id="${log.id}" data-lap="${n}" value="${color}" aria-label="Color for lap ${n} (${escapeHtml(log.name)})" />` +
           `</div>`
@@ -5065,11 +5177,16 @@
       if (!result.has(fileId)) result.set(fileId, new Set());
       result.get(fileId).add(lap);
     });
+    // isLapSelected's "nothing rendered yet, don't filter" fallback needs to tell an empty
+    // Map apart from "the lap list hasn't rendered any checkboxes at all" -- an empty Map
+    // alone is ambiguous between those two (e.g. the user deliberately unchecked every lap
+    // via the per-file "None" button, which must still filter everything out).
+    result.hadAnyCheckboxes = checks.length > 0;
     return result;
   }
 
   function isLapSelected(selectedLaps, fileId, lap) {
-    if (selectedLaps.size === 0) return true; // nothing filtered
+    if (!selectedLaps.hadAnyCheckboxes) return true; // lap list not rendered yet -- nothing filtered
     const fileLaps = selectedLaps.get(fileId);
     return fileLaps ? fileLaps.has(lap) : false;
   }
@@ -7534,7 +7651,7 @@
     return {channelToRef, axisLayout, marginLeft, marginRight};
   }
 
-  function getFigureHeight(includeTimeSlip) {
+  function getFigureHeight(includeTimeSlip, tempPlots) {
     const mobile = window.innerWidth <= 980;
     if (!mobile) {
       const viewportHeight = Math.max(600, window.innerHeight || 900);
@@ -7548,10 +7665,14 @@
       const maxHeight = Math.round(viewportHeight * 0.9);
       return Math.max(minHeight, Math.min(target, maxHeight));
     }
-    // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh.
+    // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh. Active
+    // temp-profile plots (no drag handle on mobile to trade space with) each add their own
+    // content-sized height on top rather than squeezing into that fixed budget -- see
+    // computeMobileTempPlotsHeightPx.
     const main = Math.max(200, Math.round(window.innerHeight * 0.33));
-    const timeSlip = Math.max(160, Math.round(window.innerHeight * 0.25));
-    return includeTimeSlip ? (main + timeSlip) : main;
+    const timeSlip = includeTimeSlip ? Math.max(160, Math.round(window.innerHeight * 0.25)) : 0;
+    const tempPlotsHeight = computeMobileTempPlotsHeightPx(tempPlots);
+    return main + timeSlip + tempPlotsHeight;
   }
 
   function getMapFigureHeight() {
@@ -9733,7 +9854,7 @@
 
     function onMove(ev) {
       const dy = ev.clientY - dragStartY;
-      const totalHeight = getFigureHeight(lastIncludeTimeSlipForTempResize);
+      const totalHeight = getFigureHeight(lastIncludeTimeSlipForResize);
       const maxAllowedPx = Math.max(TEMP_PROFILE_ROWS_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX);
       // Handle sits above the temp-profile block: dragging down grows the main plot and
       // shrinks the block.
@@ -9786,27 +9907,140 @@
     handle.style.top = `${Math.round(topPx)}px`;
   }
 
+  // Same idea as ensureTempProfileResizeHandle above, for Time Slip's own height
+  // (timeSlipHeightPx) instead of the temp-profile block's.
+  function ensureTimeSlipResizeHandle() {
+    if (timeSlipResizeHandleEl) return timeSlipResizeHandleEl;
+    if (!plotDiv) return null;
+    const handle = document.createElement('div');
+    handle.className = 'time-slip-resize-handle';
+    handle.title = 'Drag to resize Time Slip';
+    handle.hidden = true;
+    plotDiv.appendChild(handle);
+
+    let dragStartY = 0;
+    let dragStartHeightPx = 0;
+    let rafPending = false;
+
+    function scheduleUpdate() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => { rafPending = false; updatePlot(); });
+    }
+
+    function onMove(ev) {
+      const dy = ev.clientY - dragStartY;
+      const totalHeight = getFigureHeight(lastIncludeTimeSlipForResize);
+      // The temp-profile block (if active) also draws from totalHeight -- reserve its
+      // current preference (clamped to its own floor) on top of the main plot's floor so
+      // dragging Time Slip larger can't squeeze the temp block below its own minimum.
+      const otherReserved = tempProfilePlots.some((p) => p.enabled && p.channels.length > 0)
+        ? Math.min(Math.max(tempProfileRowsHeightPx, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), totalHeight)
+        : 0;
+      const maxAllowedPx = Math.max(TIME_SLIP_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX - otherReserved);
+      // Handle sits above Time Slip: dragging down grows the main plot and shrinks Time Slip.
+      timeSlipHeightPx = Math.min(Math.max(dragStartHeightPx - dy, TIME_SLIP_MIN_HEIGHT_PX), maxAllowedPx);
+      scheduleUpdate();
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      handle.classList.remove('is-dragging');
+      document.body.style.cursor = '';
+      saveTimeSlipHeight();
+    }
+    handle.addEventListener('mousedown', (ev) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      dragStartY = ev.clientY;
+      dragStartHeightPx = timeSlipHeightPx;
+      handle.classList.add('is-dragging');
+      document.body.style.cursor = 'row-resize';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+
+    timeSlipResizeHandleEl = handle;
+    return handle;
+  }
+
+  // Positions the handle at the pixel row where the main plot's (or the temp-profile
+  // block's, when active) domain meets Time Slip's domain -- same technique as
+  // positionTempProfileResizeHandle above.
+  function positionTimeSlipResizeHandle(timeSlipDomain, includeTimeSlip) {
+    const mobile = window.innerWidth <= 980;
+    if (!includeTimeSlip || mobile || !timeSlipDomain || !plotDiv) {
+      if (timeSlipResizeHandleEl) timeSlipResizeHandleEl.hidden = true;
+      return;
+    }
+    const handle = ensureTimeSlipResizeHandle();
+    if (!handle) return;
+    plotDiv.style.position = plotDiv.style.position || 'relative';
+    const fullLayout = plotDiv._fullLayout;
+    if (!fullLayout || !Number.isFinite(fullLayout.height)) { handle.hidden = true; return; }
+    const marginT = (fullLayout.margin && Number.isFinite(fullLayout.margin.t)) ? fullLayout.margin.t : 30;
+    const marginB = (fullLayout.margin && Number.isFinite(fullLayout.margin.b)) ? fullLayout.margin.b : 80;
+    const plotAreaHeight = Math.max(0, fullLayout.height - marginT - marginB);
+    const topPx = marginT + (1 - timeSlipDomain[1]) * plotAreaHeight;
+    handle.hidden = false;
+    handle.style.top = `${Math.round(topPx)}px`;
+  }
+
   // activeTempPlots (optional): the temperature profile plots currently active (see
   // getActiveTempProfilePlots). Each gets its own xaxisN/yaxisN pair, stacked directly above
-  // Time Slip's existing domain (or above 0 if there's no Time Slip) -- Time Slip's own domain
-  // is never touched; only the main plot's domain bottom moves up to make room. The whole temp
-  // block shares one height budget (tempProfileRowsHeightPx, user-draggable -- see
-  // positionTempProfileResizeHandle), split evenly across however many plots are active.
+  // Time Slip's domain (or above 0 if there's no Time Slip) -- only the main plot's domain
+  // bottom moves up to make room. The whole temp block shares one height budget
+  // (tempProfileRowsHeightPx, user-draggable -- see positionTempProfileResizeHandle), split
+  // evenly across however many plots are active. Time Slip's own height (timeSlipHeightPx,
+  // desktop only -- see positionTimeSlipResizeHandle) is likewise user-draggable, taking
+  // space from/giving space back to the main plot the same way.
   function buildLayout(mainXTitle, ycols, includeTimeSlip, showCornerStrip, logX, logY, activeTempPlots) {
     const mobile = window.innerWidth <= 980;
     const mainDomainTop = showCornerStrip ? (CORNER_STRIP_DOMAIN[0] - CORNER_STRIP_GAP) : 1;
     const tempPlots = activeTempPlots || [];
     const multiRow = includeTimeSlip || tempPlots.length > 0;
-    const totalHeight = getFigureHeight(includeTimeSlip);
+    const totalHeight = getFigureHeight(includeTimeSlip, tempPlots);
+    const hasTempPlots = tempPlots.length > 0;
 
-    let mainDomainBottom = includeTimeSlip ? (mobile ? 0.48 : 0.23) : 0;
-    const timeSlipDomain = includeTimeSlip ? (mobile ? [0,0.43] : [0,0.20]) : null;
+    let mainDomainBottom = 0;
+    let timeSlipDomain = null;
+    if (includeTimeSlip) {
+      if (mobile) {
+        mainDomainBottom = 0.48;
+        timeSlipDomain = [0, 0.43];
+      } else {
+        // Reserve the temp-profile block's current preference (clamped to its own floor) on
+        // top of the main plot's floor, so Time Slip can't be dragged large enough to squeeze
+        // the temp block below its own minimum -- tempBlockDomain's own max calc below does
+        // the same in reverse, using this block's *actual* resolved fraction (computed first).
+        const otherReserved = hasTempPlots
+          ? Math.min(Math.max(tempProfileRowsHeightPx, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), totalHeight)
+          : 0;
+        const maxAllowedPx = Math.max(TIME_SLIP_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX - otherReserved);
+        const clampedPx = Math.min(Math.max(timeSlipHeightPx, TIME_SLIP_MIN_HEIGHT_PX), maxAllowedPx);
+        const timeSlipFraction = totalHeight > 0 ? clampedPx / totalHeight : 0;
+        timeSlipDomain = [0, timeSlipFraction];
+        // Small fixed gap for Time Slip's own x-axis tick labels, matching the historical
+        // 0.23 - 0.20 = 0.03 spacing this replaces.
+        mainDomainBottom = timeSlipFraction + 0.03;
+      }
+    }
 
     let tempBlockDomain = null;
-    if (tempPlots.length > 0) {
-      const maxAllowedPx = Math.max(TEMP_PROFILE_ROWS_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX);
-      const clampedPx = Math.min(Math.max(tempProfileRowsHeightPx, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), maxAllowedPx);
-      const tempBlockFraction = totalHeight > 0 ? clampedPx / totalHeight : 0;
+    if (hasTempPlots) {
+      // Mobile: no drag handle, so there's no "preference" to clamp -- getFigureHeight
+      // already grew totalHeight by exactly this many px (computeMobileTempPlotsHeightPx),
+      // so the fraction just divides back out to that same content-sized pixel height.
+      // Desktop: clamp the user's draggable preference against the space left after Time
+      // Slip, same as before.
+      const tempBlockPx = mobile
+        ? computeMobileTempPlotsHeightPx(tempPlots)
+        : (() => {
+          const otherReserved = timeSlipDomain ? timeSlipDomain[1] * totalHeight : 0;
+          const maxAllowedPx = Math.max(TEMP_PROFILE_ROWS_MIN_HEIGHT_PX, totalHeight - TEMP_PROFILE_MAIN_MIN_HEIGHT_PX - otherReserved);
+          return Math.min(Math.max(tempProfileRowsHeightPx, TEMP_PROFILE_ROWS_MIN_HEIGHT_PX), maxAllowedPx);
+        })();
+      const tempBlockFraction = totalHeight > 0 ? tempBlockPx / totalHeight : 0;
       const tempBlockBottom = mainDomainBottom;
       const tempBlockTop = Math.min(mainDomainTop - 0.02, tempBlockBottom + tempBlockFraction);
       tempBlockDomain = [tempBlockBottom, Math.max(tempBlockBottom, tempBlockTop)];
@@ -9826,7 +10060,7 @@
       layout.margin.l = axisCfg.marginLeft;
       layout.margin.r = axisCfg.marginRight;
       Object.assign(layout, axisCfg.axisLayout);
-      return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap: new Map(), tempBlockDomain: null};
+      return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap: new Map(), tempBlockDomain: null, timeSlipDomain: null};
     }
 
     const layout = {
@@ -9863,9 +10097,13 @@
         layout[xKey] = {domain:[0,1], anchor: `y${axisIdx}`, matches:'x', showticklabels:false, type: logX ? 'log' : 'linear'};
         // categoryarray[0] renders at the bottom of a categorical y-axis, so reverse the
         // configured order (first configured channel = top of the strip, reading order).
+        // Per-channel tick labels are hidden -- the axis title (the plot's own group name,
+        // e.g. "Rear External") already identifies what the strip is; categoryarray still
+        // controls each channel's row position even with its label not drawn.
         layout[yKey] = {
           type:'category', categoryorder:'array', categoryarray: p.channels.slice().reverse(),
-          domain: [rowBottom, rowTop], title:{text: p.name, standoff: 4}, automargin:true
+          domain: [rowBottom, rowTop], title:{text: p.name, standoff: 4}, automargin:true,
+          showticklabels: false
         };
         tempAxisMap.set(p.id, {xaxis: `x${axisIdx}`, yaxis: `y${axisIdx}`, domain: [rowBottom, rowTop]});
       });
@@ -9874,7 +10112,7 @@
     layout.margin.l = axisCfg.marginLeft;
     layout.margin.r = axisCfg.marginRight + (tempPlots.length > 0 ? 60 : 0);
     Object.assign(layout, axisCfg.axisLayout);
-    return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap, tempBlockDomain};
+    return {layout, channelToRef: axisCfg.channelToRef, mainDomainTop, tempAxisMap, tempBlockDomain, timeSlipDomain};
   }
 
   // Plotly's built-in autorange breaks catastrophically (producing a range spanning
@@ -11092,7 +11330,7 @@
     const tsBuilt = buildTimeSlipTraces(selFiles, selectedLaps, xMode);
     const tsPreview = tsBuilt.traces;
     const includeTimeSlip = tsPreview.length > 0;
-    lastIncludeTimeSlipForTempResize = includeTimeSlip;
+    lastIncludeTimeSlipForResize = includeTimeSlip;
 
     const activeTempPlots = getActiveTempProfilePlots(xMode);
     if (tempProfileHiddenHint) tempProfileHiddenHint.hidden = !(tempProfilePlots.length > 0 && xMode === 'custom');
@@ -11235,7 +11473,9 @@
       // plot each selected lap separately, x axis is Lap Time or Lap Distance
       const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
       lapNums.forEach((lap) => {
-        if (!isLapSelected(selectedLaps, log.id, lap)) return;
+        const isPreviewOnly = !!(hoverPreviewLap && hoverPreviewLap.fileId === log.id && hoverPreviewLap.lap === lap
+          && !isLapSelected(selectedLaps, log.id, lap));
+        if (!isLapSelected(selectedLaps, log.id, lap) && !isPreviewOnly) return;
         let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
         maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
         if (canColorByChannel && colorAxisContext.kind === 'discrete') {
@@ -11259,22 +11499,24 @@
           const yArr = maskIdx.map(i => log.data[i][resolvedCol]);
           const keyArr = maskIdx.map(i => rowKey(log.id, lap, i));
           const traceColor = colorMode === 'lap' ? getLapColor(log.id, lap) : (channelColors.get(y) || fileColor);
-          const dash = getLineDashForFileIndex(li);
+          const dash = isPreviewOnly ? 'dot' : getLineDashForFileIndex(li);
           const trace = {
             x: xArr,
             y: yArr,
             customdata: keyArr,
             yaxis: channelToRef.get(y) || 'y',
-            name: `${log.name} — Lap ${lap} — ${y}`,
+            name: `${log.name} — Lap ${lap} — ${y}${isPreviewOnly ? ' (preview)' : ''}`,
             mode: traceMode,
             marker:{color: traceColor},
             line:{color: traceColor, dash},
             hovertemplate: buildHoverTemplate(mainXTitle, getChannelLabel(y)),
             // Consumed by the box/lasso selection stats panel to label + color each
             // fit line; overlay traces (shading, race-line curvature, etc.) intentionally
-            // don't set this so they're excluded from selection fitting.
-            meta: {channel: y, color: traceColor}
+            // don't set this so they're excluded from selection fitting -- a hover preview
+            // is exactly that kind of transient overlay, so it's excluded too.
+            meta: isPreviewOnly ? undefined : {channel: y, color: traceColor}
           };
+          if (isPreviewOnly) trace.opacity = 0.55;
           if (colorRawArr) {
             applyColorAxisToTrace(trace, colorRawArr, colorAxisContext, colorAxisChannel, !colorAxisScaleShown);
             trace.hovertemplate = buildHoverTemplate(mainXTitle, getChannelLabel(y), getChannelLabel(colorAxisChannel));
@@ -11339,7 +11581,9 @@
           colorscale,
           opacity,
           name: `${log.name} — Lap ${lap} — ${p.name}`,
-          hovertemplate: `${mainXTitle}: %{x}<br>%{y}: %{z}<extra>${p.name}</extra>`,
+          // No "%{y}: " channel-name prefix -- that's redundant with the row's own Y-axis
+          // position/label right next to it.
+          hovertemplate: `${mainXTitle}: %{x}<br>Value: %{z}<extra>${p.name}</extra>`,
           showscale: !scaleShown,
           colorbar: !scaleShown ? {
             y: (axisInfo.domain[0] + axisInfo.domain[1]) / 2,
@@ -11358,16 +11602,21 @@
       traces.push(...computeBinnedOverlayTraces(selFiles, selectedLaps, ycols, binnedPlotAxis, binnedPlotBinWidth, channelToRef));
     }
 
-    // if shading requested and plotting by lap, compute envelope per Y channel
+    // If shading is requested, compute an envelope per Y channel spanning every lap of each
+    // currently-selected file (excluding in/out laps), regardless of which laps are
+    // currently checked/plotted -- it's meant to show the full range the rider has been
+    // performing in, so the currently-displayed laps can be compared against it, not just
+    // an envelope of themselves.
     if (shadeLaps && ycols.length>0) {
-      // for each y channel compute global union x grid across all selected files/laps
+      // for each y channel compute global union x grid across all selected files' laps
       ycols.forEach(y => {
         const allLapSeries = [];
         selFiles.forEach((log, li) => {
           const activeDataFilters = resolveDataFiltersForLog(log, enabledDataFilters);
           const lapNums = Array.from(new Set(log.meta.lapNum || [])).sort((a,b)=>a-b);
+          const inOutLapNums = getInOutLapNumbers(lapNums);
           lapNums.forEach(lap => {
-            if (!isLapSelected(selectedLaps, log.id, lap)) return;
+            if (inOutLapNums.has(lap)) return;
             let maskIdx = log.meta.lapNum.map((n,i)=> n === lap ? i : -1).filter(i=>i>=0);
             maskIdx = applyRowFiltersToMask(log, maskIdx, activeDataFilters);
             const resolvedCol = resolveChannelForLog(y, log);
@@ -11422,6 +11671,7 @@
     bindMainPlotSelectionSync();
     bindCornerStripZoom();
     positionTempProfileResizeHandle(built.tempBlockDomain, activeTempPlots.length > 0);
+    positionTimeSlipResizeHandle(built.timeSlipDomain, includeTimeSlip);
     // Plotly.react rebuilds trace objects from scratch (mode:'lines'), so re-apply the
     // invisible selection markers if the select/lasso tool was already active.
     if (selectModeActive) setSelectableMarkersEnabled(true);
@@ -11488,7 +11738,13 @@
   if (logXAxisInput) logXAxisInput.addEventListener('change', ()=> updatePlot());
   if (logYAxisInput) logYAxisInput.addEventListener('change', ()=> updatePlot());
   const shadeBox = document.getElementById('shadeLaps');
-  if (shadeBox) shadeBox.addEventListener('change', ()=> updatePlot());
+  if (shadeBox) {
+    try {
+      const savedShadeLaps = JSON.parse(localStorage.getItem(SHADE_LAPS_STORAGE_KEY) || 'null');
+      if (typeof savedShadeLaps === 'boolean') shadeBox.checked = savedShadeLaps;
+    } catch {}
+    shadeBox.addEventListener('change', () => { saveShadeLapsEnabled(); updatePlot(); });
+  }
   if (showCornersInput) showCornersInput.addEventListener('change', ()=> updatePlot());
   if (cornerShadeOpacityInput) cornerShadeOpacityInput.addEventListener('input', ()=> updatePlot());
   if (cornerSwapLRInput) cornerSwapLRInput.addEventListener('change', ()=> updatePlot());
@@ -12056,6 +12312,33 @@
       if (label) label.style.color = color;
       updatePlot();
     });
+
+    // Hovering a lap row previews that lap's traces on the plot, even when it isn't
+    // checked, and removes them when the mouse leaves. Debounced (rather than reacting to
+    // every mouseover/mouseout directly) and re-checked via the :hover pseudo-class itself
+    // -- not by tracking enter/leave targets -- so scanning quickly down the list only
+    // triggers one replot for wherever the pointer actually settles, instead of a replot
+    // per row crossed plus a flicker when moving directly between two adjacent rows.
+    const scheduleHoverPreviewUpdate = () => {
+      clearTimeout(hoverPreviewTimer);
+      hoverPreviewTimer = setTimeout(() => {
+        const hovered = lapsList.querySelector('.lap-item:hover');
+        const fileId = hovered ? hovered.getAttribute('data-id') : null;
+        const lap = hovered ? Number(hovered.getAttribute('data-lap')) : NaN;
+        const next = (fileId && Number.isFinite(lap)) ? { fileId, lap } : null;
+        const unchanged = next === hoverPreviewLap || (next && hoverPreviewLap
+          && next.fileId === hoverPreviewLap.fileId && next.lap === hoverPreviewLap.lap);
+        if (unchanged) return;
+        hoverPreviewLap = next;
+        updatePlot();
+      }, 60);
+    };
+    lapsList.addEventListener('mouseover', (ev) => {
+      if (ev.target.closest('.lap-item')) scheduleHoverPreviewUpdate();
+    });
+    lapsList.addEventListener('mouseout', (ev) => {
+      if (ev.target.closest('.lap-item')) scheduleHoverPreviewUpdate();
+    });
   }
 
   if (downloadDisplayedDataBtn) {
@@ -12164,6 +12447,7 @@
         });
       }
       if (dataFiltersEnabledInput) dataFiltersEnabledInput.checked = !saved || saved.enabled !== false;
+      syncDataFiltersEnabledVisual();
       if (dataFilters.length > 0) renderDataFiltersList();
     } catch {}
   })();
@@ -12178,6 +12462,14 @@
 
   function saveTempProfileRowsHeight() {
     try { localStorage.setItem(TEMP_PROFILE_ROWS_HEIGHT_KEY, JSON.stringify(tempProfileRowsHeightPx)); } catch {}
+  }
+
+  function saveTimeSlipHeight() {
+    try { localStorage.setItem(TIME_SLIP_HEIGHT_KEY, JSON.stringify(timeSlipHeightPx)); } catch {}
+  }
+
+  function saveShadeLapsEnabled() {
+    try { localStorage.setItem(SHADE_LAPS_STORAGE_KEY, JSON.stringify(!!(shadeBox && shadeBox.checked))); } catch {}
   }
 
   function normalizeTempProfilePlot(p) {
@@ -12219,6 +12511,10 @@
       const savedHeight = JSON.parse(localStorage.getItem(TEMP_PROFILE_ROWS_HEIGHT_KEY) || 'null');
       if (Number.isFinite(savedHeight) && savedHeight > 0) tempProfileRowsHeightPx = savedHeight;
     } catch {}
+    try {
+      const savedTimeSlipHeight = JSON.parse(localStorage.getItem(TIME_SLIP_HEIGHT_KEY) || 'null');
+      if (Number.isFinite(savedTimeSlipHeight) && savedTimeSlipHeight > 0) timeSlipHeightPx = savedTimeSlipHeight;
+    } catch {}
     if (tempProfilePlots.length > 0) renderTempProfilePlotsList();
   })();
 
@@ -12240,7 +12536,9 @@
     'startFinishLineOverrides',
     'tempProfilePlots',
     'tempProfileDefaults',
-    TEMP_PROFILE_ROWS_HEIGHT_KEY
+    TEMP_PROFILE_ROWS_HEIGHT_KEY,
+    TIME_SLIP_HEIGHT_KEY,
+    SHADE_LAPS_STORAGE_KEY
   ];
 
   function triggerJsonDownload(jsonString, filenamePrefix) {
@@ -13943,6 +14241,8 @@
   }
 
   if (dataFilterChannelSelect) dataFilterChannelSelect.addEventListener('change', updateDataFilterFormForChannel);
+  if (dataFilterModeRangeInput) dataFilterModeRangeInput.addEventListener('change', handleDataFilterModeToggleChange);
+  if (dataFilterModeDiscreteInput) dataFilterModeDiscreteInput.addEventListener('change', handleDataFilterModeToggleChange);
 
   if (dataFilterCancelBtn) dataFilterCancelBtn.addEventListener('click', resetDataFilterForm);
 
@@ -13956,7 +14256,14 @@
       const classification = computeDataFilterChannelClassification(channel);
       let filter;
 
-      if (classification && classification.kind === 'discrete') {
+      // Whichever field is actually visible reflects the user's choice, including an
+      // ambiguous numeric channel manually toggled to Range -- not just the raw
+      // auto-classification (see updateDataFilterFormForChannel).
+      const isDiscreteMode = dataFilterDiscreteField
+        ? !dataFilterDiscreteField.hidden
+        : !!(classification && classification.kind === 'discrete');
+
+      if (isDiscreteMode && classification) {
         const selected = dataFilterValuesSelect ? Array.from(dataFilterValuesSelect.selectedOptions).map(o => o.value) : [];
         if (selected.length === 0) return showDataFilterError('Select at least one value.');
         const values = selected.map((raw) => classification.allNumeric ? Number(raw) : raw);
@@ -13996,9 +14303,16 @@
         populateDataFilterChannelSelect();
         if (dataFilterChannelSelect) dataFilterChannelSelect.value = f.channel;
         updateDataFilterFormForChannel();
-        // updateDataFilterFormForChannel() reclassifies against the currently loaded data,
-        // which is what decides whether the range fields or the values multiselect is shown;
-        // restore whichever one of those it actually rendered.
+        // updateDataFilterFormForChannel() reclassifies against the currently loaded data and
+        // defaults an ambiguous numeric channel's toggle to discrete -- override that default
+        // to match what this saved filter actually is, so editing a range filter on such a
+        // channel doesn't silently flip it to discrete.
+        if (dataFilterModeToggle && !dataFilterModeToggle.hidden) {
+          const wantDiscrete = f.kind === 'discrete';
+          if (dataFilterModeRangeInput) dataFilterModeRangeInput.checked = !wantDiscrete;
+          if (dataFilterModeDiscreteInput) dataFilterModeDiscreteInput.checked = wantDiscrete;
+          handleDataFilterModeToggleChange();
+        }
         if (f.kind === 'discrete' && dataFilterValuesSelect && !dataFilterDiscreteField.hidden) {
           const wanted = new Set((f.values || []).map((v) => String(v)));
           Array.from(dataFilterValuesSelect.options).forEach((opt) => { opt.selected = wanted.has(opt.value); });
@@ -14036,6 +14350,7 @@
 
   if (dataFiltersEnabledInput) {
     dataFiltersEnabledInput.addEventListener('change', () => {
+      syncDataFiltersEnabledVisual();
       saveDataFilters();
       updatePlot();
     });
