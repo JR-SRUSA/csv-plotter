@@ -7665,11 +7665,13 @@
       const maxHeight = Math.round(viewportHeight * 0.9);
       return Math.max(minHeight, Math.min(target, maxHeight));
     }
-    // Mobile targets: main plot ~33dvh. With timeslip: main ~33dvh + slip ~25dvh. Active
-    // temp-profile plots (no drag handle on mobile to trade space with) each add their own
-    // content-sized height on top rather than squeezing into that fixed budget -- see
-    // computeMobileTempPlotsHeightPx.
-    const main = Math.max(200, Math.round(window.innerHeight * 0.33));
+    // Mobile targets: main plot ~50dvh -- a comfortable, non-squished height, since the
+    // page scrolls on mobile (only the >=981px breakpoint pins body/main to a fixed
+    // viewport-bound "everything visible, no scroll" layout; that design stays as-is on
+    // desktop). Time Slip and any active temp-profile plots (no drag handle on mobile to
+    // trade space with) each add their own height on top of the main plot's, rather than
+    // all three splitting one small fixed budget -- see computeMobileTempPlotsHeightPx.
+    const main = Math.max(280, Math.round(window.innerHeight * 0.5));
     const timeSlip = includeTimeSlip ? Math.max(160, Math.round(window.innerHeight * 0.25)) : 0;
     const tempPlotsHeight = computeMobileTempPlotsHeightPx(tempPlots);
     return main + timeSlip + tempPlotsHeight;
@@ -11585,12 +11587,14 @@
           // position/label right next to it.
           hovertemplate: `${mainXTitle}: %{x}<br>Value: %{z}<extra>${p.name}</extra>`,
           showscale: !scaleShown,
+          // No title -- redundant with the plot's own Y-axis title at this same vertical
+          // position (and on mobile, a colorbar title measurably widens the colorbar,
+          // squeezing the actual plot area on a narrow screen).
           colorbar: !scaleShown ? {
             y: (axisInfo.domain[0] + axisInfo.domain[1]) / 2,
             len: Math.max(0.05, axisInfo.domain[1] - axisInfo.domain[0]),
             yanchor: 'middle',
-            thickness: 12,
-            title: {text: p.name}
+            thickness: 12
           } : undefined
         };
         scaleShown = true;
