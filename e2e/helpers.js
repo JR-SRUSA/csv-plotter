@@ -60,8 +60,16 @@ async function clickModebarButton(page, title) {
   await page.waitForTimeout(300);
 }
 
+// Only counts real per-channel data traces (meta.channel set, same convention app.js uses
+// throughout to mark a trace as "real plotted data" vs. an overlay) -- excludes things like
+// the "Shaded area between all laps" min/max envelope, which deliberately omits meta so it's
+// excluded from selection-fit too, and would otherwise inflate this with extra 'lines'
+// entries whenever shading is on (its default since it doesn't represent line/marker mode
+// toggling the way real data traces do).
 async function getTraceModes(page) {
-  return page.evaluate(() => document.getElementById('plotDiv').data.map((t) => t.mode));
+  return page.evaluate(() => (
+    document.getElementById('plotDiv').data.filter((t) => t.meta && t.meta.channel).map((t) => t.mode)
+  ));
 }
 
 module.exports = {

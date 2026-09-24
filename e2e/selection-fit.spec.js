@@ -220,6 +220,12 @@ test.describe('large selections (regression)', () => {
 
     await loadSampleFile(page);
     await selectYChannels(page, ['Speed']);
+    // This test hardcodes trace index 0 as the real Speed data trace throughout --
+    // "Shaded area between all laps" (on by default) prepends its own min/max envelope
+    // traces ahead of it, so switch it off to keep that assumption true; irrelevant to what
+    // this test actually stresses (trace-scale, not shading).
+    await page.uncheck('#shadeLaps');
+    await page.waitForTimeout(200);
 
     const N = 100000;
     await page.evaluate((n) => {

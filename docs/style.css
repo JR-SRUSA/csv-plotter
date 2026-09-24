@@ -339,10 +339,23 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .temp-profile-resize-handle:hover,.temp-profile-resize-handle.is-dragging{background:var(--bg-hover)}
 @media (max-width:980px){.temp-profile-resize-handle{display:none}}
 
+/* Same as .temp-profile-resize-handle above, between the main plot and Time Slip
+   (positionTimeSlipResizeHandle). */
+.time-slip-resize-handle{position:absolute;left:0;right:0;height:9px;margin-top:-4px;cursor:row-resize;z-index:60;user-select:none;touch-action:none}
+.time-slip-resize-handle:hover,.time-slip-resize-handle.is-dragging{background:var(--bg-hover)}
+@media (max-width:980px){.time-slip-resize-handle{display:none}}
+
 .data-filters-controls{padding-top:6px;border-top:1px dashed var(--border-dashed)}
 .file-upsampled-indicator{display:inline-flex;align-items:center;gap:4px;font-size:0.78em;color:var(--warning-text);background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:3px;padding:1px 6px;white-space:nowrap;flex:0 0 auto}
 .data-filters-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
 .data-filter-add-btn{padding:2px 8px;font-size:0.82em}
+/* The master "Data Filters:" checkbox itself (and its label) stay full-opacity -- they're
+   the affordance for turning filtering back on -- everything filtering actually affects
+   dims to make "filters are off" obvious, without disabling interaction (still addable/
+   editable while off). */
+.data-filters-controls.is-filters-disabled #dataFiltersList,
+.data-filters-controls.is-filters-disabled #dataFilterForm,
+.data-filters-controls.is-filters-disabled .data-filter-add-btn{opacity:0.45}
 .data-filter-item{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px dashed var(--border-dashed);font-size:0.85em}
 .data-filter-item.is-disabled .data-filter-desc{opacity:0.45;text-decoration:line-through}
 .data-filter-desc{flex:1;overflow-wrap:anywhere}
@@ -355,6 +368,8 @@ main{display:flex;gap:16px;padding:16px;min-width:0;max-width:100%;overflow-x:cl
 .data-filter-field label{display:block;font-size:0.85em;margin-bottom:2px;color:var(--text-muted)}
 .data-filter-field select{width:100%}
 .data-filter-range-hint{font-size:0.82em;color:var(--text-muted);margin:-2px 0 8px}
+.data-filter-mode-toggle{display:flex;gap:14px;font-size:0.85em;margin:-2px 0 8px}
+.data-filter-mode-toggle label{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
 .data-filter-range-field{display:flex;gap:10px}
 .data-filter-range-field label{flex:1}
 .data-filter-range-field input{width:100%}
@@ -509,7 +524,8 @@ body.sidebar-collapsed .controls{display:none}
 /* Lap list styles */
 #lapsList strong{display:block;margin-bottom:6px}
 .laps-col{display:flex;flex-direction:column;gap:6px}
-.lap-item{display:flex;align-items:center;gap:8px}
+.lap-item{display:flex;align-items:center;gap:8px;border-radius:4px;padding:1px 3px;margin:-1px -3px}
+.lap-item:hover{background:var(--bg-hover)}
 .lap-toggle{display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer}
 .lap-item input[type=checkbox]{width:16px;height:16px}
 .lap-color-input{width:22px;height:22px;padding:0;border:none;background:transparent;cursor:pointer;flex:0 0 auto}
