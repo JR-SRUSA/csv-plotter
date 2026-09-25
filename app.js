@@ -13018,6 +13018,11 @@
     }
 
     refreshGoogleDriveUi();
+    // The two Google <script> tags load async and may not be ready yet at this exact point
+    // (much more likely on a slower mobile connection than on local dev) -- re-render once
+    // they actually finish, instead of leaving the UI stuck on whatever the one-time check
+    // above happened to see.
+    if (!gdrive.isApiLoaded()) gdrive.onReady(refreshGoogleDriveUi);
   }
 
   // ── Stored Files (IndexedDB) ──────────────────────────────────────────────

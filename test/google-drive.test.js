@@ -48,3 +48,49 @@ test('_buildMultipartUploadBody falls back to application/octet-stream when the 
   const text = await body.text();
   assert.ok(text.includes('Content-Type: application/octet-stream\r\n\r\nplain bytes'));
 });
+
+// ── Token persistence (sessionStorage) ──────────────────────────────────────────────────
+// restorePersistedToken() runs once, synchronously, at module load -- so a fresh sandbox per
+// case (with sessionStorage pre-seeded before the script runs) exercises it directly, without
+// needing a real OAuth flow or a browser at all.
+const TOKEN_KEY = 'csvPlotterGoogleDriveToken';
+
+function loadWithSessionStorage(initialData) {
+  const store = Object.assign({}, initialData);
+  const sessionStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; }
+  };
+  const freshSandbox = { window: {}, Blob, sessionStorage };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(__dirname, '..', 'google-drive.js'), 'utf8'),
+    freshSandbox
+  );
+  return { gdrive: freshSandbox.window.GoogleDriveIntegration, store };
+}
+
+test('a valid persisted token in sessionStorage restores as signed-in on load', () => {
+  const { gdrive: restored } = loadWithSessionStorage({
+    [TOKEN_KEY]: JSON.stringify({ accessToken: 'tok-123', expiresAt: Date.now() + 60000 })
+  });
+  assert.equal(restored.isSignedIn(), true);
+});
+
+test('an expired persisted token is not restored, and the stale entry is cleared', () => {
+  const { gdrive: restored, store } = loadWithSessionStorage({
+    [TOKEN_KEY]: JSON.stringify({ accessToken: 'tok-123', expiresAt: Date.now() - 1000 })
+  });
+  assert.equal(restored.isSignedIn(), false);
+  assert.equal(store[TOKEN_KEY], undefined);
+});
+
+test('malformed persisted JSON is ignored rather than thrown', () => {
+  const { gdrive: restored } = loadWithSessionStorage({ [TOKEN_KEY]: 'not-json{{{' });
+  assert.equal(restored.isSignedIn(), false);
+});
+
+test('with no persisted token at all, isSignedIn is false', () => {
+  const { gdrive: restored } = loadWithSessionStorage({});
+  assert.equal(restored.isSignedIn(), false);
+});

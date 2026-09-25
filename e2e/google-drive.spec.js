@@ -1,16 +1,17 @@
 // Covers the optional Google Drive integration (User panel "Google Drive" section, plus the
 // "Import from Google Drive" button near the local file picker).
 //
-// google-drive.js hardcodes its Client ID/API key as blank placeholders in this repo (real
-// ones are filled in per-deployment, see GOOGLE_DRIVE_SETUP.md), so the real module always
-// reports isConfigured() === false here -- that's exactly what the "disabled by default"
-// test below exercises. For the "connected" flows, this file substitutes google-drive.js
-// entirely with a small in-memory fake (via page.route) that implements the same public API
-// used by app.js's wiring, so those tests cover OUR integration code (does clicking a button
-// call the right gdrive function with the right arguments, does the returned content reach
-// parseFile/restoreFromBackup/importVehiclesRidersFromFile) without depending on Google's
-// real OAuth/Picker UI, which can't be driven from CI. A real account smoke test is still
-// necessary before shipping changes to google-drive.js itself -- see GOOGLE_DRIVE_SETUP.md.
+// google-drive.js's real Client ID/API key are meant to be filled in per-deployment (see
+// GOOGLE_DRIVE_SETUP.md) and this checked-out copy may or may not have real ones in it at any
+// given time (e.g. while someone's testing locally) -- so every test here substitutes
+// google-drive.js entirely with a small in-memory fake (via page.route) that implements the
+// same public API app.js's wiring calls against, rather than depending on whatever the real
+// file's constants happen to be right now. That also means these tests cover OUR integration
+// code (does clicking a button call the right gdrive function with the right arguments, does
+// the returned content reach parseFile/restoreFromBackup/importVehiclesRidersFromFile)
+// without depending on Google's real OAuth/Picker UI, which can't be driven from CI. A real
+// account smoke test is still necessary before shipping changes to google-drive.js itself --
+// see GOOGLE_DRIVE_SETUP.md.
 const { test, expect } = require('@playwright/test');
 const { loadSampleFile } = require('./helpers');
 
@@ -109,6 +110,35 @@ async function useFakeGoogleDrive(page) {
   }));
 }
 
+// Simulates a deployment with no Client ID/API key filled in (or the ESP32 build, where the
+// two Google <script> tags are stripped and `google`/`gapi` never exist) -- independent of
+// whatever google-drive.js's real constants happen to be in this checked-out copy.
+const NOT_CONFIGURED_MODULE = `
+(() => {
+  const notConfigured = () => Promise.reject(new Error('Google Drive is not configured for this deployment.'));
+  window.GoogleDriveIntegration = {
+    isConfigured: () => false,
+    isApiLoaded: () => false,
+    onReady: () => {},
+    isSignedIn: () => false,
+    signIn: notConfigured,
+    signOut: () => Promise.resolve(),
+    getSignedInUserInfo: () => Promise.resolve(null),
+    pickFile: notConfigured,
+    downloadFileContent: notConfigured,
+    ensureAppFolder: notConfigured,
+    uploadOrUpdateFile: notConfigured
+  };
+})();
+`;
+
+async function useNotConfiguredGoogleDrive(page) {
+  await page.route('**/google-drive.js', (route) => route.fulfill({
+    contentType: 'application/javascript',
+    body: NOT_CONFIGURED_MODULE
+  }));
+}
+
 async function connect(page) {
   await openPanel(page, 'User');
   await page.locator('#googleDriveConnectBtn').click();
@@ -120,6 +150,7 @@ test.describe('Google Drive: disabled by default', () => {
     const pageErrors = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
+    await useNotConfiguredGoogleDrive(page);
     await resetStorage(page);
     await page.goto('/index.html');
     await openPanel(page, 'User');
