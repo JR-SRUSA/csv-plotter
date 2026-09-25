@@ -35,6 +35,11 @@
     'https://www.googleapis.com/auth/userinfo.profile'
   ].join(' ');
   const APP_FOLDER_NAME = 'CSV Plotter';
+  // sessionStorage, not localStorage: survives a page refresh (the common "reload mid-
+  // workflow" case) but clears when the tab/browser closes, and the token is short-lived
+  // (~1hr) regardless -- isSignedIn() below still re-checks the stored expiry on every call,
+  // so a stale entry from a closed-then-reopened tab can't fake a live connection.
+  const SESSION_STORAGE_KEY = 'csvPlotterGoogleDriveToken';
 
   let tokenClient = null;
   let accessToken = null;
@@ -42,6 +47,8 @@
   let cachedUserInfo = null;
   let cachedFolderId = null;
   let pickerApiLoadPromise = null;
+  let apiReadyCallbacks = [];
+  let apiReadyPollTimer = null;
 
   function isConfigured() {
     return !!(GOOGLE_CLIENT_ID && GOOGLE_API_KEY);
@@ -56,6 +63,35 @@
       && typeof gapi !== 'undefined' && typeof gapi.load === 'function';
   }
 
+  // The two <script async defer> tags (see index.html) can finish loading well after this
+  // module's own top-level code runs -- on a fast local connection that race is basically
+  // never lost, but on a slower mobile connection it often is, which used to leave the app
+  // permanently reporting "scripts didn't load" even once they actually had. Callers (app.js)
+  // use this instead of checking isApiLoaded() only once, so the UI corrects itself as soon as
+  // the scripts are actually ready.
+  function onReady(callback) {
+    if (isApiLoaded()) { callback(); return; }
+    apiReadyCallbacks.push(callback);
+    if (!apiReadyPollTimer) {
+      const deadline = Date.now() + 15000;
+      apiReadyPollTimer = setInterval(() => {
+        if (isApiLoaded()) {
+          clearInterval(apiReadyPollTimer);
+          apiReadyPollTimer = null;
+          const callbacks = apiReadyCallbacks;
+          apiReadyCallbacks = [];
+          callbacks.forEach((cb) => { try { cb(); } catch (e) { /* a listener's own error shouldn't break the others */ } });
+        } else if (Date.now() > deadline) {
+          clearInterval(apiReadyPollTimer);
+          apiReadyPollTimer = null;
+          // Left ungathered deliberately: apiReadyCallbacks may still be called later if
+          // isApiLoaded() ever becomes true and something else calls onReady() again, but we
+          // stop polling after 15s so a truly offline/blocked case doesn't poll forever.
+        }
+      }, 200);
+    }
+  }
+
   function isSignedIn() {
     return !!accessToken && Date.now() < tokenExpiresAt;
   }
@@ -66,11 +102,36 @@
     return null;
   }
 
+  function persistToken() {
+    try {
+      if (accessToken && tokenExpiresAt) {
+        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ accessToken, expiresAt: tokenExpiresAt }));
+      } else {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    } catch (e) { /* private browsing / storage disabled -- fall back to memory-only */ }
+  }
+
+  function restorePersistedToken() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && saved.accessToken && typeof saved.expiresAt === 'number' && Date.now() < saved.expiresAt) {
+        accessToken = saved.accessToken;
+        tokenExpiresAt = saved.expiresAt;
+      } else {
+        sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    } catch (e) { /* private browsing / storage disabled -- just start signed out */ }
+  }
+
   function resetSession() {
     accessToken = null;
     tokenExpiresAt = 0;
     cachedUserInfo = null;
     cachedFolderId = null;
+    persistToken();
   }
 
   function loadGisTokenClient() {
@@ -98,6 +159,7 @@
         tokenExpiresAt = Date.now() + (((response.expires_in || 3600) - 60) * 1000);
         cachedUserInfo = null;
         cachedFolderId = null;
+        persistToken();
         resolve();
       };
       client.requestAccessToken();
@@ -261,6 +323,7 @@
   window.GoogleDriveIntegration = {
     isConfigured,
     isApiLoaded,
+    onReady,
     isSignedIn,
     signIn,
     signOut,
@@ -272,4 +335,6 @@
     // Exposed for unit tests only -- not part of the app-facing API.
     _buildMultipartUploadBody: buildMultipartUploadBody
   };
+
+  restorePersistedToken();
 })();
