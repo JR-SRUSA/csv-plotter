@@ -210,6 +210,8 @@ test.describe('Google Drive: connected flows (fake module)', () => {
 
   test('Backup All Data to Drive uploads a zip, and Restore Backup from Drive reads it back', async ({ page }) => {
     await loadSampleFile(page);
+    // A backup that carries a setting, so restoring it takes the reload path.
+    await page.evaluate(() => localStorage.setItem('csvPlotterTheme', 'dark'));
     await connect(page);
     await page.locator('#googleDriveBackupAllBtn').click();
     await expect(page.locator('#googleDriveActionsStatus')).toContainText('Backed up to Drive.');
@@ -229,9 +231,45 @@ test.describe('Google Drive: connected flows (fake module)', () => {
       window.__gdriveTest.setFileContent('restore1', { bytes: base64, mimeType });
     }, { base64: upload.base64, mimeType: upload.mimeType });
 
+    const reloaded = page.waitForEvent('framenavigated');
     await page.locator('#googleDriveRestoreAllBtn').click();
-    await expect(page.locator('#storedFilesStatus')).toContainText(/Restored/, { timeout: 15000 });
-    await expect(page.locator('#storedFilesList')).toContainText('logdata.csv');
+    await expect(page.locator('#storedFilesStatus')).toContainText('Reloading', { timeout: 15000 });
+    // Settings mean a reload is coming, so nothing is parsed before it (it would be thrown away).
+    expect(await page.locator('#filesList').textContent()).not.toContain('logdata.csv');
+
+    await reloaded;
+    await page.waitForLoadState('load');
+    await page.waitForFunction(() => {
+      const pd = document.getElementById('plotDiv');
+      return pd && Array.isArray(pd.data) && pd.data.length > 0;
+    }, { timeout: 20000 });
+    await expect(page.locator('#filesList')).toContainText('logdata.csv');
+    await expect(page.locator('#storedFilesStatus')).toContainText('Restored backup: loaded 1 file(s).');
+    expect(await page.evaluate(() => localStorage.getItem('csvPlotterTheme'))).toBe('dark');
+
+    // One-shot: a manual refresh afterwards doesn't load the restored files again.
+    await page.reload();
+    await page.waitForTimeout(500);
+    expect(await page.locator('#filesList').textContent()).not.toContain('logdata.csv');
+  });
+
+  test('restoring a backup with no settings parses the files straight away, with no reload', async ({ page }) => {
+    await page.goto('/index.html');
+    await connect(page);
+    // Legacy v1 JSON backup: files inline, no settings.
+    const legacy = JSON.stringify({ app: 'csv-plotter-backup', version: 1, files: [{ name: 'legacy-lap.csv', text: buildAimCsv() }] });
+    await page.evaluate((text) => {
+      window.__gdriveTest.setNextPick({ id: 'legacy1', name: 'legacy-backup.json' });
+      window.__gdriveTest.setFileContent('legacy1', { text, mimeType: 'application/json' });
+    }, legacy);
+
+    let navigated = false;
+    page.on('framenavigated', () => { navigated = true; });
+    await page.locator('#googleDriveRestoreAllBtn').click();
+    await expect(page.locator('#storedFilesStatus')).toContainText('Restored 1 file(s)', { timeout: 15000 });
+    await expect(page.locator('#filesList')).toContainText('legacy-lap.csv');
+    await page.waitForTimeout(1200); // past the 800 ms a reload would have taken
+    expect(navigated).toBe(false);
   });
 
   test('Backup Vehicles & Riders to Drive uploads JSON, and Restore reads it back as a new entry', async ({ page }) => {

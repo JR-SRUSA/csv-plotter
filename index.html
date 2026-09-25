@@ -415,6 +415,7 @@
         </div>
       </details>
 
+      <!-- Vehicle Sim: START (stripped by scripts/build-production.js --no-vehicle-sim) -->
       <div id="uiPanel7" class="racing-line-controls" hidden>
         <div class="vehicle-sim-controls">
           <details id="vehicleSimDetails" class="collapsible-action">
@@ -457,7 +458,7 @@
                 </label>
               </div>
               <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
-              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle and its rate, and Tire/Aero Decel to the selected logged laps, from their speed and lateral/longitudinal g, using the chosen vehicle's gearing and mass/CdA">Simulate RPM, Gear, Lean &amp; Decel for Logged Data</button>
+              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle (sim) and its rate, and Tire/Aero Decel to the selected logged laps, from their speed and lateral/longitudinal g, using the chosen vehicle's gearing and mass/CdA">Simulate RPM, Gear, Lean &amp; Decel for Logged Data</button>
               <div class="vehicle-sim-save-fields">
                 <label>Sim Name (optional)
                   <input id="vehicleSimName" type="text" placeholder="Auto: track, vehicle and time" autocomplete="off" />
@@ -472,8 +473,9 @@
           <div id="vehicleSimStatus" class="racing-line-status" aria-live="polite"></div>
         </div>
       </div>
+      <!-- Vehicle Sim: END -->
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-24k</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-25b</div>
     </section>
 
     <section class="plot">
@@ -613,6 +615,7 @@
   <script src="sessions-services.js"></script>
   <script src="sessions-ui.js"></script>
   <script src="google-drive.js"></script>
+  <script src="vehicle-sim.js"></script>
   <script src="app.js"></script>
   <script src="resize-panels.js"></script>
 </body>

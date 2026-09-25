@@ -69,7 +69,7 @@ test.describe('Simulate Vehicle: saving runs', () => {
 
     const status = await page.locator('#vehicleSimStatus').innerText();
     expect(status).toContain('added to session "Practice A"');
-    expect(status).toContain('Required Lean Angle Rate');
+    expect(status).toContain('Required Lean Angle Rate (sim)');
 
     const files = await storedFiles(page);
     const sim = files.find((f) => f.simulated);
@@ -89,7 +89,7 @@ test.describe('Simulate Vehicle: saving runs', () => {
     expect(sim.session_ids).toEqual([ids.s]);
     expect(ids.sessionFiles).toContain(sim.name);
     // The stored CSV has the data, including the new lean channels.
-    expect(sim.text.split('\n')[0]).toContain('Required Lean Angle Rate');
+    expect(sim.text.split('\n')[0]).toContain('Required Lean Angle Rate (sim)');
     expect(sim.text.split('\n').length).toBeGreaterThan(50);
   });
 
@@ -125,15 +125,15 @@ test.describe('Simulate Vehicle: saving runs', () => {
     await expect(page.locator('#filesList')).toContainText('Low grip test.csv');
   });
 
-  test('the Required Lean Angle Rate channel is plotted alongside the lean angle', async ({ page }) => {
+  test('the Required Lean Angle Rate (sim) channel is plotted alongside the lean angle', async ({ page }) => {
     test.setTimeout(120000);
     await loadSampleFile(page, PITT_LAP);
     await page.evaluate(() => { document.getElementById('vehicleSimDetails').open = true; });
     await simulate(page);
-    await selectYChannels(page, ['Required Lean Angle Rate']);
+    await selectYChannels(page, ['Required Lean Angle Rate (sim)']);
     const values = await page.evaluate(() => {
       const pd = document.getElementById('plotDiv');
-      const t = pd.data.find((tr) => tr.meta && tr.meta.channel === 'Required Lean Angle Rate' && /^Sim /.test(tr.name || ''));
+      const t = pd.data.find((tr) => tr.meta && tr.meta.channel === 'Required Lean Angle Rate (sim)' && /^Sim /.test(tr.name || ''));
       return t ? Array.from(t.y).filter(Number.isFinite) : [];
     });
     expect(values.length).toBeGreaterThan(50);
@@ -221,13 +221,13 @@ test.describe('linked simulated-channel files and the remembered session', () =>
     expect(linked.simulated).toBe(true);
     const source = (await storedFiles(page)).find((f) => f.name.startsWith('PiBoSo'));
     expect(linked.session_ids).toEqual(source.session_ids); // same session as its source
-    expect(linked.text.split('\n')[0]).toBe('Row,Required Lean Angle,Required Lean Angle Rate,Aero Decel (sim),Tire Longitudinal Grip (sim)');
+    expect(linked.text.split('\n')[0]).toBe('Row,Required Lean Angle (sim),Required Lean Angle Rate (sim),Aero Decel (sim),Tire Longitudinal Grip (sim)');
 
     // Reload and load the source log again: the channels come back by themselves.
     await page.reload();
     await loadSampleFile(page, PITT_LAP);
     await expect.poll(() => page.evaluate(() => Array.from(document.getElementById('ySelect').options).map((o) => o.value)))
-      .toContain('Required Lean Angle');
+      .toContain('Required Lean Angle (sim)');
 
     // The linked file is not offered as a log to load.
     await page.locator('#pickUploadedDataBtn').click();

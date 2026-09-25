@@ -132,12 +132,12 @@ test.describe('Simulated lap: Aero/Slope/Tire Decel and wheel/axle loads', () =>
     expect(status).toContain('Front Wheel Load (sim)');
     expect(status).toContain('Rear Wheel Load (sim)');
 
-    await selectYChannels(page, ['Front Wheel Load (sim)', 'Rear Wheel Load (sim)', 'LongAcc', 'Aero Decel (sim)', 'Required Lean Angle']);
+    await selectYChannels(page, ['Front Wheel Load (sim)', 'Rear Wheel Load (sim)', 'LongAcc', 'Aero Decel (sim)', 'Required Lean Angle (sim)']);
     const front = await channelValues(page, 'Front Wheel Load (sim)');
     const rear = await channelValues(page, 'Rear Wheel Load (sim)');
     const ax = await channelValues(page, 'LongAcc');
     const aero = await channelValues(page, 'Aero Decel (sim)');
-    const lean = await channelValues(page, 'Required Lean Angle');
+    const lean = await channelValues(page, 'Required Lean Angle (sim)');
     expect(front).not.toBeNull();
     expect(rear).not.toBeNull();
 
@@ -178,7 +178,7 @@ test.describe('Simulated lap: Aero/Slope/Tire Decel and wheel/axle loads', () =>
     expect(status).toContain('Front Axle Load (sim)');
     expect(status).toContain('Rear Axle Load (sim)');
     expect(status).not.toContain('Wheel Load');
-    expect(status).not.toContain('Required Lean Angle');
+    expect(status).not.toContain('Required Lean Angle (sim)');
 
     const cols = await page.evaluate(() => Array.from(document.getElementById('ySelect').options).map((o) => o.value));
     expect(cols).toContain('Front Axle Load (sim)');

@@ -9,6 +9,11 @@ const gzipOnly = process.argv.includes('--gzip-only');
 // does today). Useful for a distributable build that shouldn't carry your Google Cloud
 // Client ID/API key at all, or any offline target where the feature can never do anything.
 const noGoogleDrive = process.argv.includes('--no-google-drive');
+// Also independent: leaves out the Simulate Vehicle feature -- vehicle-sim.js, the
+// racing-line-calculations.js engine it drives, and the panel's markup. app.js runs without
+// them (its simHooks stay no-ops); Garmin TCX curvature falls back to its simpler local
+// estimate, since the whole-lap spline fit lives in racing-line-calculations.js.
+const noVehicleSim = process.argv.includes('--no-vehicle-sim');
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -44,6 +49,7 @@ try {
   const fitFunctionsSource = path.join(rootDir, 'fit-functions.js');
   const resizePanelsSource = path.join(rootDir, 'resize-panels.js');
   const googleDriveSource = path.join(rootDir, 'google-drive.js');
+  const vehicleSimSource = path.join(rootDir, 'vehicle-sim.js');
   // Sessions layer, in dependency order: model -> storage -> services -> ui. All four
   // must precede app.min.js in the bundle, which builds the services on startup.
   const sessionsSources = [
@@ -86,9 +92,11 @@ try {
     fs.readFileSync(fitFunctionsSource, 'utf8'),
     ...sessionsSources.map((file) => fs.readFileSync(file, 'utf8')),
     ...(noGoogleDrive ? [] : [fs.readFileSync(googleDriveSource, 'utf8')]),
+    // Must precede app.min.js: app.js looks for window.VehicleSim while it starts up.
+    ...(noVehicleSim ? [] : [fs.readFileSync(vehicleSimSource, 'utf8')]),
     fs.readFileSync(appMinified, 'utf8'),
     fs.readFileSync(resizePanelsSource, 'utf8'),
-    fs.readFileSync(racingLineCalculationsSource, 'utf8')
+    ...(noVehicleSim ? [] : [fs.readFileSync(racingLineCalculationsSource, 'utf8')])
   ];
 
   fs.writeFileSync(bundleSource, `${bundleParts.join('\n;\n')}\n`);
@@ -113,6 +121,7 @@ try {
     .replace(/\s*<!-- Sessions layer:[\s\S]*?-->\n?/g, '\n')
     .replace(/\s*<script src="sessions-(?:model|storage|services|ui)\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<script src="google-drive\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="vehicle-sim\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
 
   // The ESP32-style build has no internet access, so the two live Google CDN scripts (see
@@ -136,6 +145,12 @@ try {
     productionHtml = productionHtml
       .replace(/\s*<button id="googleDriveImportCsvBtn"[^>]*>[\s\S]*?<\/button>\n?/g, '\n')
       .replace(/\s*<!-- Google Drive: START[\s\S]*?Google Drive: END -->\n?/g, '\n');
+  }
+
+  // --no-vehicle-sim: the Simulate Vehicle panel (#uiPanel7) goes along with its module.
+  if (noVehicleSim) {
+    productionHtml = productionHtml
+      .replace(/\s*<!-- Vehicle Sim: START[\s\S]*?Vehicle Sim: END -->\n?/g, '\n');
   }
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);

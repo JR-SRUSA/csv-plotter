@@ -29,6 +29,11 @@
 
   const GOOGLE_CLIENT_ID = '196715930763-r9um19kj52ivopglbr4dplklo93i80eb.apps.googleusercontent.com'; // e.g. '1234567890-abc123.apps.googleusercontent.com' -- see GOOGLE_DRIVE_SETUP.md
   const GOOGLE_API_KEY = 'AIzaSyDjTi64usJrDA8NU8lAaH6BUxlAn6JGGS4';   // Cloud Console API key, restricted to Drive API + Picker API -- see GOOGLE_DRIVE_SETUP.md
+  // The Cloud project number -- always the digits before the first '-' of an OAuth Client
+  // ID. Under the narrow drive.file scope, Google only grants the app access to a file the
+  // user picks in the Picker if the Picker is told this (setAppId); without it, downloading
+  // any file the app didn't create itself fails with a 404.
+  const GOOGLE_APP_ID = GOOGLE_CLIENT_ID.split('-')[0];
   const GOOGLE_SCOPES = [
     'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/userinfo.email',
@@ -224,7 +229,9 @@
         .setIncludeFolders(false)
         .setSelectFolderEnabled(false);
       if (Array.isArray(mimeTypes) && mimeTypes.length) view.setMimeTypes(mimeTypes.join(','));
-      const picker = new google.picker.PickerBuilder()
+      const builder = new google.picker.PickerBuilder();
+      if (/^\d+$/.test(GOOGLE_APP_ID)) builder.setAppId(GOOGLE_APP_ID);
+      const picker = builder
         .addView(view)
         .setOAuthToken(accessToken)
         .setDeveloperKey(GOOGLE_API_KEY)
