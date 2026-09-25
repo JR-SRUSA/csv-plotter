@@ -1,3 +1,4 @@
  - [X] Download displayed as csv not working.
  - [X] Some colors for lite/ dark mode (button hover) hide themselves
  - [X] Search for all variable selects (x-axis selection, plot color, map color, source column in data import) 
+ - [ ] On mobile, if I add more than one trace, the main plot shrinks vertically, and if I go back to one it fills back in. (in my case, tire temp displayed too)
