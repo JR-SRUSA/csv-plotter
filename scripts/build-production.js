@@ -38,6 +38,7 @@ try {
   const mapCoordSource = path.join(rootDir, 'map-coordinate-utils.js');
   const fitFunctionsSource = path.join(rootDir, 'fit-functions.js');
   const resizePanelsSource = path.join(rootDir, 'resize-panels.js');
+  const googleDriveSource = path.join(rootDir, 'google-drive.js');
   // Sessions layer, in dependency order: model -> storage -> services -> ui. All four
   // must precede app.min.js in the bundle, which builds the services on startup.
   const sessionsSources = [
@@ -79,6 +80,7 @@ try {
     fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(fitFunctionsSource, 'utf8'),
     ...sessionsSources.map((file) => fs.readFileSync(file, 'utf8')),
+    fs.readFileSync(googleDriveSource, 'utf8'),
     fs.readFileSync(appMinified, 'utf8'),
     fs.readFileSync(resizePanelsSource, 'utf8'),
     fs.readFileSync(racingLineCalculationsSource, 'utf8')
@@ -89,7 +91,7 @@ try {
   writeMaybeCompressed(bundleFile, fs.readFileSync(bundleMinified), gzipOnly);
 
   const sourceHtml = fs.readFileSync(path.join(rootDir, 'index.html'), 'utf8');
-  const productionHtml = sourceHtml
+  let productionHtml = sourceHtml
     .replace(
       '<link rel="stylesheet" href="lib/leaflet.min.css" />',
       '<link rel="stylesheet" href="leaflet.css" />'
@@ -105,7 +107,19 @@ try {
     .replace(/\s*<script src="racing-line-calculations\.js"><\/script>\n?/g, '\n')
     .replace(/\s*<!-- Sessions layer:[\s\S]*?-->\n?/g, '\n')
     .replace(/\s*<script src="sessions-(?:model|storage|services|ui)\.js"><\/script>\n?/g, '\n')
+    .replace(/\s*<script src="google-drive\.js"><\/script>\n?/g, '\n')
     .replace('<script src="app.js"></script>', '<script src="gpbikes-plotter.bundle.min.js"></script>');
+
+  // The ESP32-style build has no internet access, so the two live Google CDN scripts (see
+  // index.html's <head>) would just be two requests that always fail -- strip them entirely
+  // rather than ship dead network calls. google-drive.js's own isApiLoaded() guard already
+  // handles this at runtime too, so this is belt-and-suspenders, not load-bearing.
+  if (gzipOnly) {
+    productionHtml = productionHtml
+      .replace(/\s*<!-- Loaded live from Google's CDN[\s\S]*?-->\n?/g, '\n')
+      .replace(/\s*<script async defer src="https:\/\/accounts\.google\.com\/gsi\/client"><\/script>\n?/g, '\n')
+      .replace(/\s*<script async defer src="https:\/\/apis\.google\.com\/js\/api\.js"><\/script>\n?/g, '\n');
+  }
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
   writeMaybeCompressed(distCss, fs.readFileSync(path.join(rootDir, 'style.css')), gzipOnly);

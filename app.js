@@ -60,6 +60,16 @@
   const uploadVehiclesRidersBtn = document.getElementById('uploadVehiclesRidersBtn');
   const vehiclesRidersFileInput = document.getElementById('vehiclesRidersFileInput');
   const vehiclesRidersIoStatus = document.getElementById('vehiclesRidersIoStatus');
+  const googleDriveConnectBtn = document.getElementById('googleDriveConnectBtn');
+  const googleDriveDisconnectBtn = document.getElementById('googleDriveDisconnectBtn');
+  const googleDriveStatus = document.getElementById('googleDriveStatus');
+  const googleDriveActions = document.getElementById('googleDriveActions');
+  const googleDriveActionsStatus = document.getElementById('googleDriveActionsStatus');
+  const googleDriveImportCsvBtn = document.getElementById('googleDriveImportCsvBtn');
+  const googleDriveBackupAllBtn = document.getElementById('googleDriveBackupAllBtn');
+  const googleDriveRestoreAllBtn = document.getElementById('googleDriveRestoreAllBtn');
+  const googleDriveBackupVehiclesRidersBtn = document.getElementById('googleDriveBackupVehiclesRidersBtn');
+  const googleDriveRestoreVehiclesRidersBtn = document.getElementById('googleDriveRestoreVehiclesRidersBtn');
   const authorNameInput = document.getElementById('authorNameInput');
   const authorNameStatus = document.getElementById('authorNameStatus');
   const storedFilesList = document.getElementById('storedFilesList');
@@ -12818,16 +12828,16 @@
     return copy;
   }
 
-  function downloadVehiclesRidersJson() {
-    if (!sessionsApi) { setVehiclesRidersIoStatus('Sessions storage is not available.', true); return; }
-    Promise.all([
+  // Builds the same JSON payload Download Vehicles & Riders writes to disk, without
+  // triggering the download itself -- shared by the local download path and Backup
+  // Vehicles & Riders to Drive. Resolves null when there's nothing to export.
+  function buildVehiclesRidersJsonPayload() {
+    if (!sessionsApi) return Promise.reject(new Error('Sessions storage is not available.'));
+    return Promise.all([
       sessionsApi.VehicleService.listVehicles(),
       sessionsApi.RiderService.listRiders()
     ]).then(([vehicles, riders]) => {
-      if (!vehicles.length && !riders.length) {
-        setVehiclesRidersIoStatus('No vehicles or riders to download yet.', true);
-        return;
-      }
+      if (!vehicles.length && !riders.length) return null;
       const payload = {
         app: 'csv-plotter-vehicles-riders',
         version: 1,
@@ -12835,9 +12845,20 @@
         vehicles: vehicles.map(stripRecordForExport),
         riders: riders.map(stripRecordForExport)
       };
-      triggerJsonDownload(JSON.stringify(payload, null, 2), 'csv-plotter-vehicles-riders');
-      setVehiclesRidersIoStatus(`Downloaded ${vehicles.length} vehicle${vehicles.length === 1 ? '' : 's'} `
-        + `and ${riders.length} rider${riders.length === 1 ? '' : 's'}.`);
+      return { json: JSON.stringify(payload, null, 2), vehicleCount: vehicles.length, riderCount: riders.length };
+    });
+  }
+
+  function downloadVehiclesRidersJson() {
+    if (!sessionsApi) { setVehiclesRidersIoStatus('Sessions storage is not available.', true); return; }
+    buildVehiclesRidersJsonPayload().then((result) => {
+      if (!result) {
+        setVehiclesRidersIoStatus('No vehicles or riders to download yet.', true);
+        return;
+      }
+      triggerJsonDownload(result.json, 'csv-plotter-vehicles-riders');
+      setVehiclesRidersIoStatus(`Downloaded ${result.vehicleCount} vehicle${result.vehicleCount === 1 ? '' : 's'} `
+        + `and ${result.riderCount} rider${result.riderCount === 1 ? '' : 's'}.`);
     }).catch(() => setVehiclesRidersIoStatus('Could not read vehicles/riders from storage.', true));
   }
 
@@ -12891,6 +12912,112 @@
       vehiclesRidersFileInput.value = '';
       if (file) importVehiclesRidersFromFile(file);
     });
+  }
+
+  // ── Google Drive (optional) ────────────────────────────────────────────────
+  // See google-drive.js for the actual OAuth/Picker/Drive-API plumbing -- this block only
+  // wires the User-panel buttons to it and feeds picked/downloaded content into the same
+  // parseFile/restoreFromBackup/importVehiclesRidersFromFile entry points the local
+  // file/upload pickers use, via a synthetic File wrapping the downloaded Blob.
+  if (window.GoogleDriveIntegration) {
+    const gdrive = window.GoogleDriveIntegration;
+
+    function setGoogleDriveActionsStatus(message, isError) {
+      if (!googleDriveActionsStatus) return;
+      googleDriveActionsStatus.textContent = message;
+      googleDriveActionsStatus.classList.toggle('is-error', !!isError);
+    }
+
+    function describeGoogleDriveError(err) {
+      return (err && err.message) ? err.message : 'Something went wrong talking to Google Drive.';
+    }
+
+    function refreshGoogleDriveUi() {
+      const ready = gdrive.isConfigured() && gdrive.isApiLoaded();
+      const signedIn = ready && gdrive.isSignedIn();
+      if (googleDriveConnectBtn) googleDriveConnectBtn.hidden = !ready || signedIn;
+      if (googleDriveDisconnectBtn) googleDriveDisconnectBtn.hidden = !signedIn;
+      if (googleDriveActions) googleDriveActions.hidden = !signedIn;
+      if (googleDriveImportCsvBtn) googleDriveImportCsvBtn.hidden = !signedIn;
+      if (!googleDriveStatus) return;
+      if (!ready) {
+        googleDriveStatus.textContent = gdrive.isConfigured()
+          ? "Not available (Google's scripts didn't load -- check your connection)."
+          : 'Not configured for this deployment.';
+      } else if (!signedIn) {
+        googleDriveStatus.textContent = 'Not connected.';
+      } else {
+        googleDriveStatus.textContent = 'Connected.';
+        gdrive.getSignedInUserInfo().then((info) => {
+          if (info && info.email && googleDriveStatus) googleDriveStatus.textContent = `Connected as ${info.email}.`;
+        });
+      }
+    }
+
+    if (googleDriveConnectBtn) {
+      googleDriveConnectBtn.addEventListener('click', () => {
+        setGoogleDriveActionsStatus('');
+        gdrive.signIn().then(refreshGoogleDriveUi).catch((err) => setGoogleDriveActionsStatus(describeGoogleDriveError(err), true));
+      });
+    }
+    if (googleDriveDisconnectBtn) {
+      googleDriveDisconnectBtn.addEventListener('click', () => {
+        gdrive.signOut().then(() => {
+          setGoogleDriveActionsStatus('Disconnected.');
+          refreshGoogleDriveUi();
+        });
+      });
+    }
+    if (googleDriveImportCsvBtn) {
+      googleDriveImportCsvBtn.addEventListener('click', () => {
+        gdrive.pickFile({ mimeTypes: ['text/csv', 'text/plain', 'application/vnd.ms-excel'] })
+          .then((picked) => gdrive.downloadFileContent(picked.id).then((blob) => {
+            parseFile(new File([blob], picked.name));
+          }))
+          .catch((err) => { if (err && err.message !== 'cancelled') setGoogleDriveActionsStatus(describeGoogleDriveError(err), true); });
+      });
+    }
+    if (googleDriveBackupAllBtn) {
+      googleDriveBackupAllBtn.addEventListener('click', () => {
+        setGoogleDriveActionsStatus('Backing up to Drive…');
+        buildAllDataZipBlob()
+          .then((zipBytes) => gdrive.uploadOrUpdateFile({ name: 'csv-plotter-backup.zip', blob: new Blob([zipBytes]), mimeType: 'application/zip' }))
+          .then(() => setGoogleDriveActionsStatus('Backed up to Drive.'))
+          .catch((err) => setGoogleDriveActionsStatus(describeGoogleDriveError(err), true));
+      });
+    }
+    if (googleDriveRestoreAllBtn) {
+      googleDriveRestoreAllBtn.addEventListener('click', () => {
+        gdrive.pickFile({ mimeTypes: ['application/zip'] })
+          .then((picked) => gdrive.downloadFileContent(picked.id).then((blob) => {
+            restoreFromBackup(new File([blob], picked.name, { type: 'application/zip' }));
+          }))
+          .catch((err) => { if (err && err.message !== 'cancelled') setGoogleDriveActionsStatus(describeGoogleDriveError(err), true); });
+      });
+    }
+    if (googleDriveBackupVehiclesRidersBtn) {
+      googleDriveBackupVehiclesRidersBtn.addEventListener('click', () => {
+        setGoogleDriveActionsStatus('Backing up to Drive…');
+        buildVehiclesRidersJsonPayload()
+          .then((result) => {
+            if (!result) { setGoogleDriveActionsStatus('No vehicles or riders to back up yet.', true); return null; }
+            return gdrive.uploadOrUpdateFile({ name: 'csv-plotter-vehicles-riders.json', blob: new Blob([result.json]), mimeType: 'application/json' })
+              .then(() => setGoogleDriveActionsStatus('Backed up to Drive.'));
+          })
+          .catch((err) => setGoogleDriveActionsStatus(describeGoogleDriveError(err), true));
+      });
+    }
+    if (googleDriveRestoreVehiclesRidersBtn) {
+      googleDriveRestoreVehiclesRidersBtn.addEventListener('click', () => {
+        gdrive.pickFile({ mimeTypes: ['application/json'] })
+          .then((picked) => gdrive.downloadFileContent(picked.id).then((blob) => {
+            importVehiclesRidersFromFile(new File([blob], picked.name, { type: 'application/json' }));
+          }))
+          .catch((err) => { if (err && err.message !== 'cancelled') setGoogleDriveActionsStatus(describeGoogleDriveError(err), true); });
+      });
+    }
+
+    refreshGoogleDriveUi();
   }
 
   // ── Stored Files (IndexedDB) ──────────────────────────────────────────────
@@ -13763,7 +13890,9 @@
     pickUploadedSearch.addEventListener('input', renderPickerList);
   }
 
-  function downloadAllData() {
+  // Builds the same backup ZIP bytes Download All Data writes to disk, without triggering
+  // the download itself -- shared by the local download path and Backup All Data to Drive.
+  function buildAllDataZipBlob() {
     // The sessions bundle (sessions, notes, vehicles, riders, setups, users, media refs)
     // rides along inside the same manifest, so one Download All Data still captures
     // everything. Bumped to version 3 for that key; v1/v2 backups still restore.
@@ -13771,7 +13900,7 @@
       ? sessionsApi.ExportService.exportAll(false).catch(() => null)
       : Promise.resolve(null);
 
-    Promise.all([getAllFilesFromDB(), sessionsBundlePromise]).then((results) => {
+    return Promise.all([getAllFilesFromDB(), sessionsBundlePromise]).then((results) => {
       const entries = results[0];
       const sessionsBundle = results[1];
       const settings = {};
@@ -13800,7 +13929,13 @@
         ...entries.map(e => ({ name: e.name, data: e.text || '' }))
       ];
 
-      triggerZipDownload(buildZip(zipEntries), 'csv-plotter-backup');
+      return buildZip(zipEntries);
+    });
+  }
+
+  function downloadAllData() {
+    buildAllDataZipBlob().then((zipBytes) => {
+      triggerZipDownload(zipBytes, 'csv-plotter-backup');
       setStoredFilesStatus('Backup downloaded.');
     });
   }

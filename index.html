@@ -25,6 +25,13 @@
   <script src="lib/plotly-custom.min.js"></script>
   <script src="lib/papaparse.min.js"></script>
   <script src="lib/leaflet.min.js"></script>
+  <!-- Loaded live from Google's CDN, unlike every other library here (see lib/ above) --
+       Google's OAuth/Picker SDKs can't be self-hosted (they talk to Google's live login
+       session), and they're inert offline: `google`/`gapi` just stay undefined, which is
+       exactly what google-drive.js checks for. Stripped from the offline ESP32 build --
+       see scripts/build-production.js. -->
+  <script async defer src="https://accounts.google.com/gsi/client"></script>
+  <script async defer src="https://apis.google.com/js/api.js"></script>
 </head>
 <body>
   <header>
@@ -71,6 +78,7 @@
 
       </label>
       <button id="pickUploadedDataBtn" type="button" class="pick-uploaded-btn" title="Pick from previously uploaded files">Pick Uploaded Data</button>
+      <button id="googleDriveImportCsvBtn" type="button" class="pick-uploaded-btn" title="Import a CSV from Google Drive" hidden>Import from Google Drive</button>
 
       <!-- Pick Uploaded Data modal -->
       <div id="pickUploadedModal" class="pick-uploaded-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pickUploadedTitle">
@@ -387,6 +395,21 @@
             <input type="file" id="vehiclesRidersFileInput" accept=".json,application/json" hidden />
           </div>
           <div id="vehiclesRidersIoStatus" class="settings-io-status" aria-live="polite"></div>
+
+          <hr class="settings-divider" />
+          <p class="settings-io-hint">Optional: connect a Google Drive account to import CSVs from Drive and back up/restore from Drive, in addition to this device. Uses Google's restrictive "drive.file" scope -- this app can only see files it creates itself or files you explicitly pick.</p>
+          <div class="settings-io-controls">
+            <button id="googleDriveConnectBtn" type="button" hidden>Connect Google Drive</button>
+            <button id="googleDriveDisconnectBtn" type="button" hidden>Disconnect Google Drive</button>
+          </div>
+          <div id="googleDriveStatus" class="settings-io-status" aria-live="polite">Not connected.</div>
+          <div id="googleDriveActions" class="settings-io-controls" hidden>
+            <button id="googleDriveBackupAllBtn" type="button">Backup All Data to Drive</button>
+            <button id="googleDriveRestoreAllBtn" type="button">Restore Backup from Drive</button>
+            <button id="googleDriveBackupVehiclesRidersBtn" type="button">Backup Vehicles &amp; Riders to Drive</button>
+            <button id="googleDriveRestoreVehiclesRidersBtn" type="button">Restore Vehicles &amp; Riders from Drive</button>
+          </div>
+          <div id="googleDriveActionsStatus" class="settings-io-status" aria-live="polite"></div>
         </div>
       </details>
 
@@ -448,7 +471,7 @@
         </div>
       </div>
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-24h</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-24j</div>
     </section>
 
     <section class="plot">
@@ -587,6 +610,7 @@
   <script src="sessions-storage.js"></script>
   <script src="sessions-services.js"></script>
   <script src="sessions-ui.js"></script>
+  <script src="google-drive.js"></script>
   <script src="app.js"></script>
   <script src="resize-panels.js"></script>
 </body>
