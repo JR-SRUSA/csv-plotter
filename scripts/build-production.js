@@ -4,6 +4,11 @@ const zlib = require('zlib');
 const { execSync } = require('child_process');
 
 const gzipOnly = process.argv.includes('--gzip-only');
+// Independent of --gzip-only: leaves out the Google Drive module, its two live CDN scripts,
+// and its UI entirely, rather than just letting it sit inert (as the ESP32 build otherwise
+// does today). Useful for a distributable build that shouldn't carry your Google Cloud
+// Client ID/API key at all, or any offline target where the feature can never do anything.
+const noGoogleDrive = process.argv.includes('--no-google-drive');
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -80,7 +85,7 @@ try {
     fs.readFileSync(mapCoordSource, 'utf8'),
     fs.readFileSync(fitFunctionsSource, 'utf8'),
     ...sessionsSources.map((file) => fs.readFileSync(file, 'utf8')),
-    fs.readFileSync(googleDriveSource, 'utf8'),
+    ...(noGoogleDrive ? [] : [fs.readFileSync(googleDriveSource, 'utf8')]),
     fs.readFileSync(appMinified, 'utf8'),
     fs.readFileSync(resizePanelsSource, 'utf8'),
     fs.readFileSync(racingLineCalculationsSource, 'utf8')
@@ -113,12 +118,24 @@ try {
   // The ESP32-style build has no internet access, so the two live Google CDN scripts (see
   // index.html's <head>) would just be two requests that always fail -- strip them entirely
   // rather than ship dead network calls. google-drive.js's own isApiLoaded() guard already
-  // handles this at runtime too, so this is belt-and-suspenders, not load-bearing.
-  if (gzipOnly) {
+  // handles this at runtime too, so this is belt-and-suspenders, not load-bearing. Also
+  // stripped whenever --no-google-drive is passed on its own, independent of --gzip-only.
+  if (gzipOnly || noGoogleDrive) {
     productionHtml = productionHtml
       .replace(/\s*<!-- Loaded live from Google's CDN[\s\S]*?-->\n?/g, '\n')
       .replace(/\s*<script async defer src="https:\/\/accounts\.google\.com\/gsi\/client"><\/script>\n?/g, '\n')
       .replace(/\s*<script async defer src="https:\/\/apis\.google\.com\/js\/api\.js"><\/script>\n?/g, '\n');
+  }
+
+  // --no-google-drive goes further than the ESP32 case above: rather than just leaving the
+  // (harmless, hidden) Google Drive UI and module inert, it removes the UI markup, the
+  // "Import from Google Drive" button, and the module itself (see the bundleParts filter
+  // above) entirely -- e.g. for a distributable build that shouldn't carry your Google Cloud
+  // Client ID/API key at all.
+  if (noGoogleDrive) {
+    productionHtml = productionHtml
+      .replace(/\s*<button id="googleDriveImportCsvBtn"[^>]*>[\s\S]*?<\/button>\n?/g, '\n')
+      .replace(/\s*<!-- Google Drive: START[\s\S]*?Google Drive: END -->\n?/g, '\n');
   }
 
   writeMaybeCompressed(distHtml, Buffer.from(productionHtml, 'utf8'), gzipOnly);
