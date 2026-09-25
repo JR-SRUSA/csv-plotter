@@ -60,9 +60,21 @@ only if you specifically need it, and expect to update it if the codespace is re
 ## 5. Create an API key
 
 **APIs & Services → Credentials → Create Credentials → API key**:
-- **Application restrictions → HTTP referrers**: list the same origins as step 4.
+- **Application restrictions → Websites**: list the same origins as step 4, in the `/*`
+  form so every page path matches, e.g. `https://<username>.github.io/*` and
+  `http://localhost:8000/*`.
 - **API restrictions → Restrict key**: limit it to "Google Drive API" and "Google Picker API"
   only.
+
+Restriction changes can take ~5 minutes to apply. The Google Picker (Import from Google
+Drive, Restore … from Drive) is the only part of the app that uses this key. Connect and
+Backup … to Drive use only the OAuth sign-in. So a missing referrer or API restriction shows
+up only when the Picker opens, as "The API developer key is invalid."
+
+Expect a "Potential breakage due to active usage" warning listing Google Maps APIs when you
+save restrictions on a key that's already in a public repo. Bots scrape `AIza…` keys from
+GitHub and probe them against Maps. The app doesn't use any of those APIs, so restrict them
+away.
 
 ## 6. Wire it into the app
 

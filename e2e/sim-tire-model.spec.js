@@ -94,7 +94,7 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     const dialog = page.locator('.sim-info-dialog');
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText('About the simulation (motorcycle)');
-    await expect(dialog).toContainText('Required Lean Angle');
+    await expect(dialog).toContainText('Required Lean Angle (sim)');
     await expect(dialog).toContainText('tread crown radius = tire width / 2 (70 mm for this tire)');
     await expect(dialog).toContainText('RPM (sim)');
     await expect(dialog).toContainText('Aero Decel (sim)');
@@ -124,7 +124,7 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await page.locator('#vehicleSimulateBtn').click();
     await expect.poll(() => page.locator('#vehicleSimStatus').innerText(), { timeout: 90000 }).toMatch(/Saved as/);
     const status = await page.locator('#vehicleSimStatus').innerText();
-    expect(status).not.toContain('Required Lean Angle');
+    expect(status).not.toContain('Required Lean Angle (sim)');
     expect(status).toContain('Gear');
   });
 
@@ -136,7 +136,7 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     await page.locator('#vehicleSimulateBtn').click();
     await expect.poll(() => page.locator('#vehicleSimStatus').innerText(), { timeout: 90000 }).toMatch(/Saved as/);
     const status = await page.locator('#vehicleSimStatus').innerText();
-    expect(status).toContain('Required Lean Angle');
+    expect(status).toContain('Required Lean Angle (sim)');
   });
 
   test('RPM & Gear for logged data adds channels, with a higher RPM through corners than the car (no lean) setting', async ({ page }) => {
@@ -150,7 +150,7 @@ test.describe('simulation tire/lean model and vehicle class', () => {
     // The sample log has LongAcc, so Aero/Tire Decel are added alongside RPM/Gear/lean --
     // checked individually rather than as one long literal, since their order in the
     // status line just follows the order each block happens to run in.
-    for (const chan of ['RPM (sim)', 'Gear (sim)', 'Required Lean Angle', 'Required Lean Angle Rate', 'Aero Decel (sim)', 'Tire Longitudinal Grip (sim)']) {
+    for (const chan of ['RPM (sim)', 'Gear (sim)', 'Required Lean Angle (sim)', 'Required Lean Angle Rate (sim)', 'Aero Decel (sim)', 'Tire Longitudinal Grip (sim)']) {
       await expect(status).toContainText(chan);
     }
     await expect(status).toContainText('to 1 log');
@@ -237,26 +237,26 @@ test.describe('simulated lap map data and logged-data lean', () => {
     await openSim(page);
     await pick(page, 'R3Tire');
     await page.locator('#vehicleSimLoggedBtn').click();
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle Rate');
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle Rate (sim)');
     const check = await page.evaluate(() => {
       const opts = Array.from(document.getElementById('ySelect').options).map((o) => o.value);
-      return { hasLean: opts.includes('Required Lean Angle'), hasRate: opts.includes('Required Lean Angle Rate') };
+      return { hasLean: opts.includes('Required Lean Angle (sim)'), hasRate: opts.includes('Required Lean Angle Rate (sim)') };
     });
     expect(check.hasLean).toBe(true);
     expect(check.hasRate).toBe(true);
     await page.evaluate(() => {
       const sel = document.getElementById('ySelect');
-      Array.from(sel.options).forEach((o) => { o.selected = o.value === 'Required Lean Angle' || o.value === 'LatAcc'; });
+      Array.from(sel.options).forEach((o) => { o.selected = o.value === 'Required Lean Angle (sim)' || o.value === 'LatAcc'; });
       sel.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await expect.poll(() => page.evaluate(() => {
       const pd = document.getElementById('plotDiv');
-      return pd.data.some((t) => t.meta && t.meta.channel === 'Required Lean Angle');
+      return pd.data.some((t) => t.meta && t.meta.channel === 'Required Lean Angle (sim)');
     })).toBe(true);
     const ok = await page.evaluate(() => {
       const pd = document.getElementById('plotDiv');
-      const lean = pd.data.find((t) => t.meta && t.meta.channel === 'Required Lean Angle');
-      const lat = pd.data.find((t) => t.meta && t.meta.channel === 'LatAcc' && t.name === lean.name.replace('Required Lean Angle', 'LatAcc'));
+      const lean = pd.data.find((t) => t.meta && t.meta.channel === 'Required Lean Angle (sim)');
+      const lat = pd.data.find((t) => t.meta && t.meta.channel === 'LatAcc' && t.name === lean.name.replace('Required Lean Angle (sim)', 'LatAcc'));
       if (!lat) return { found: false };
       let worst = 0;
       for (let i = 0; i < lean.y.length; i += 25) {
@@ -273,7 +273,7 @@ test.describe('simulated lap map data and logged-data lean', () => {
     await openSim(page);
     await page.locator('#vehicleSimLoggedBtn').click(); // manual, no vehicle, motorcycle (default class)
     const status = page.locator('#vehicleSimStatus');
-    await expect(status).toContainText('Required Lean Angle');
+    await expect(status).toContainText('Required Lean Angle (sim)');
     await expect(status).toContainText('Aero Decel (sim)');
     await expect(status).toContainText('Tire Longitudinal Grip (sim)');
     await expect(status).toContainText('need a vehicle');
@@ -282,7 +282,7 @@ test.describe('simulated lap map data and logged-data lean', () => {
     await page.locator('#vehicleSimLoggedBtn').click();
     await expect(status).toContainText('Aero Decel (sim)');
     await expect(status).toContainText('Tire Longitudinal Grip (sim)');
-    await expect(status).not.toContainText('Required Lean Angle');
+    await expect(status).not.toContainText('Required Lean Angle (sim)');
   });
 
   test('Aero Decel and Tire Longitudinal Grip are computed correctly from Speed and LongAcc, with no vehicle picked', async ({ page }) => {

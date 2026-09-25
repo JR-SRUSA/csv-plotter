@@ -109,17 +109,17 @@ test.describe('Rider editor: Weight Transfer fields', () => {
     // Baseline: no rider.
     await page.locator('#vehicleSimulateBtn').click();
     await expect.poll(() => page.locator('#vehicleSimStatus').innerText(), { timeout: 90000 }).toMatch(/Saved as/);
-    await selectYChannels(page, ['Front Wheel Load (sim)', 'LongAcc', 'Required Lean Angle']);
+    await selectYChannels(page, ['Front Wheel Load (sim)', 'LongAcc', 'Required Lean Angle (sim)']);
     const baselineFront = await channelValues(page, 'Front Wheel Load (sim)');
     const ax = await channelValues(page, 'LongAcc');
-    const lean = await channelValues(page, 'Required Lean Angle');
+    const lean = await channelValues(page, 'Required Lean Angle (sim)');
 
     // With the rider: braking points (ax < 0) should show a bigger front-load swing since
     // the effective CG height is higher there (0.6 + 0.3), same mass and geometry otherwise.
     await pick(page, '#vehicleSimRiderSelect', 'Sits Up Hard');
     await page.locator('#vehicleSimulateBtn').click();
     await expect.poll(() => page.locator('#vehicleSimStatus').innerText(), { timeout: 90000 }).toMatch(/Saved as/);
-    await selectYChannels(page, ['Front Wheel Load (sim)', 'LongAcc', 'Required Lean Angle']);
+    await selectYChannels(page, ['Front Wheel Load (sim)', 'LongAcc', 'Required Lean Angle (sim)']);
     const riderFront = await channelValues(page, 'Front Wheel Load (sim)');
 
     let brakingChecked = 0;

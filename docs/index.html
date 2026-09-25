@@ -393,6 +393,7 @@
           </div>
           <div id="vehiclesRidersIoStatus" class="settings-io-status" aria-live="polite"></div>
 
+          <!-- Google Drive: START (stripped by scripts/build-production.js --no-google-drive) -->
           <hr class="settings-divider" />
           <p class="settings-io-hint">Optional: connect a Google Drive account to import CSVs from Drive and back up/restore from Drive, in addition to this device. Uses Google's restrictive "drive.file" scope -- this app can only see files it creates itself or files you explicitly pick.</p>
           <div class="settings-io-controls">
@@ -407,9 +408,11 @@
             <button id="googleDriveRestoreVehiclesRidersBtn" type="button">Restore Vehicles &amp; Riders from Drive</button>
           </div>
           <div id="googleDriveActionsStatus" class="settings-io-status" aria-live="polite"></div>
+          <!-- Google Drive: END -->
         </div>
       </details>
 
+      <!-- Vehicle Sim: START (stripped by scripts/build-production.js --no-vehicle-sim) -->
       <div id="uiPanel7" class="racing-line-controls" hidden>
         <div class="vehicle-sim-controls">
           <details id="vehicleSimDetails" class="collapsible-action">
@@ -452,7 +455,7 @@
                 </label>
               </div>
               <label><input type="checkbox" id="vehicleSimUseElevation" checked /> Include Elevation/Altitude Effect</label>
-              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle and its rate, and Tire/Aero Decel to the selected logged laps, from their speed and lateral/longitudinal g, using the chosen vehicle's gearing and mass/CdA">Simulate RPM, Gear, Lean &amp; Decel for Logged Data</button>
+              <button type="button" id="vehicleSimLoggedBtn" class="vehicle-sim-rename-btn" title="Adds RPM (sim), Gear (sim), Required Lean Angle (sim) and its rate, and Tire/Aero Decel to the selected logged laps, from their speed and lateral/longitudinal g, using the chosen vehicle's gearing and mass/CdA">Simulate RPM, Gear, Lean &amp; Decel for Logged Data</button>
               <div class="vehicle-sim-save-fields">
                 <label>Sim Name (optional)
                   <input id="vehicleSimName" type="text" placeholder="Auto: track, vehicle and time" autocomplete="off" />
@@ -467,8 +470,9 @@
           <div id="vehicleSimStatus" class="racing-line-status" aria-live="polite"></div>
         </div>
       </div>
+      <!-- Vehicle Sim: END -->
 
-  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-24k</div>
+  <div id="appVersionLabel" class="controls-version" aria-label="Application version">Version 2026-09-25b</div>
     </section>
 
     <section class="plot">

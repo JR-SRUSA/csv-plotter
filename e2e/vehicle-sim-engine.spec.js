@@ -329,14 +329,14 @@ test.describe('Simulate Vehicle: vehicle/rider selection and the engine-curve po
     await expect(page.locator('.session-modal-dialog')).toContainText('Overall diameter: 605 mm'); // 1.9 / pi
   });
 
-  test('the simulated lap includes a Required Lean Angle channel equal to atan(lateral g)', async ({ page }) => {
+  test('the simulated lap includes a Required Lean Angle (sim) channel equal to atan(lateral g)', async ({ page }) => {
     test.setTimeout(120000);
     await loadSampleFile(page, PITT_LAP);
     await openSimPanel(page);
     await pickVehicle(page, 'R3Good');
     await simulate(page);
-    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle');
-    const lean = await racingLineChannelValues(page, 'Required Lean Angle');
+    await expect(page.locator('#vehicleSimStatus')).toContainText('Required Lean Angle (sim)');
+    const lean = await racingLineChannelValues(page, 'Required Lean Angle (sim)');
     expect(lean.length).toBeGreaterThan(10);
     expect(Math.max(...lean.map(Math.abs))).toBeGreaterThan(20);
     expect(Math.max(...lean.map(Math.abs))).toBeLessThan(65);
